@@ -18,6 +18,8 @@
 //   $F17C long  read: last effective address the coprocessor model received //
 //   $F180 word  coprocessor save CIR format word (read/write)               //
 //   $F184 word  read: last control CIR value; $F188/$F18C: operands 0 and 1  //
+//   $F190 byte  console: the byte is printed                                //
+//   $F1A0/$F1A4 long  benchmark runs and clocks; $F1A8 word: print report   //
 // Memory map (24-bit decode):                                               //
 //   $000000-$0FFFFF  RAM, 32-bit synchronous, burst                          //
 //   $200000-$2FFFFF  RAM alias, 16-bit asynchronous                          //
@@ -234,6 +236,20 @@ task capture_write;
 	end
 endtask
 reg [15:0] fail_num = 0;
+// benchmark result: runs and clocks from the program, converted here for a
+// clock frequency of +mhz=<n> (default 50); 1757 Dhrystones/s = 1 DMIPS
+reg [31:0] bench_runs = 0, bench_clks = 0;
+task bench_report;
+	real mhz, dps;
+	integer m;
+	begin
+		if (!$value$plusargs("mhz=%d", m)) m = 50;
+		mhz = m;
+		dps = $itor(bench_runs) * mhz * 1.0e6 / $itor(bench_clks);
+		$display("BENCH runs=%0d clocks=%0d clocks/run=%0.1f  at %0d MHz: %0.0f Dhrystones/s = %0.2f DMIPS (%0.3f DMIPS/MHz)",
+		         bench_runs, bench_clks, $itor(bench_clks) / $itor(bench_runs), m, dps, dps / 1757.0, dps / 1757.0 / mhz);
+	end
+endtask
 reg        done = 0;
 task reg_write;
 	input [7:0] off; input [7:0] v;
@@ -260,6 +276,16 @@ task reg_write;
 			8'h33: berr_addr[7:0] = v;
 			8'h41: wait_states = v;
 			8'h71: begin mmudis_n = ~v[0]; cdis_n = ~v[1]; end
+			8'h90: $write("%c", v);                       // console
+			8'hA0: bench_runs[31:24] = v;
+			8'hA1: bench_runs[23:16] = v;
+			8'hA2: bench_runs[15:8] = v;
+			8'hA3: bench_runs[7:0] = v;
+			8'hA4: bench_clks[31:24] = v;
+			8'hA5: bench_clks[23:16] = v;
+			8'hA6: bench_clks[15:8] = v;
+			8'hA7: bench_clks[7:0] = v;
+			8'hA9: bench_report;
 			8'h80: cp_save_fmt[15:8] = v;
 			8'h81: cp_save_fmt[7:0] = v;
 			default: ;
@@ -351,7 +377,7 @@ always @(posedge clk) begin
 end
 
 initial begin
-	#200000000;
+	if ($value$plusargs("maxclk=%d", w)) #(20 * w); else #200000000;
 	$display("TEST FAILED: timeout at pc %08x state %0d", dbg_pc, dbg_state);
 	$finish;
 end

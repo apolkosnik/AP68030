@@ -74,6 +74,20 @@ constraint, ports as virtual pins with a 2 ns budget) and prints the Fmax
 summary. Quartus Prime 17.0 reports Fmax 53.0 MHz (slow 1100 mV 100 C
 corner, slack +0.57 ns at 50 MHz), 17.0k ALMs and 9.5k registers.
 
+Dhrystone 2.1 (`tb/c`, compiled with vbcc `-O2 -speed -cpu=68030`, caches
+on, 2000 runs, checked against the published final values) runs in 2656
+clocks per Dhrystone on the synchronous burst port: **18,825 Dhrystones/s =
+10.7 DMIPS at 50 MHz (0.214 DMIPS/MHz)**. With two wait states on every
+port it is 3019 clocks, 9.4 DMIPS. `run_tests.sh` builds and runs it when
+vbcc is installed (`VBCC=/opt/amiga-cc/vbcc` by default).
+
+| FPGA resource (Cyclone V) | used |
+|---|---|
+| ALMs | 17,041 (41 %) |
+| registers | 9,548 |
+| block RAM | 5 M10K, 4,096 bits |
+| DSP blocks | 4 |
+
 On the self-test programs (cache hits, synchronous memory, no wait states)
 the core runs at 5.5 clocks per instruction on the integer suite and 6.1
 to 6.6 on the exception and MMU suites, which are dominated by long

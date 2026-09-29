@@ -23,6 +23,24 @@ for t in $PROGS $HALTPROGS; do
 	python3 bin2hex.py "$WORK/$t.bin" "$WORK/$t.hex"
 done
 
+# compiled C programs (tb/c): vbcc for the 68030, linked flat behind
+# tb/c/start.s (vectors at 0, code from $400) by vlink.  dhry is Dhrystone
+# 2.1; it checks its final values and reports clocks, Dhrystones/s and DMIPS.
+VBCC=${VBCC:-/opt/amiga-cc/vbcc}
+export VBCC
+CPROGS=""
+if [ -x "$VBCC/bin/vc" ]; then
+	VC="$VBCC/bin/vc"; VLINK="$VBCC/bin/vlink"
+	$VASM -quiet -Fhunk -m68030 -o "$WORK/start.o" c/start.s
+	$VC +aos68k -c -O2 -speed -cpu=68030 -DTIME -o "$WORK/dhry_1.o" c/dhry_1.c > "$WORK/dhry.compile.log" 2>&1
+	$VC +aos68k -c -O2 -speed -cpu=68030 -DTIME -o "$WORK/dhry_2.o" c/dhry_2.c >> "$WORK/dhry.compile.log" 2>&1
+	$VLINK -brawbin1 -o "$WORK/dhry.bin" "$WORK/start.o" "$WORK/dhry_1.o" "$WORK/dhry_2.o"
+	python3 bin2hex.py "$WORK/dhry.bin" "$WORK/dhry.hex"
+	CPROGS="dhry"
+else
+	echo "  (vbcc not found at $VBCC: compiled C programs skipped)"
+fi
+
 VFLAGS="--binary --timing -Wno-fatal -Wno-lint -Wno-style -Wno-WIDTH -Wno-TIMESCALEMOD -Wno-CASEINCOMPLETE \
         --output-split 20000 --output-split-cfuncs 500 -CFLAGS -O1 -I$RTL -I$RTL/core"
 
@@ -58,6 +76,11 @@ for t in $PROGS; do
 	[ -f "$WORK/$t.hex" ] || continue
 	run "$t" "$WORK/obj_prog/tb_prog" "+prog=$WORK/$t.hex"
 	run "${t}_waits" "$WORK/obj_prog/tb_prog" "+prog=$WORK/$t.hex" +waits=2
+done
+for t in $CPROGS; do
+	run "$t" "$WORK/obj_prog/tb_prog" "+prog=$WORK/$t.hex" +maxclk=20000000
+	run "${t}_waits" "$WORK/obj_prog/tb_prog" "+prog=$WORK/$t.hex" +maxclk=40000000 +waits=2
+	grep -h "^BENCH" "$WORK/$t.log" "$WORK/${t}_waits.log" | sed 's/^/        /'
 done
 for t in $HALTPROGS; do
 	[ -f "$WORK/$t.hex" ] || continue
