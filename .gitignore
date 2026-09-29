@@ -1,0 +1,9 @@
+# simulation and synthesis outputs
+build/
+tb/build/
+syn/db/
+syn/incremental_db/
+syn/output/
+syn/*.log
+syn/quartus.pid
+syn/worst_*.txt

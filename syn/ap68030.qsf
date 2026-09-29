@@ -1,0 +1,26 @@
+# AP68030 - Quartus Prime project for the timing check (Cyclone V, 50 MHz)
+set_global_assignment -name FAMILY "Cyclone V"
+set_global_assignment -name DEVICE 5CSEBA6U23I7
+set_global_assignment -name TOP_LEVEL_ENTITY ap030_top
+set_global_assignment -name PROJECT_OUTPUT_DIRECTORY output
+set_global_assignment -name VERILOG_INPUT_VERSION SYSTEMVERILOG_2005
+set_global_assignment -name SEARCH_PATH ../rtl
+set_global_assignment -name SEARCH_PATH ../rtl/core
+set_global_assignment -name VERILOG_FILE ../rtl/ap030_top.v
+set_global_assignment -name VERILOG_FILE ../rtl/ap030_core.v
+set_global_assignment -name VERILOG_FILE ../rtl/ap030_memsys.v
+set_global_assignment -name VERILOG_FILE ../rtl/ap030_mmu.v
+set_global_assignment -name VERILOG_FILE ../rtl/ap030_cache.v
+set_global_assignment -name VERILOG_FILE ../rtl/ap030_bus.v
+set_global_assignment -name VERILOG_FILE ../rtl/ap030_alu.v
+set_global_assignment -name VERILOG_FILE ../rtl/ap030_muldiv.v
+set_global_assignment -name VERILOG_FILE ../rtl/ap030_regfile.v
+set_global_assignment -name SDC_FILE ap68030.sdc
+set_global_assignment -name OPTIMIZATION_MODE "HIGH PERFORMANCE EFFORT"
+set_global_assignment -name NUM_PARALLEL_PROCESSORS 8
+# the pins are not assigned: this project only measures the core
+set_global_assignment -name ERROR_CHECK_FREQUENCY_DIVISOR 256
+
+set_global_assignment -name LAST_QUARTUS_VERSION "17.0.2 Standard Edition"# timing check only: no pin assignments, every port but the clock is virtual
+set_instance_assignment -name VIRTUAL_PIN ON -to *
+set_instance_assignment -name VIRTUAL_PIN OFF -to clk
