@@ -35,7 +35,12 @@ S_EXC3: begin
 		state <= S_EXC0;
 	end else state <= S_EXC2;
 end
-S_EXC2: rd_sd(vbr + {22'd0, exc_vec, 2'b00}, `SZ_L, DW_TMP, S_EXC4);
+S_EXC2: begin
+	rd_sd(vbr + {22'd0, exc_vec, 2'b00}, `SZ_L, DW_TMP, S_EXC4);
+	// system option: the level 7 autovector is always read from the bus, so
+	// an external overlay of it (an Amiga freezer cartridge) is never missed
+	if (nmi_vec_nocache && exc_vec == `VEC_AUTOVEC + 8'd7) d_nocache <= 1'b1;
+end
 S_EXC4: begin
 	exc_active <= 1'b0; exc_is_irq <= 1'b0; exc_throw <= 1'b0; exc_busfault <= 1'b0;
 	if (trace_after_exc) begin trace_pend <= 1'b1; trace_after_exc <= 1'b0; end
@@ -43,7 +48,12 @@ S_EXC4: begin
 	if (tmp[0]) begin
 		// odd vector: address error (a double fault while processing a bus fault)
 		if (exc_busfault) begin halted_r <= 1'b1; state <= S_HALT; end
-		else exc_addr_err(tmp);
+		else begin
+			exc_addr_err(tmp);
+			// the frame's PC is the vector offset of the exception being
+			// processed (WinUAE cputest doexcstack, 68020+; 68030 corpus v24)
+			exc_pc <= {22'd0, exc_vec, 2'b00};
+		end
 	end else begin
 		flush_req = 1'b1; flush_pc = tmp;
 		state <= S_FETCH;
@@ -59,6 +69,9 @@ S_RTE2: begin
 			sr <= tmp[31:16] & `SR_MASK;
 			wreg(4'd15, rf_c + 32'd8);
 			go_pc({tmp[15:0], tmp2[31:16]});
+			// an odd PC faults after the SR is restored: the address error
+			// frame holds the SR from the RTE frame (WinUAE 68030 AE corpus)
+			if (tmp2[16]) exc_sr <= tmp[31:16] & `SR_MASK;
 		end
 		`FMT_THROWAWAY: begin
 			// SR from the frame, then RTE again on the (possibly different) stack
@@ -70,6 +83,9 @@ S_RTE2: begin
 			sr <= tmp[31:16] & `SR_MASK;
 			wreg(4'd15, rf_c + 32'd12);
 			go_pc({tmp[15:0], tmp2[31:16]});
+			// an odd PC faults after the SR is restored: the address error
+			// frame holds the SR from the RTE frame (WinUAE 68030 AE corpus)
+			if (tmp2[16]) exc_sr <= tmp[31:16] & `SR_MASK;
 		end
 		`FMT_CPMID, `FMT_SHORTBUS, `FMT_LONGBUS: begin
 			fr[0] <= tmp; fr[1] <= tmp2;
@@ -77,7 +93,13 @@ S_RTE2: begin
 			exc_busfault <= 1'b1;        // a fault while loading internal state halts (UM 8.1.13)
 			state <= S_RTE3;
 		end
-		default: exc_pre(`VEC_FMTERR);
+		default: begin
+			// the MC68030 clears T1/T0 before the format error: its frame
+			// stacks SR without them (WinUAE gencpu, 68030 corpus)
+			exc_pre(`VEC_FMTERR);
+			exc_sr <= {2'b00, sr[13:0]};
+			sr[15:14] <= 2'b00;
+		end
 	endcase
 end
 S_RTE3: begin
@@ -90,6 +112,8 @@ S_RTE4: begin : rte4
 	exc_busfault <= 1'b0;
 	if (fmt == `FMT_LONGBUS && frw[6'd27][15:12] != 4'h0) begin
 		exc_pre(`VEC_FMTERR);            // version mismatch (UM 8.1.8)
+		exc_sr <= {2'b00, sr[13:0]};     // T1/T0 cleared, as for any format error
+		sr[15:14] <= 2'b00;
 	end else begin
 		sr <= fr_word(6'd0) & `SR_MASK;
 		wreg(4'd15, rf_c + {frame_lw(fmt), 2'b00});
@@ -128,6 +152,7 @@ S_RTE4: begin : rte4
 				mm_mask <= fr_word(6'd33);
 				tmp3 <= {16'd0, fr_word(6'd34)};
 				{ea_sel, imm_tgt, dw_reg} <= frw[6'd35][15:10]; ea_ret <= frw[6'd35][7:0];
+				ea_pc <= frw[6'd35][8];
 				exc_got <= frw[6'd36][15:13]; imm_ret <= frw[6'd36][7:0];
 				exc_partial <= fr_long(6'd37);
 				ext <= fr_word(6'd39);
@@ -149,6 +174,7 @@ S_RTE_PIPE: begin : rte_pipe
 	g_alu <= dc_alu; g_size <= dc_size; g_srck <= dc_srck; g_dstk <= dc_dstk; g_dreg <= dc_dreg; g_sreg <= dc_sreg;
 	g_flags <= dc_flags; g_wb <= dc_wb; g_sext <= dc_sext; g_bitop <= dc_bitop; g_shift <= dc_shift;
 	g_move_mem <= dc_move_mem; g_dstrd <= dc_dstrd;
+	nx <= dc_first;
 	if (fmt == `FMT_CPMID) begin
 		flush_req = 1'b1; flush_pc = exc_pc;
 		state <= S_CP1;
@@ -256,6 +282,15 @@ S_MULDIV0: begin : muldiv0
 	sgn = long ? ext[11] : ir[8];
 	if (is_div && ((long ? src : {16'd0, src[15:0]}) == 32'd0)) begin
 		state <= S_DIVZ;                    // UM 8.1.4: divide by zero
+		// the flags are undefined; the MC68020/030 values (WinUAE
+		// divbyzero_special, divsl_divbyzero, divul_divbyzero)
+		if (!long) begin
+			if (sgn) sr[3:0] <= 4'b0100;
+			else sr[3:0] <= {dst[31], dst[31:16] == 16'd0, 1'b1, 1'b0};
+		end else if (sgn) begin
+			sr[3] <= 1'b0; sr[2] <= 1'b1; sr[0] <= 1'b0;     // V is not changed
+		end else
+			sr[3:0] <= {rf_a[31], rf_a == 32'd0, 1'b1, 1'b0};
 	end else begin
 		md_start <= 1'b1;
 		md_div <= is_div;
@@ -276,6 +311,10 @@ end
 S_MULDIVW: if (md_done) state <= S_MULDIV1;
 S_MULDIV1: begin : muldiv1
 	reg long, is_div, sgn;
+	reg [31:0] aquot;
+	reg abs_ovf;
+	aquot = md_rlo[31] ? (32'd0 - md_rlo) : md_rlo;
+	abs_ovf = md_ovf || (aquot[31:16] != 16'd0);
 	long = (ir[15:12] == 4'h4);
 	is_div = long ? ir[6] : (ir[15:12] == 4'h8);
 	sgn = long ? ext[11] : ir[8];
@@ -283,7 +322,18 @@ S_MULDIV1: begin : muldiv1
 		if (is_div) begin
 			// word divide: 16-bit quotient range check
 			if (md_ovf || (sgn ? (md_rlo[31:16] != {16{md_rlo[15]}}) : (md_rlo[31:16] != 16'd0))) begin
-				sr[3] <= 1'b1; sr[2] <= 1'b0; sr[1] <= 1'b1; sr[0] <= 1'b0;   // V set, N set, Z clear (UM/WinUAE 020+)
+				// overflow: V set, the rest undefined; the MC68020/030 values
+				// (WinUAE setdivuflags/setdivsflags)
+				if (!sgn) begin
+					sr[1] <= 1'b1;                       // Z and C are not changed
+					if (dst[31]) sr[3] <= 1'b1;          // N set by a negative dividend
+				end else begin
+					// N and Z from the low byte of |quotient| unless the quotient
+					// does not fit in 16 bits at all
+					sr[1] <= 1'b1; sr[0] <= 1'b0;
+					sr[3] <= !abs_ovf && aquot[7];
+					sr[2] <= !abs_ovf && (aquot[7:0] == 8'd0);
+				end
 			end else begin
 				wreg({1'b0, ir[11:9]}, {md_rhi[15:0], md_rlo[15:0]});
 				sr[3] <= md_rlo[15]; sr[2] <= (md_rlo[15:0] == 16'd0); sr[1] <= 1'b0; sr[0] <= 1'b0;
@@ -295,7 +345,20 @@ S_MULDIV1: begin : muldiv1
 		finish;
 	end else if (is_div) begin
 		if (md_ovf) begin
-			sr[3] <= 1'b1; sr[2] <= 1'b0; sr[1] <= 1'b1; sr[0] <= 1'b0;
+			// overflow: V set, C clear, N and Z undefined; the MC68020/030
+			// values (WinUAE divul_overflow/divsl_overflow) from the dividend
+			sr[1] <= 1'b1; sr[0] <= 1'b0;
+			if (!sgn) begin
+				sr[3] <= tmp[31]; sr[2] <= (tmp == 32'd0);
+			end else if (ext[10] && tmp2 == 32'd0) begin
+				sr[3] <= 1'b0; sr[2] <= 1'b1;
+			end else if (ext[10] && tmp2[31] && src[31] && ($signed(tmp2) > $signed(src))) begin
+				sr[3] <= 1'b0; sr[2] <= 1'b0;
+			end else if (tmp == 32'd0) begin
+				sr[3] <= 1'b0; sr[2] <= 1'b1;
+			end else begin
+				sr[3] <= tmp[31] ^ (ext[10] & tmp2[31]); sr[2] <= 1'b0;
+			end
 			finish;
 		end else begin
 			wreg({1'b0, ext[14:12]}, md_rlo);       // Dq = quotient
@@ -322,6 +385,7 @@ S_CHK2_0: rd(ea, g_size, DW_SRC, S_CHK2_1);
 S_CHK2_1: rd(ea + {29'd0, bytes_of_sz(g_size)}, g_size, DW_DST, S_CHK2_2);
 S_CHK2_2: begin : chk2
 	reg [31:0] lo, hi, rn;
+	reg [3:0] nf;
 	if (ext[15]) begin lo = sext_sz(src, g_size); hi = sext_sz(dst, g_size); rn = rf_a; end
 	else begin
 		case (g_size)
@@ -330,11 +394,15 @@ S_CHK2_2: begin : chk2
 			default: begin lo = src; hi = dst; rn = rf_a; end
 		endcase
 	end
-	sr[2] <= (rn == lo) || (rn == hi);
-	sr[0] <= (lo <= hi) ? ((rn < lo) || (rn > hi)) : ((rn > hi) && (rn < lo));
-	if (ext[11] && ((lo <= hi) ? ((rn < lo) || (rn > hi)) : ((rn > hi) && (rn < lo))))
+	nf[2] = (rn == lo) || (rn == hi);
+	nf[0] = (lo <= hi) ? ((rn < lo) || (rn > hi)) : ((rn > hi) && (rn < lo));
+	{nf[3], nf[1]} = chk2_nv(ext[15] ? lo : sext_sz(lo, g_size), ext[15] ? hi : sext_sz(hi, g_size),
+	                         ext[15] ? rn : sext_sz(rn, g_size));
+	sr[3:0] <= nf;
+	if (ext[11] && nf[0]) begin
 		exc_go(`VEC_CHK, `FMT_SIXWORD, scan_pc, pc_i);
-	else finish;
+		exc_sr <= {sr[15:4], nf};       // the frame holds the updated flags
+	end else finish;
 end
 
 //-------------------------------------------------------------- CAS / CAS2 (UM 7.3.3)
@@ -383,14 +451,21 @@ S_CAS2_5: begin
 	state <= S_CAS2_5B;
 end
 S_CAS2_5B: begin
-	if (sr[2]) dreq(ea, g_size, 1'b0, tmp, fc_data, 1'b1, 1'b0, DW_NONE, S_CAS2_7);
+	// both equal: operand 2 is written first, then operand 1 (the MC68030
+	// order as modelled by WinUAE; visible when the operands overlap)
+	if (sr[2]) dreq(ea2, g_size, 1'b0, tmp2, fc_data, 1'b1, 1'b0, DW_NONE, S_CAS2_7);
 	else begin
 		wreg({1'b0, tmp3[2:0]}, merge(rf_a, dst, g_size));
 		tmp3[16] <= 1'b0; state <= S_CAS2_8;
 	end
 end
-S_CAS2_6: begin wreg({1'b0, tmp3[2:0]}, merge(rf_a, dst, g_size)); d_rmc_release <= 1'b1; finish; end
-S_CAS2_7: begin finish; dreq(ea2, g_size, 1'b0, tmp2, fc_data, 1'b1, 1'b1, DW_NONE, S_FETCH); end
+// a mismatch loads Dc2 and then Dc1: when both name one register, it
+// receives operand 1 (Dc1 was written in S_CAS2_4B and is kept)
+S_CAS2_6: begin
+	if (tmp3[2:0] != ext[2:0]) wreg({1'b0, tmp3[2:0]}, merge(rf_a, dst, g_size));
+	d_rmc_release <= 1'b1; finish;
+end
+S_CAS2_7: begin finish; dreq(ea, g_size, 1'b0, tmp, fc_data, 1'b1, 1'b1, DW_NONE, S_FETCH); end
 S_CAS2_8: begin wreg({1'b0, ext[2:0]}, merge(rf_a, src, g_size)); d_rmc_release <= 1'b1; finish; end
 
 //-------------------------------------------------------------- bit fields (PRM)
@@ -418,7 +493,8 @@ S_BF1: begin : bf1
 		rd(base, (nb >= 3'd4) ? `SZ_L : sz_of_bytes(nb), DW_DST, (nb == 3'd5) ? S_BF2 : S_BF3);
 	end
 end
-S_BF2: rd(ea + 32'd4, `SZ_B, DW_TMP2, S_BF3);
+// the fifth byte goes to src: tmp2 holds the BFINS source register
+S_BF2: rd(ea + 32'd4, `SZ_B, DW_SRC, S_BF3);
 S_BF3: begin : bf3
 	reg [39:0] d40, n40;
 	reg [31:0] fld, nfld, rot, rot2;
@@ -432,7 +508,7 @@ S_BF3: begin : bf3
 		fld = (w >= 6'd32) ? rot : (rot >> (6'd32 - w));
 		d40 = 40'd0; n40 = 40'd0;
 	end else begin
-		d40 = (nb == 3'd5) ? {dst, tmp2[7:0]} : ({dst, 8'd0} << (8 * (3'd4 - nb)));
+		d40 = (nb == 3'd5) ? {dst, src[7:0]} : ({dst, 8'd0} << (8 * (3'd4 - nb)));
 		fld = bf_extract40(d40, tmp[2:0], w);
 		rot = 32'd0;
 	end

@@ -48,6 +48,10 @@ module ap030_memsys
 	input             d_rmc_last,   // ... and is its last cycle
 	input             d_rmc_release,// pulse: end the RMW without a write (CAS mismatch)
 	input             d_iack,       // interrupt acknowledge cycle (fc = 7)
+	input             d_nocache,    // read past the data cache: no hit, no fill
+	// external writes (other bus masters) to invalidate in the data cache
+	input             snoop_we,
+	input      [31:0] snoop_addr,
 	input       [2:0] d_fc,
 	input      [31:0] d_wdata,
 	output            d_ack,        // pulse: read data valid / write accepted
@@ -127,6 +131,7 @@ wire        tr_ok, tr_fault, tr_walk, tr_ci;
 wire [31:0] tr_pa;
 wire        walk_done;
 wire        w_req, w_rw, w_active, mmu_busy;
+wire walker_busy = mmu_busy;
 wire [31:0] w_addr, w_wdata;
 reg         w_ack;
 reg  [31:0] w_rdata;
@@ -171,6 +176,7 @@ ap030_cache #(.FC_BITS(1)) icache (
 	.fi_we(ic_fi_we), .fi_addr(ic_fi_addr), .fi_fc(ic_fi_fc), .fi_data(ic_fi_data),
 	.wr_we(1'b0), .wr_la(32'd0), .wr_fc(3'd0), .wr_be(4'd0), .wr_data(32'd0), .wr_wa(1'b0), .wr_allow_fill(1'b0),
 	.inv_we(1'b0), .inv_la(32'd0),
+	.snp_we(1'b0), .snp_la(32'd0),
 	.clr_all(cacr_ci), .clr_entry(cacr_cei), .clr_index(caar_idx)
 );
 
@@ -198,6 +204,7 @@ ap030_cache #(.FC_BITS(3)) dcache (
 	.wr_we(dc_wr_we), .wr_la(dc_wr_la), .wr_fc(dc_wr_fc), .wr_be(dc_wr_be), .wr_data(dc_wr_data),
 	.wr_wa(cacr[`CACR_WA]), .wr_allow_fill(dc_fill_ok),
 	.inv_we(dc_inv_we), .inv_la(dc_inv_la),
+	.snp_we(snoop_we), .snp_la(snoop_addr),
 	.clr_all(cacr_cd), .clr_entry(cacr_ced), .clr_index(caar_idx)
 );
 
@@ -394,14 +401,15 @@ always @* begin
 	ic_lk_la = ci_addr; ic_lk_fc = ci_fc;
 end
 
-wire walker_busy = mmu_busy;
 assign d_wpend   = wb_valid;
 assign bus_quiet = !wb_valid && b_idle && !walker_busy;
 
 // a read cache hit needs no translation unless the ATC entry says the page
 // is bad (UM 9.2.1: hit with the B bit set aborts the access)
-wire rd_hit_ok = d_rw && !d_rmc && !d_iack && dc_en && dc_hit && cachable_space && !tr_fault;
+wire rd_hit_ok = d_rw && !d_rmc && !d_iack && !d_nocache && dc_en && dc_hit && cachable_space && !tr_fault;
 
+reg [31:0] r_pa_hold;
+reg        r_ci_hold, r_tag_hit, r_line_empty;
 reg w_ack_pending, w_active_d;
 
 always @(posedge clk) begin
@@ -581,8 +589,8 @@ always @(posedge clk) begin
 								b_addr <= tr_pa; b_nbytes <= c_pn; b_total <= c_rem;
 								b_rw <= 1'b1; b_fc <= d_fc; b_rmc <= d_rmc; b_rmc_last <= 1'b0;
 								b_ciout <= tr_ci; b_ocs <= c_ocs;
-								b_cache <= dc_fill_ok && !tr_ci && cachable_space && !d_rmc;
-								b_cbreq <= dc_fill_ok && cacr[`CACR_DBE] && !tr_ci && cachable_space && !d_rmc &&
+								b_cache <= dc_fill_ok && !tr_ci && cachable_space && !d_rmc && !d_nocache;
+								b_cbreq <= dc_fill_ok && cacr[`CACR_DBE] && !tr_ci && cachable_space && !d_rmc && !d_nocache &&
 								           (!dc_tag_hit || dc_line_empty) && !((lk_first || r_first) && c_cross);
 								b_wdata <= 32'd0;
 								r_ocs <= 1'b0;
@@ -624,8 +632,8 @@ always @(posedge clk) begin
 					b_addr <= d_iack ? r_addr : r_pa_hold; b_nbytes <= r_pn; b_total <= r_rem;
 					b_rw <= 1'b1; b_fc <= d_fc; b_rmc <= d_rmc && !d_iack; b_rmc_last <= 1'b0;
 					b_ciout <= r_ci_hold && !d_iack; b_ocs <= r_ocs;
-					b_cache <= dc_fill_ok && !r_ci_hold && cachable_space && !d_rmc && !d_iack;
-					b_cbreq <= dc_fill_ok && cacr[`CACR_DBE] && !r_ci_hold && cachable_space && !d_rmc && !d_iack &&
+					b_cache <= dc_fill_ok && !r_ci_hold && cachable_space && !d_rmc && !d_iack && !d_nocache;
+					b_cbreq <= dc_fill_ok && cacr[`CACR_DBE] && !r_ci_hold && cachable_space && !d_rmc && !d_iack && !d_nocache &&
 					           (!r_tag_hit || r_line_empty) && !(r_first && r_cross_line);
 					b_wdata <= 32'd0;
 					r_ocs <= 1'b0;
@@ -763,7 +771,5 @@ always @(posedge clk) begin
 	end
 end
 
-reg [31:0] r_pa_hold;
-reg        r_ci_hold, r_tag_hit, r_line_empty;
 
 endmodule

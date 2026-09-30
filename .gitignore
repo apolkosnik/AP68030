@@ -7,3 +7,4 @@ syn/output/
 syn/*.log
 syn/quartus.pid
 syn/worst_*.txt
+__pycache__/

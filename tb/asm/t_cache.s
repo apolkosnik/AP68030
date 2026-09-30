@@ -241,8 +241,82 @@ smc2_end:
 	failt	27
 tmok:
 
+
+;---------------------------------------------------------------- snooped external writes
+; A data cache entry created by write allocation (even in the CIIN window,
+; since CIIN is ignored on writes) goes stale when another master writes the
+; memory.  Without a snoop it is used (the MC68030 has no snooping); with the
+; system's snoop port the entry is invalidated.
+DMAADR	equ	$F001B0
+DMADAT	equ	$F001B4
+DMAGO	equ	$F001B8
+NMIOPT	equ	$F001BA
+WCI	equ	$400000
+IPLREG	equ	$F00110
+	move.l	#$3111+$800,d0		; clear; caches on, WA
+	movec	d0,cacr
+	move.l	#$3111,d0
+	movec	d0,cacr
+	move.l	#$AAAA0001,($4310).l	; aligned long write: allocated
+	move.l	($4310).l,d1		; hit
+	move.l	#$4310,DMAADR
+	move.l	#$BBBB0002,DMADAT
+	move.w	#2,DMAGO		; DMA write, no snoop
+	nop
+	move.l	($4310).l,d1
+	chkl	d1,$AAAA0001,40		; the stale entry (plain 68030 behaviour)
+	move.l	#$CCCC0003,DMADAT
+	move.w	#1,DMAGO		; DMA write, snooped
+	nop
+	nop
+	move.l	($4310).l,d1
+	chkl	d1,$CCCC0003,41		; invalidated: memory
+	move.l	#$DDDD0004,(WCI+$4320).l	; CIIN window: allocated all the same
+	move.l	#WCI+$4320,DMAADR
+	move.l	#$EEEE0005,DMADAT
+	move.w	#1,DMAGO
+	nop
+	nop
+	move.l	(WCI+$4320).l,d1
+	chkl	d1,$EEEE0005,42
+
+;---------------------------------------------------------------- the level 7 vector past the data cache
+; nmi_vec_nocache off: a vector held in the data cache is used; on: the
+; vector is read from the bus (where a freezer cartridge would overlay it)
+	move.w	#$2700,sr
+	move.l	#nmi1,($7C).l		; vector 31, cached by write allocation
+	move.l	($7C).l,d1
+	move.l	#$7C,DMAADR
+	move.l	#nmi2,DMADAT
+	move.w	#2,DMAGO		; memory changes behind the cache
+	nop
+	moveq	#0,d0
+	move.w	#7,IPLREG		; level 7: taken even at mask 7
+	nop
+	nop
+	nop
+	chkl	d0,1,43			; the cached vector
+	move.w	#1,NMIOPT		; now fetched from the bus
+	move.l	#nmi1,($7C).l
+	move.l	($7C).l,d1
+	move.w	#2,DMAGO		; memory says nmi2 again, the cache nmi1
+	nop
+	moveq	#0,d0
+	move.w	#7,IPLREG
+	nop
+	nop
+	nop
+	chkl	d0,2,44
+	move.w	#0,NMIOPT
+
 	move.w	#$600D,(DONEREG).l
 	stop	#$2700
+
+nmi1:	moveq	#1,d0
+	bra.s	nmi_x
+nmi2:	moveq	#2,d0
+nmi_x:	move.w	#0,IPLREG
+	rte
 
 fail_all:
 	move.w	d7,(FAILREG).l

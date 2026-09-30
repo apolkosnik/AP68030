@@ -18,6 +18,7 @@ module ap030_regfile
 
 	input             we,
 	input       [3:0] waddr,
+	input       [1:0] wact,        // for waddr 15: the stack pointer A7 was when the write was issued
 	input      [31:0] wdata,
 
 	input       [3:0] raddr_a,
@@ -53,7 +54,8 @@ wire [31:0] a7 = (act == 2'd0) ? usp : (act == 2'd1) ? isp : msp;
 function [31:0] rd;
 	input [3:0] i;
 	begin
-		if (we && waddr == i) rd = wdata;
+		// a pending A7 write is forwarded only to reads of the same stack pointer
+		if (we && waddr == i && (i != 4'd15 || wact == act)) rd = wdata;
 		else rd = (i == 4'd15) ? a7 : r[i];
 	end
 endfunction
@@ -75,7 +77,9 @@ always @(posedge clk) begin
 	end else begin
 		if (we) begin
 			if (waddr == 4'd15) begin
-				case (act)
+				// the stack pointer selected when the write was issued: an RTE
+				// pops its frame in the same clock it loads a new S/M
+				case (wact)
 					2'd0: usp <= wdata;
 					2'd1: isp <= wdata;
 					default: msp <= wdata;

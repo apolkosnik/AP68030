@@ -18,7 +18,7 @@ task dreq;
 	begin
 		d_stb <= 1'b1;
 		d_addr <= addr; d_size <= size; d_rw <= rw; d_wdata <= wdata; d_fc <= fc;
-		d_rmc <= rmc; d_rmc_last <= rmc_last; d_iack <= 1'b0;
+		d_rmc <= rmc; d_rmc_last <= rmc_last; d_iack <= 1'b0; d_nocache <= 1'b0;
 		dw_dst <= dst_sel; dw_ret <= ret;
 		state <= S_DWAIT;
 	end
@@ -26,7 +26,7 @@ endtask
 
 // convenience wrappers
 task rd;   input [31:0] addr; input [1:0] size; input [3:0] dst_sel; input [7:0] ret;
-	begin dreq(addr, size, 1'b1, 32'd0, fc_data, 1'b0, 1'b0, dst_sel, ret); end endtask
+	begin dreq(addr, size, 1'b1, 32'd0, ea_pc ? fc_prog : fc_data, 1'b0, 1'b0, dst_sel, ret); end endtask
 task wr;   input [31:0] addr; input [1:0] size; input [31:0] data; input [7:0] ret;
 	begin dreq(addr, size, 1'b0, data, fc_data, 1'b0, 1'b0, DW_NONE, ret); end endtask
 task rd_sd; input [31:0] addr; input [1:0] size; input [3:0] dst_sel; input [7:0] ret;   // supervisor data
@@ -40,8 +40,15 @@ task cir_wr; input [4:0] off; input [1:0] size; input [31:0] data; input [7:0] r
 	begin dreq(cp_base | {27'd0, off}, size, 1'b0, data, `FC_CPU_SPACE, 1'b0, 1'b0, DW_NONE, ret); end endtask
 
 // register write (full 32 bits)
+// A7 means the stack pointer selected by S and M now, when the write is
+// issued; the register file commits a clock later, after a same-clock SR
+// change (RTE) has already switched stacks
 task wreg; input [3:0] idx; input [31:0] val;
-	begin rf_we <= 1'b1; rf_waddr <= idx; rf_wdata <= val; byp_we = 1'b1; byp_reg = idx; byp_data = val; end endtask
+	begin
+		rf_we <= 1'b1; rf_waddr <= idx; rf_wdata <= val;
+		rf_wact <= !sr_s ? 2'd0 : (sr_m ? 2'd2 : 2'd1);
+		byp_we = 1'b1; byp_reg = idx; byp_data = val;
+	end endtask
 // register write merged by size (old value supplied)
 task wreg_sz; input [3:0] idx; input [31:0] old; input [31:0] val; input [1:0] sz;
 	begin wreg(idx, merge(old, val, sz)); end endtask
@@ -197,6 +204,7 @@ task dispatch;
 		tr_t0 <= sr[`SR_T0];
 		flow <= 1'b0;
 		ea_sel <= 1'b0;
+		ea_pc <= 1'b0;
 		imm_tgt <= 1'b0;
 		status_cnt <= 2'd1;
 		// generic-path controls, so the decoder can look at the next word

@@ -464,6 +464,21 @@ cpc:	move.l	(a0)+,(a1)+
 	ptestr	#5,($104000).l,#0
 	pmove	mmusr,(scr2).l
 	chkw	scr2,$0400,56
+	; the function code taken from a data register (PLOAD Dn,<ea>)
+	pflusha
+	moveq	#5,d1
+	lea	($777777).l,a1		; the EA base register holds nothing useful
+	ploadr	d1,($104000).l
+	ptestr	#5,($104000).l,#0
+	pmove	mmusr,(scr2).l
+	chkw	scr2,$0200,57		; loaded for FC 5
+	; PFLUSH fc,#mask,<ea> with an EA that takes the EA engine's own steps
+	lea	($103FFC).l,a2
+	moveq	#2,d2
+	pflush	#5,#7,(2,a2,d2.l)	; $104000
+	ptestr	#5,($104000).l,#0
+	pmove	mmusr,(scr2).l
+	chkw	scr2,$0400,58
 
 ;================================================================ 6. faults repaired by the handler, rerun by RTE
 	move.w	#M_FIX,mode
@@ -814,6 +829,34 @@ atcok:
 	move.l	#$3111,d0
 	movec	d0,cacr
 
+	settc	TC_OFF
+
+;================================================================ 19. root page descriptor (DT=1): no tables
+; the root pointer itself is the page descriptor (UM 9.7.1): translation is
+; base + logical address; a write search has no descriptor to update and
+; must still complete (the entry is created modified)
+	setcrp	$7FFF0001,$00000000
+	settc	$80C0C800		; E, PS 4K, IS 0, TIA 12, TIB 8
+	move.l	#$0F1E2D3C,($5000).l	; write through a fresh entry
+	move.l	($5000).l,d1
+	chkl	d1,$0F1E2D3C,150
+	move.b	#$01,($5004).l
+	tas	($5004).l		; RMW: a write search
+	move.b	($5004).l,d1
+	and.l	#$FF,d1
+	chkl	d1,$81,151
+	ptestw	#5,($5000).l,#0
+	pmove	mmusr,(scr2).l
+	chkw	scr2,$0200,152		; resident and modified
+	; the same through the supervisor root pointer
+	settc	TC_OFF
+	move.l	#$7FFF0001,(scr).l
+	move.l	#$00000000,(scr+4).l
+	pmove	(scr).l,srp
+	settc	$82C0C800		; SRE
+	move.l	#$4B5A6978,($5008).l
+	move.l	($5008).l,d1
+	chkl	d1,$4B5A6978,153
 	settc	TC_OFF
 	move.w	#$600D,(DONEREG).l
 	stop	#$2700

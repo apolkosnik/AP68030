@@ -60,16 +60,24 @@ S_DWAIT: begin
 	if (d_iack && (d_ack || d_iack_berr)) begin
 		// interrupt vector: supplied, autovector, or spurious (bus error)
 		d_iack <= 1'b0;
+		// a coprocessor busy/not-ready service stacks the instruction's own
+		// address so that it restarts (UM 10.4.3); otherwise the next one
 		exc_go(d_iack_berr ? `VEC_SPURIOUS : (d_avec ? (`VEC_AUTOVEC + {5'd0, exc_ilvl}) : d_rdata[7:0]),
-		       `FMT_NORMAL, scan_pc, 32'd0);
+		       `FMT_NORMAL, iack_pc_i ? pc_i : scan_pc, 32'd0);
+		iack_pc_i <= 1'b0;
 		exc_is_irq <= 1'b1;
 		if (exc_ilvl == 3'd7) irq_taken7 <= 1'b1;
 	end else if (rte_fake || d_ack) begin : deliver
 		reg [31:0] data;
+		reg  [1:0] dsz;
 		data = rte_fake ? rte_fake_data : d_rdata;
+		dsz  = d_size;
 		if (rerun_merge) begin
-			// UM 8.2.1: a rerun of the second portion completes the operand
-			data = (exc_partial << (8 * ((d_size == `SZ_B) ? 3'd1 : (d_size == `SZ_W) ? 3'd2 : (d_size == `SZ_3) ? 3'd3 : 3'd4))) | data;
+			// UM 8.2.1: a rerun of the second portion completes the operand;
+			// the rerun moves the SSW SIZE bytes, the operand is those plus
+			// the bytes already read
+			data = (exc_partial << (8 * bytes_of_sz(sz_of_siz(exc_ssw[5:4])))) | data;
+			dsz  = sz_of_bytes(exc_got + bytes_of_sz(sz_of_siz(exc_ssw[5:4])));
 			rerun_merge <= 1'b0;
 		end
 		rte_fake <= 1'b0;
@@ -80,8 +88,8 @@ S_DWAIT: begin
 			DW_TMP2: tmp2 <= data;
 			DW_EA:   ea <= data;
 			DW_IMM:  imm <= data;
-			DW_REG:  wreg(dw_reg, merge(dst, data, d_size));
-			DW_REGL: wreg(dw_reg, sext_sz(data, d_size));
+			DW_REG:  wreg(dw_reg, merge(dst, data, dsz));
+			DW_REGL: wreg(dw_reg, sext_sz(data, dsz));
 			DW_SR:   sr <= data[15:0] & `SR_MASK;
 			DW_FRAME: begin fr[cnt[4:0]] <= data; cnt <= cnt + 8'd1; end
 			default: ;
@@ -127,6 +135,7 @@ end
 S_EA: begin : ea_state
 	reg [31:0] bytes;
 	bytes = size_bytes(g_size, ea_regn == 3'd7);
+	ea_pc <= ea_pcrel;          // the reads that follow use program space for PC-relative modes
 	case (ea_mode)
 		3'b010: begin ea <= rf_a; state <= ea_ret; end
 		3'b011: begin
@@ -137,8 +146,8 @@ S_EA: begin : ea_state
 		3'b100: begin
 			ea <= rf_a - bytes; wreg({1'b1, ea_regn}, rf_a - bytes); state <= ea_ret;
 			if (g_dstk == DK_REG && g_dreg == {1'b1, ea_regn}) dst <= rf_a - bytes;
-			// MOVE An,-(An): the MC68020/030 store the decremented value
-			if (ea_sel && g_srck == SK_REG && g_sreg == {1'b1, ea_regn}) src <= rf_a - bytes;
+			// MOVE An,-(An) stores the initial value of An: the source is read
+			// before the destination address is formed (WinUAE 68030 cputest)
 		end
 		3'b101: begin
 			if (!w0_v) ; else if (w0_f) exc_stream_fault(1'b0, 1'b0);
@@ -258,8 +267,12 @@ S_GEN_EXEC: begin : gen_exec
 			// else has to happen at the boundary
 			can_overlap = !tr_t1 && !(tr_t0 & flow) && !irq_pend && !late_fault_pend && !stopped &&
 			              w0_v && !w0_f && !(dc_needs_ext && (!w1_v || w1_f));
-			if (can_overlap) dispatch;
-			else finish;
+			if (can_overlap) begin
+				dispatch;
+				// an exception taken at that dispatch (illegal, privilege,
+				// A/F-line) stacks the SR this instruction leaves behind
+				if (g_flags) exc_sr[4:0] <= alu_f;
+			end else finish;
 		end
 	end
 end
@@ -305,13 +318,26 @@ S_BCC: begin : bcc_state
 end
 
 //-------------------------------------------------------------- JMP / JSR / RTS / RTR / RTD
-S_JMP: go_pc(ea);
+// an odd target: the address error frame's PC is the instruction + 2 for
+// JMP and the target for JSR (WinUAE gencpu, 68030 AE corpus v24)
+S_JMP: begin
+	go_pc(ea);
+	// JMP: instruction + 2; the 68020+ index modes have already consumed
+	// their extension words, so the end of the instruction + 2 for them
+	if (ea[0] && ir[15:6] == 10'b0100_1110_11)
+		exc_pc <= (ir[5:3] == 3'b110 || ir[5:0] == 6'b111011) ? scan_pc + 32'd2 : pc_i + 32'd2;
+	if (ea[0] && ir[15:6] == 10'b0100_1110_10) exc_pc <= ea;             // JSR
+end
 S_JSR: begin
 	wreg(4'd15, rf_c - 32'd4);
 	wr(rf_c - 32'd4, `SZ_L, scan_pc, S_JMP);
 end
 S_RTS: rd(rf_c, `SZ_L, DW_TMP, S_RTS2);
-S_RTS2: begin wreg(4'd15, rf_c + 32'd4); go_pc(tmp); end
+S_RTS2: begin
+	wreg(4'd15, rf_c + 32'd4);
+	go_pc(tmp);
+	if (tmp[0] && ir[2:0] == 3'd7) exc_pc <= pc_i + 32'd2;   // RTR: instruction + 2
+end
 S_RTR: rd(rf_c, `SZ_W, DW_TMP2, S_RTR2);
 S_RTR2: begin
 	sr[4:0] <= tmp2[4:0];
@@ -333,7 +359,13 @@ S_DBCC: begin : dbcc_state
 	if (cc_true(ir[11:8], sr[4:0])) finish;
 	else begin
 		wreg({1'b0, ir[2:0]}, {rf_a[31:16], nw});
-		if (nw != 16'hFFFF) go_pc(pc_i + 32'd2 + sext16(ext));
+		// the MC68020/030 prefetch from the branch target whenever the
+		// condition is false, so an odd displacement is an address error
+		// even when the count expires (WinUAE gencpu DBcc, 68030 AE corpus)
+		if (nw != 16'hFFFF || ext[0]) begin
+			go_pc(pc_i + 32'd2 + sext16(ext));
+			if (ext[0]) exc_pc <= pc_i + 32'd2 + sext16(ext);   // the frame's PC is the target
+		end
 		else finish;
 	end
 end
@@ -372,7 +404,9 @@ S_LINK: begin : link_state
 		if (two) pop(2'd1);
 		imm <= disp;
 		tmp <= rf_c - 32'd4;
-		wr(rf_c - 32'd4, `SZ_L, (ir[2:0] == 3'd7) ? rf_c - 32'd4 : rf_a, S_LINK2);
+		// LINK A7 pushes the initial A7 on the 68020/030 (only the 68040
+		// pushes the decremented value; WinUAE gencpu and 68030 cputest)
+		wr(rf_c - 32'd4, `SZ_L, rf_a, S_LINK2);
 	end
 end
 S_LINK2: begin wreg({1'b1, ir[2:0]}, tmp); state <= S_LINK3; end
@@ -403,14 +437,18 @@ S_MOVE_SR: begin : movesr
 		`ALU_EOR: nsr = sr ^ src[15:0];
 		default:  nsr = src[15:0];
 	endcase
+	// T0 traces ORI/ANDI/EORI to CCR and SR and MOVE to SR, whatever
+	// they change; MOVE to CCR is not traced by T0 (WinUAE gencpu
+	// check_trace, 68020/68030; 68030 corpus v24)
 	if (!is_sr) begin
 		sr[4:0] <= nsr[4:0];
 		finish;
+		if (ir[15:12] != 4'h4) trace_pend <= tr_t1 | tr_t0;
 	end else begin
 		sr <= nsr & `SR_MASK;
 		// the program space may have changed: refill the pipe (UM 12.7.1)
 		flush_req = 1'b1; flush_pc = scan_pc;
-		trace_pend <= tr_t1 | (tr_t0 & ({nsr[15:12], nsr[10:8]} != {sr[15:12], sr[10:8]}));
+		trace_pend <= tr_t1 | tr_t0;
 		state <= S_FETCH;
 	end
 end
@@ -603,11 +641,24 @@ S_MOVEP2: begin tmp <= {tmp[23:0], tmp2[7:0]}; state <= S_MOVEP1; end
 //-------------------------------------------------------------- CHK (PRM)
 S_CHK: begin : chk_state
 	reg signed [31:0] v, b;
+	reg [31:0] d;
+	reg [3:0] nf;
+	reg out_of;
 	v = sext_sz(dst, g_size);
 	b = sext_sz(src, g_size);
-	sr[2] <= (v == 0); sr[1] <= 1'b0; sr[0] <= 1'b0;
-	if (v < 0) begin sr[3] <= 1'b1; exc_go(`VEC_CHK, `FMT_SIXWORD, scan_pc, pc_i); end
-	else if (v > b) begin sr[3] <= 1'b0; exc_go(`VEC_CHK, `FMT_SIXWORD, scan_pc, pc_i); end
-	else finish;
+	d = b - v;
+	out_of = (v < 0) || (v > b);
+	// N, Z, V and C are undefined; the MC68020/030 values on both paths
+	// (WinUAE setchkundefinedflags): V is the overflow of bound - Dn, C
+	// follows the signs, both are clear when Dn is in bounds
+	nf[3] = (v < 0);
+	nf[2] = (v == 0);
+	nf[1] = out_of && ((v[31] ^ b[31]) & ((g_size == `SZ_W ? d[15] : d[31]) ^ b[31]));
+	nf[0] = out_of && ((v < 0) ? ((v > b) || (b >= 0)) : (b >= 0));
+	sr[3:0] <= nf;
+	if (out_of) begin
+		exc_go(`VEC_CHK, `FMT_SIXWORD, scan_pc, pc_i);
+		exc_sr <= {sr[15:4], nf};       // the frame holds the updated flags
+	end else finish;
 end
 S_DIVZ: exc_go(`VEC_DIVZERO, `FMT_SIXWORD, scan_pc, pc_i);

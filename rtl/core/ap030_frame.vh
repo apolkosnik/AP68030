@@ -61,7 +61,7 @@ function [15:0] frame_word;
 						6'd32: frame_word = {exc_cnt, sub};
 						6'd33: frame_word = mm_mask;
 						6'd34: frame_word = tmp3[15:0];
-						6'd35: frame_word = {ea_sel, imm_tgt, dw_reg, 2'b00, ea_ret};
+						6'd35: frame_word = {ea_sel, imm_tgt, dw_reg, 1'b0, ea_pc, ea_ret};
 						6'd36: frame_word = {exc_got, 5'd0, imm_ret};
 						6'd37: frame_word = exc_partial[31:16];
 						6'd38: frame_word = exc_partial[15:0];

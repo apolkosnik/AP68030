@@ -48,9 +48,14 @@ always @* begin
 	endcase
 end
 // the response after a command
+// $F1BC: arm an interrupt of this level at the next command write (so it is
+// pending while the processor reads the response) and re-arm the busy
+// response of command $0010
+reg [2:0] cp_irq_arm = 0;
 task cp_start;
 	input [15:0] cmd;
 	begin
+		if (cp_irq_arm != 0) begin irq_level = cp_irq_arm; cp_irq_arm = 0; end
 		cp_cmd = cmd; cp_step = 0; cp_ops = 0;
 		case (cmd)
 			16'h0001: cp_resp = 16'h0902;                 // null CA=0 PF=1

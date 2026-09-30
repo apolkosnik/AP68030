@@ -20,6 +20,12 @@
 //   $F184 word  read: last control CIR value; $F188/$F18C: operands 0 and 1  //
 //   $F190 byte  console: the byte is printed                                //
 //   $F1A0/$F1A4 long  benchmark runs and clocks; $F1A8 word: print report   //
+//   $F1B0/$F1B4 long  DMA model address/data; $F1B8 word 1: write + snoop,  //
+//                     2: write without snoop; $F1BA word bit 0: NMI vector  //
+//                     fetched past the data cache (nmi_vec_nocache)         //
+//   $F1C0 long  watched address; $F1C4 word: FC of its last bus read       //
+//   $F1BC word  coprocessor model: raise this interrupt level at the next  //
+//               command write, and answer the next $0010 with busy again   //
 // Memory map (24-bit decode):                                               //
 //   $000000-$0FFFFF  RAM, 32-bit synchronous, burst                          //
 //   $200000-$2FFFFF  RAM alias, 16-bit asynchronous                          //
@@ -64,7 +70,9 @@ ap030_top dut (
 	.avec_n(avec_n), .ciin_n(ciin_n), .cback_n(cback_n), .br_n(br_n), .bg_n(bg_n), .bgack_n(bgack_n),
 	.ipl_n(ipl_n), .ipend_n(ipend_n), .reset_n_i(reset_n), .reset_n_oe(reset_n_oe),
 	.cdis_n(cdis_n), .mmudis_n(mmudis_n), .refill_n(refill_n), .status_n(status_n),
-	.dbg_pc(dbg_pc), .dbg_sr(dbg_sr), .dbg_state(dbg_state), .dbg_halted(dbg_halted), .dbg_inst(dbg_inst)
+	.dbg_pc(dbg_pc), .dbg_sr(dbg_sr), .dbg_state(dbg_state), .dbg_halted(dbg_halted), .dbg_inst(dbg_inst),
+	.dbg_vbr(), .dbg_cacr(), .dbg_cache_clear(),
+	.snoop_we(snoop_we), .snoop_addr(snoop_addr), .nmi_vec_nocache(nmi_nc)
 );
 
 //---------------------------------------------------------------------------
@@ -192,6 +200,7 @@ always @* begin
 			8'h84: rdata = {cp_ctrl, 16'd0};
 			8'h88: rdata = cp_operand[0];
 			8'h8C: rdata = cp_operand[1];
+			8'hC4: rdata = {13'd0, watch_fc, 16'd0};
 			default: rdata = 32'd0;
 		endcase
 	end else if (is_sync) rdata = {mem[{ma[19:4], beat_idx, 2'b00}], mem[{ma[19:4], beat_idx, 2'b01}],
@@ -236,9 +245,45 @@ task capture_write;
 	end
 endtask
 reg [15:0] fail_num = 0;
+// $F1C0 long: watched longword address; $F1C4 word: the function code of
+// the last bus read of it
+reg [31:0] watch_addr = 32'hFFFFFFFF;
+reg  [2:0] watch_fc = 0;
+always @(posedge clk) if (as_asserted && rw && ({a[31:2], 2'b00} == {watch_addr[31:2], 2'b00})) watch_fc <= fc;
+// Execution in the vector table: the programs start at $400 and never run
+// code below it, so a program fetch there after the start means control
+// was lost (a program restarting through the reset vector could otherwise
+// still report a pass)
+reg started = 0;
+always @(posedge clk) if (as_asserted && rw && (fc == 3'd2 || fc == 3'd6)) begin
+	if (a >= 32'h400) started <= 1;
+	else if (started && !$test$plusargs("allow_low_code")) begin
+		if (errors < 3) $display("FAIL: program fetch at %08x (below $400) at clock %0d", a, clocks);
+		errors = errors + 1;
+	end
+end
 // benchmark result: runs and clocks from the program, converted here for a
 // clock frequency of +mhz=<n> (default 50); 1757 Dhrystones/s = 1 DMIPS
 reg [31:0] bench_runs = 0, bench_clks = 0;
+// DMA model: another bus master writes a longword of memory and the system
+// reports it on the snoop port ($F1B0 address, $F1B4 data, $F1B9 = 1: go,
+// = 2: go without the snoop); $F1BB: bit 0 sets nmi_vec_nocache
+reg [31:0] dma_addr = 0, dma_data = 0;
+reg        snoop_we = 0;
+reg [31:0] snoop_addr = 0;
+reg        nmi_nc = 0;
+reg  [1:0] dma_go = 0;
+always @(posedge clk) begin
+	snoop_we <= 0;
+	if (dma_go != 0) begin
+		mem[{dma_addr[19:2], 2'b00}]     = dma_data[31:24];
+		mem[{dma_addr[19:2], 2'b00} + 1] = dma_data[23:16];
+		mem[{dma_addr[19:2], 2'b00} + 2] = dma_data[15:8];
+		mem[{dma_addr[19:2], 2'b00} + 3] = dma_data[7:0];
+		if (dma_go == 2'd1) begin snoop_we <= 1; snoop_addr <= dma_addr; end
+		dma_go <= 0;
+	end
+end
 task bench_report;
 	real mhz, dps;
 	integer m;
@@ -276,6 +321,21 @@ task reg_write;
 			8'h33: berr_addr[7:0] = v;
 			8'h41: wait_states = v;
 			8'h71: begin mmudis_n = ~v[0]; cdis_n = ~v[1]; end
+			8'hB0: dma_addr[31:24] = v;
+			8'hB1: dma_addr[23:16] = v;
+			8'hB2: dma_addr[15:8] = v;
+			8'hB3: dma_addr[7:0] = v;
+			8'hB4: dma_data[31:24] = v;
+			8'hB5: dma_data[23:16] = v;
+			8'hB6: dma_data[15:8] = v;
+			8'hB7: dma_data[7:0] = v;
+			8'hB9: dma_go = v[1:0];
+			8'hBB: nmi_nc = v[0];
+			8'hBD: begin cp_irq_arm = v[2:0]; cp_busy_done = 0; end
+			8'hC0: watch_addr[31:24] = v;
+			8'hC1: watch_addr[23:16] = v;
+			8'hC2: watch_addr[15:8] = v;
+			8'hC3: watch_addr[7:0] = v;
 			8'h90: $write("%c", v);                       // console
 			8'hA0: bench_runs[31:24] = v;
 			8'hA1: bench_runs[23:16] = v;

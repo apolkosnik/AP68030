@@ -109,7 +109,6 @@ always @* begin
 			endcase
 			dc_first = S_GEN_EXEC;
 			if (ea_dn) begin dc_dstk = DK_REG; dc_dreg = {1'b0, dw[2:0]}; dc_size = `SZ_L; end
-			else if (ea_imm && dw[7:6] == 2'b00) dc_dstk = DK_IMM;
 			else begin dc_dstk = DK_EA; if (!(dw[7:6] == 2'b00 ? ea_mem : ea_memalt)) dc_illegal = 1'b1; end
 		end else if (dw[7:6] == 2'b11) begin
 			// CHK2/CMP2 (00C0/02C0/04C0), CAS (0AC0/0CC0/0EC0), CAS2 (0CFC/0EFC), CALLM/RTM (illegal)
@@ -200,14 +199,14 @@ always @* begin
 			endcase
 		end else case (dw[11:9])
 			3'b000: begin  // NEGX / MOVE from SR
-				if (dw[7:6] == 2'b11) begin dc_first = S_MOVE_FSR; dc_priv = 1'b1; if (!ea_dataalt) dc_illegal = 1'b1; end
+				if (dw[7:6] == 2'b11) begin dc_first = S_MOVE_FSR; dc_size = `SZ_W; dc_dreg = {1'b0, dw[2:0]}; dc_priv = 1'b1; if (!ea_dataalt) dc_illegal = 1'b1; end
 				else begin dc_alu = `ALU_NEGX; dc_size = sz_std; dc_srck = SK_QUICK;
 					if (ea_dn) begin dc_dstk = DK_REG; dc_dreg = {1'b0, dw[2:0]}; end
 					else begin dc_dstk = DK_EA; dc_first = S_GEN_EXEC; if (!ea_memalt) dc_illegal = 1'b1; end
 				end
 			end
 			3'b001: begin  // CLR / MOVE from CCR
-				if (dw[7:6] == 2'b11) begin dc_first = S_MOVE_FSR; if (!ea_dataalt) dc_illegal = 1'b1; end
+				if (dw[7:6] == 2'b11) begin dc_first = S_MOVE_FSR; dc_size = `SZ_W; dc_dreg = {1'b0, dw[2:0]}; if (!ea_dataalt) dc_illegal = 1'b1; end
 				else begin dc_alu = `ALU_CLR; dc_size = sz_std; dc_srck = SK_QUICK; dc_dstrd = 1'b0;
 					if (ea_dn) begin dc_dstk = DK_REG; dc_dreg = {1'b0, dw[2:0]}; end
 					else begin dc_dstk = DK_EA; dc_first = S_GEN_EXEC; if (!ea_memalt) dc_illegal = 1'b1; end
@@ -312,7 +311,7 @@ always @* begin
 		if (dw[7:6] == 2'b11) begin
 			if (ea_an) dc_first = S_DBCC;
 			else if (em == 3'b111 && (er == 3'b010 || er == 3'b011 || er == 3'b100)) dc_first = S_TRAPCC;
-			else begin dc_first = S_SCC; dc_size = `SZ_B; if (!ea_dataalt) dc_illegal = 1'b1; end
+			else begin dc_first = S_SCC; dc_size = `SZ_B; dc_dreg = {1'b0, dw[2:0]}; if (!ea_dataalt) dc_illegal = 1'b1; end
 		end else begin
 			dc_size = sz_std;
 			dc_srck = SK_QUICK;
@@ -502,7 +501,7 @@ always @* begin
 				3'b001: begin
 					if (ea_an) dc_first = S_CPDBCC;          // cpDBcc
 					else if (em == 3'b111 && (er[1] || er == 3'b100)) dc_first = S_CPTRAP;   // cpTRAPcc (opmode 010/011/100 in er)
-					else dc_first = S_CPSCC;                 // cpScc
+					else begin dc_first = S_CPSCC; dc_dreg = {1'b0, dw[2:0]}; end   // cpScc
 				end
 				3'b010, 3'b011: dc_first = S_CPBCC;        // cpBcc.W / .L
 				3'b100: begin dc_first = S_CPSAVE0; dc_priv = 1'b1; if (!(ea_ctrlalt || ea_pd)) dc_illegal = 1'b1; end

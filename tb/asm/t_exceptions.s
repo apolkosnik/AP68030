@@ -157,6 +157,12 @@ i1:	illegal
 	chkw	lastvec,4,6
 	move.l	lastpc,d0
 	chkl	d0,i1,7
+	; static BTST #n,#imm is illegal (no immediate destination for a
+	; static bit number; the dynamic form BTST Dn,#imm is legal)
+i1b:	dc.w	$083C,$4E71,$4E71	; the handler skips the opcode, the two NOPs run
+	chkw	lastvec,4,107
+	move.l	lastpc,d0
+	chkl	d0,i1b,108
 i2:	dc.w	$A123
 	chkw	lastvec,10,8
 	move.l	lastpc,d0
@@ -482,6 +488,19 @@ rte_bad:
 rte_ok:
 	failt	78
 rte_ok2:
+	; the MC68030 clears T1/T0 before the format error: the frame's SR has
+	; no trace bits, so the handler's RTE does not resume tracing
+	move.w	#M_SKIP2,mode
+	move.l	a7,a5
+	move.w	#$5000,-(a7)
+	move.l	#rte_ok,-(a7)
+	move.w	#$2700,-(a7)
+	move.w	#$6700,sr	; T0: the RTE is a change of flow
+	rte
+	chkw	lastsr,$2700,126
+	andi.w	#$3FFF,sr
+	chkw	lastvec,14,127
+	move.l	a5,a7
 	; a good six-word frame returns to its PC
 	move.w	#M_RTE,mode
 	move.l	a7,a5
@@ -535,6 +554,24 @@ bk1:	bkpt	#2
 	move.l	lastfa,d1
 	chkl	d1,WCI+$3A04,90
 
+	; the rerun completes a split operand read into a register: the whole
+	; longword is delivered, not only the rerun portion (MOVEM.L loads
+	; sign-extend by the operand size)
+	move.l	#$8123C456,(W16+$3A62).l
+	move.l	#$9ABCDEF0,(W16+$3A66).l
+	move.l	#WCI+$3A64,BERRREG
+	movem.l	(WCI+$3A62).l,d2-d3
+	chkl	d2,$8123C456,109
+	chkl	d3,$9ABCDEF0,110
+	; a memory-indirect operand whose pointer read faults resumes in the EA
+	; calculation and still reads and adds the operand
+	move.l	#$3A50,(W16+$3A40).l	; the pointer
+	move.l	#5,(W16+$3A50).l	; the operand
+	move.l	#WCI+$3A40,BERRREG
+	moveq	#10,d1
+	add.l	([WCI+$3A40]),d1
+	chkl	d1,15,111
+
 ;---------------------------------------------------------------- software completion: the handler supplies the data
 	move.w	#M_SWDATA,mode
 	move.l	#WCI+$3A10,BERRREG
@@ -569,16 +606,152 @@ bk1:	bkpt	#2
 	chkl	d1,$A000,100
 
 ;---------------------------------------------------------------- address error: odd jump target
-	move.w	#M_ADDRFIX,mode
+; the frame's PC is the JMP + 2 (MC68030 as modelled by WinUAE, checked by
+; the v24 cputest corpus), so the handler resumes there unchanged
+	move.w	#M_RTE,mode
 	lea	oddtarget+1,a0
 ae1:	jmp	(a0)
 ae1n:	chkw	lastvec,3,101
 	chkw	lastfmt,$B,102
 	move.l	lastpc,d0
-	chkl	d0,ae1,103
+	chkl	d0,ae1n,103
 	move.w	lastssw,d1
 	and.l	#$F000,d1	; RC and RB set, no fault bits
 	chkl	d1,$3000,104
+
+;---------------------------------------------------------------- checked against the WinUAE 68030 corpus
+; CHK and CHK2 trap frames hold the flags the instruction set
+	move.w	#M_RTE,mode
+	moveq	#-5,d0
+	moveq	#10,d1
+	move.w	#$00,ccr
+	chk.l	d1,d0		; Dn < 0: N=1, C=1 (bound >= 0), V=0, Z=0
+	chkw	lastvec,6,112
+	move.w	lastsr,d6
+	and.l	#$1F,d6
+	chkl	d6,$09,113
+	lea	bounds,a0
+	move.l	#50,d2
+	move.w	#$00,ccr
+	chk2.l	(a0),d2		; above 10..40: N=1, C=1
+	chkw	lastvec,6,114
+	move.w	lastsr,d6
+	and.l	#$1F,d6
+	chkl	d6,$09,115
+
+; divide by zero: the MC68030 flags (V set for DIVU, Z set for DIVS)
+	move.l	#$80000000,d0
+	moveq	#0,d1
+	move.w	#$00,ccr
+	divu.w	d1,d0		; N from dividend bit 31, Z from its high word, V=1
+	chkw	lastvec,5,116
+	move.w	lastsr,d6
+	and.l	#$1F,d6
+	chkl	d6,$0A,117
+	move.w	#$1B,ccr
+	divs.w	d1,d0		; Z=1, N=V=C=0, X kept
+	move.w	lastsr,d6
+	and.l	#$1F,d6
+	chkl	d6,$14,118
+	move.w	#$02,ccr
+	divs.l	d1,d0		; Z=1, N=C=0, V not changed
+	move.w	lastsr,d6
+	and.l	#$1F,d6
+	chkl	d6,$06,119
+
+; DBcc with an odd displacement faults even when the count expires: the
+; MC68030 prefetches from the branch target whenever the condition is false
+	move.w	#M_FIXPC,mode
+	move.l	#dbo_n,fixpc
+	clr.w	lastvec
+	moveq	#0,d0
+dbo:	dc.w	$51C8,$0003	; DBF D0,*+5
+dbo_n:	chkw	lastvec,3,120
+	chkl	d0,$0000FFFF,121
+
+; RTE to an odd PC: the address error frame holds the SR from the RTE frame
+	move.l	#rteo_n,fixpc
+	move.w	#$2700,sr
+	move.w	#$0000,-(sp)	; format $0
+	pea	(oddtarget+1).l
+	move.w	#$2715,-(sp)
+	rte
+rteo_n:	chkw	lastvec,3,122
+	chkw	lastsr,$2715,123
+
+; an exception taken at an overlapped dispatch stacks the flags of the
+; instruction that just completed
+	move.w	#M_SKIP2,mode
+	moveq	#0,d0
+	move.w	#$00,ccr
+	ori.b	#$80,d0
+	illegal
+	chkw	lastvec,4,124
+	move.w	lastsr,d6
+	and.l	#$1F,d6
+	chkl	d6,$08,125
+
+;---------------------------------------------------------------- checked against the WinUAE 68030 corpus (v24)
+; T0 traces ORI/ANDI/EORI to CCR and MOVE to SR even when nothing above the
+; CCR changes; MOVE to CCR is not traced
+	move.w	#M_RTE,mode
+	clr.w	exccnt
+	move.w	#$6700,sr	; T0
+	ori.b	#$00,ccr	; traced
+	move.w	#$04,ccr	; MOVE to CCR: not traced
+	move.w	#$6700,sr	; MOVE to SR, no change above the CCR: traced
+	move.w	#$2700,sr	; traced (clears T0)
+	move.w	exccnt,d1
+	and.l	#$FFFF,d1
+	chkl	d1,3,128
+
+; odd branch targets: the address error frame's PC (the frame is resumed
+; at fixpc by the handler)
+	move.w	#M_FIXPC,mode
+	lea	oddtarget+1,a0
+	move.l	#jsro_n,fixpc
+	move.l	sp,a5
+jsro:	jsr	(a0)		; JSR: the target
+jsro_n:	move.l	a5,sp
+	move.l	lastpc,d0
+	chkl	d0,oddtarget+1,129
+	move.l	#jmpx_n,fixpc
+	moveq	#0,d1
+jmpx:	jmp	0(a0,d1.w)	; JMP (d8,An,Xn): the end of the JMP + 2
+jmpx_n:	move.l	lastpc,d0
+	chkl	d0,jmpx_n+2,130
+	move.l	#rtro_n,fixpc
+	move.l	sp,a5
+	pea	(oddtarget+1).l
+	move.w	#$0000,-(sp)
+rtro:	rtr			; RTR: the RTR + 2
+rtro_n:	move.l	a5,sp
+	move.l	lastpc,d0
+	chkl	d0,rtro+2,131
+	move.l	#dbo2_n,fixpc
+	moveq	#1,d0
+dbo2:	dc.w	$51C8,$0003	; DBF D0,*+5 taken: the target
+dbo2_n:	move.l	lastpc,d0
+	chkl	d0,dbo2+5,132
+
+; an odd exception vector: the address error frame's PC is the vector
+; offset of the exception being processed
+	moveq	#0,d0
+vcopy:	move.l	d0,a2
+	move.l	(a2),($2000,a2)
+	addq.l	#4,d0
+	cmp.l	#$400,d0
+	bne.s	vcopy
+	move.l	#$00000123,($2010).l	; vector 4 (illegal): odd
+	move.l	#ovec_n,fixpc
+	move.l	#$2000,d0
+	movec	d0,vbr
+	illegal
+ovec_n:	moveq	#0,d0
+	movec	d0,vbr
+	chkw	lastvec,3,133
+	move.l	lastpc,d0
+	chkl	d0,$10,134
 
 ;---------------------------------------------------------------- RESET instruction: 512 clocks on the pin
 	reset
@@ -720,8 +893,12 @@ h_addrerr:
 	move.l	$10(a6),lastfa
 	move.w	mode,d6
 	cmp.w	#M_ADDRFIX,d6
-	bne.s	ha1
+	bne.s	ha0
 	addq.l	#2,2(a6)	; skip the JMP (An); its pipe images are refetched
+ha0:
+	cmp.w	#M_FIXPC,d6
+	bne.s	ha1
+	move.l	fixpc,2(a6)	; resume at fixpc (the pipe is refetched)
 ha1:
 	movem.l	(sp)+,d6/a6
 	rte

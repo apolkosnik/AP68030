@@ -32,6 +32,8 @@ module ap030_core
 	output reg        d_rmc_last,
 	output reg        d_rmc_release,
 	output reg        d_iack,
+	output reg        d_nocache,    // this read bypasses the data cache (system option, see ap030_top)
+	input             nmi_vec_nocache,
 	output reg  [2:0] d_fc,
 	output reg [31:0] d_wdata,
 	input             d_ack,
@@ -99,7 +101,8 @@ module ap030_core
 	output     [31:0] dbg_pc,
 	output     [15:0] dbg_sr,
 	output      [7:0] dbg_state,
-	output reg        dbg_inst      // pulse: an instruction was dispatched (statistics)
+	output reg        dbg_inst,     // pulse: an instruction was dispatched (statistics)
+	output     [31:0] dbg_vbr       // VBR (system glue: NMI vector address)
 );
 
 `include "core/ap030_states.vh"
@@ -109,6 +112,7 @@ module ap030_core
 //---------------------------------------------------------------------------
 reg [15:0] sr;
 reg [31:0] vbr;
+assign dbg_vbr = vbr;
 reg [31:0] caar;
 reg  [2:0] sfc, dfc;
 wire       sr_s = sr[`SR_S];
@@ -122,6 +126,7 @@ assign caar_idx = caar[7:2];
 //---------------------------------------------------------------------------
 reg         rf_we;
 reg   [3:0] rf_waddr;
+reg   [1:0] rf_wact;           // A7 at issue: 0 USP, 1 ISP, 2 MSP
 reg  [31:0] rf_wdata;
 reg   [3:0] ra_a, ra_b, ra_c;
 wire [31:0] rf_a, rf_b, rf_c;
@@ -134,7 +139,7 @@ wire [31:0] usp_q, isp_q, msp_q;
 
 ap030_regfile rf (
 	.clk(clk), .rst(rst), .sr_s(sr_s), .sr_m(sr_m),
-	.we(rf_we), .waddr(rf_waddr), .wdata(rf_wdata),
+	.we(rf_we), .waddr(rf_waddr), .wact(rf_wact), .wdata(rf_wdata),
 	.raddr_a(ra_a), .rdata_a(rf_a), .raddr_b(ra_b), .rdata_b(rf_b), .raddr_c(ra_c), .rdata_c(rf_c),
 	.raddr_d(ra_d), .rdata_d(rf_d), .raddr_e(ra_e), .rdata_e(rf_e),
 	.sp_we(sp_we), .sp_sel(sp_sel), .sp_wdata(sp_wdata),
@@ -229,6 +234,7 @@ reg [31:0] src, dst, imm, tmp, tmp2, tmp3;
 reg  [7:0] cnt;
 reg  [7:0] sub;
 reg [15:0] mm_mask;
+reg        ea_pc;          // the EA is PC-relative: its reads are program references (UM 2.4)
 reg        ea_sel;         // 0: EA from ir[5:0], 1: MOVE destination from ir[11:6]
 reg  [7:0] ea_ret;         // state after the EA calculation
 reg  [7:0] imm_ret;
@@ -316,6 +322,8 @@ reg        cpu_flt_ill;    // a bus error on this CPU-space cycle is an illegal 
 reg        cpu_flt_fline;  // ... is an F-line exception (first coprocessor access)
 reg        iack_pc_i;      // interrupt frame carries the instruction address (Busy primitive)
 
+// interrupt processing in progress (masks IPEND)
+wire exc_is_irq_active = (state == S_EXC0 || state == S_EXC1 || state == S_EXC2 || state == S_EXC3 || state == S_IACK) && exc_is_irq;
 assign halted = halted_r;
 assign dbg_pc = pc_i;
 assign dbg_sr = sr;
@@ -385,6 +393,50 @@ function [31:0] sext_sz;
 	end
 endfunction
 
+// CHK2/CMP2 N and V: undefined in the PRM; the MC68020/030 values as
+// tabulated by WinUAE setchk2undefinedflags (bounds and value are signed,
+// sign-extended to 32 bits; the differences wrap)
+function [1:0] chk2_nv;           // {N, V}
+	input [31:0] lower, upper, val;
+	reg n, v;
+	reg ln, un, vn;
+	reg [31:0] lv, uv, vl;
+	begin
+		n = 1'b0; v = 1'b0;
+		ln = lower[31]; un = upper[31]; vn = val[31];
+		lv = lower - val; uv = upper - val; vl = val - lower;
+		if (val == lower || val == upper) ;
+		else if (ln && !un) begin
+			if ($signed(val) < $signed(lower)) n = 1'b1;
+			if (!vn && $signed(val) < $signed(upper)) n = 1'b1;
+			if (!vn && !lv[31]) begin
+				v = 1'b1; n = ($signed(val) > $signed(upper));
+			end
+		end else if (!ln && un) begin
+			if (!vn) n = 1'b1;
+			if ($signed(val) > $signed(upper)) n = 1'b1;
+			if ($signed(val) > $signed(lower) && !uv[31]) begin v = 1'b1; n = 1'b0; end
+		end else if (!ln && !un && $signed(lower) > $signed(upper)) begin
+			if ($signed(val) > $signed(upper) && $signed(val) < $signed(lower)) n = 1'b1;
+			if (vn && lv[31]) v = 1'b1;
+			if (vn && !lv[31]) n = 1'b1;
+		end else if (!ln && !un) begin
+			if (!vn && $signed(val) < $signed(lower)) n = 1'b1;
+			if ($signed(val) > $signed(upper)) n = 1'b1;
+			if (vn && uv[31]) begin v = 1'b1; n = 1'b1; end
+		end else if ($signed(lower) > $signed(upper)) begin
+			if (!vn) n = 1'b1;
+			if ($signed(val) > $signed(upper) && $signed(val) < $signed(lower)) n = 1'b1;
+			if (!vn && vl[31]) begin n = 1'b0; v = 1'b1; end
+		end else begin
+			if ($signed(val) < $signed(lower)) n = 1'b1;
+			if (vn && $signed(val) > $signed(upper)) n = 1'b1;
+			if (!vn && vl[31]) begin n = 1'b1; v = 1'b1; end
+		end
+		chk2_nv = {n, v};
+	end
+endfunction
+
 function [31:0] size_bytes;
 	input [1:0] sz; input a7;
 	begin
@@ -451,7 +503,7 @@ always @* begin
 			ra_b = {1'b1, ir[2:0]};              // An direct or the address register of the EA
 			ra_c = {1'b0, ir[2:0]};              // Dn direct
 		end
-		S_PMMU0, S_PTEST, S_PTEST2, S_PFLUSH, S_PMOVE_RD, S_PMOVE_RD2, S_PMOVE_RD3, S_PMOVE_WR, S_PMOVE_WR2, S_PMOVE_FIN: begin
+		S_PMMU0, S_PLOAD, S_PFLUSH2, S_PTEST, S_PTEST2, S_PFLUSH, S_PMOVE_RD, S_PMOVE_RD2, S_PMOVE_RD3, S_PMOVE_WR, S_PMOVE_WR2, S_PMOVE_FIN: begin
 			ra_a = {1'b0, ext[2:0]};          // Dn holding the function code
 			ra_b = {1'b1, ext[7:5]};          // An for the PTEST result
 		end
@@ -553,11 +605,12 @@ always @(posedge clk) begin
 		cp_trace_wait <= 1'b0;
 		status_cnt <= 2'd3;
 		d_addr <= 32'd0; d_size <= 2'd0; d_rw <= 1'b1; d_rmc <= 1'b0; d_rmc_last <= 1'b0; d_iack <= 1'b0;
+		d_nocache <= 1'b0;
 		d_fc <= 3'd0; d_wdata <= 32'd0;
 		i_addr <= 32'd0; i_fc <= 3'd0;
 		ir <= 16'd0; ext <= 16'd0; pc_i <= 32'd0; ea <= 32'd0; ea2 <= 32'd0;
 		src <= 32'd0; dst <= 32'd0; imm <= 32'd0; tmp <= 32'd0; tmp2 <= 32'd0; tmp3 <= 32'd0;
-		cnt <= 8'd0; sub <= 8'd0; mm_mask <= 16'd0; ea_sel <= 1'b0; ea_ret <= S_FETCH; imm_ret <= S_FETCH;
+		cnt <= 8'd0; sub <= 8'd0; mm_mask <= 16'd0; ea_sel <= 1'b0; ea_pc <= 1'b0; ea_ret <= S_FETCH; imm_ret <= S_FETCH;
 		imm_tgt <= 1'b0; dw_dst <= DW_NONE; dw_ret <= S_FETCH; dw_reg <= 4'd0;
 		tr_t1 <= 1'b0; tr_t0 <= 1'b0; flow <= 1'b0;
 		exc_vec <= 8'd0; exc_fmt <= 4'd0; exc_pc <= 32'd0; exc_ia <= 32'd0; exc_sr <= 16'd0; exc_ssw <= 16'd0;
@@ -575,7 +628,7 @@ always @(posedge clk) begin
 		md_div <= 1'b0; md_sign <= 1'b0; md_a <= 32'd0; md_hi <= 32'd0; md_lo <= 32'd0;
 		op_kind <= 3'd0; op_level <= 3'd0; op_la <= 32'd0; op_fc <= 3'd0; op_fcmask <= 3'd0;
 		reg_sel <= 3'd0; reg_wdata_hi <= 32'd0; reg_wdata_lo <= 32'd0; reg_fd <= 1'b0;
-		rf_waddr <= 4'd0; rf_wdata <= 32'd0; sp_sel <= 2'd0; sp_wdata <= 32'd0;
+		rf_waddr <= 4'd0; rf_wact <= 2'd1; rf_wdata <= 32'd0; sp_sel <= 2'd0; sp_wdata <= 32'd0;
 	end else begin
 		//---------------------------------------------------------- events from the memory system
 		if (d_late_fault) begin
@@ -671,6 +724,5 @@ always @(posedge clk) begin
 		end
 	end
 end
-wire exc_is_irq_active = (state == S_EXC0 || state == S_EXC1 || state == S_EXC2 || state == S_EXC3 || state == S_IACK) && exc_is_irq;
 
 endmodule

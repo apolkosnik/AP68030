@@ -133,6 +133,7 @@ reg  [2:0] t_total;       // operand bytes remaining (SIZ)
 reg        t_rw;
 reg  [2:0] t_fc;
 reg        t_rmc_last;
+reg        t_rmc;
 reg        t_ciout;
 reg        t_cbreq;
 reg        t_ocs;
@@ -470,7 +471,7 @@ wire  [2:0] n_siz   = n_from_req ? req_total :
 wire        n_rw    = n_from_req ? req_rw : t_rw;
 wire  [2:0] n_fc    = n_from_req ? req_fc : t_fc;
 wire        n_ciout = n_from_req ? req_ciout : t_ciout;
-wire        n_rmc   = n_from_req ? req_rmc : 1'b0;
+wire        n_rmc   = n_from_req ? req_rmc : t_rmc;
 wire        n_ocs   = n_from_req ? req_ocs : t_ocs;
 wire        n_kind_data = n_from_req ? (req_kind == `BK_DATA) : (t_kind == `BK_DATA);
 wire        n_first = n_from_req ? 1'b1 : t_first;
@@ -531,7 +532,7 @@ wire enter_burst = t_term && t_term_sync && !t_term_err && cbreq_p && cback && !
 always @(posedge clk) begin
 	if (rst) begin
 		bst <= B_IDLE; t_valid <= 1'b0; t_kind <= 2'd0; t_addr <= 32'd0; t_rem <= 3'd0;
-		t_total <= 3'd0; t_rw <= 1'b1; t_fc <= 3'd0; t_rmc_last <= 1'b0; t_ciout <= 1'b0;
+		t_total <= 3'd0; t_rw <= 1'b1; t_fc <= 3'd0; t_rmc_last <= 1'b0; t_rmc <= 1'b0; t_ciout <= 1'b0;
 		t_cbreq <= 1'b0; t_ocs <= 1'b0; t_cache <= 1'b0; t_wdata <= 32'd0; t_nbytes <= 3'd0;
 		t_off <= 2'd0; t_fill <= 1'b0; t_have <= 4'd0; t_ebuf <= 32'd0; t_noc <= 1'b0;
 		t_first <= 1'b1; t_opdone <= 1'b0;
@@ -631,7 +632,7 @@ always @(posedge clk) begin
 		if (accept) begin
 			t_valid <= 1'b1; t_kind <= req_kind; t_addr <= req_addr; t_rem <= req_nbytes;
 			t_nbytes <= req_nbytes; t_total <= req_total; t_rw <= req_rw; t_fc <= req_fc;
-			t_rmc_last <= req_rmc_last; t_ciout <= req_ciout; t_cbreq <= req_cbreq;
+			t_rmc_last <= req_rmc_last; t_rmc <= req_rmc; t_ciout <= req_ciout; t_cbreq <= req_cbreq;
 			t_ocs <= req_ocs; t_cache <= req_cache; t_wdata <= req_wdata; t_off <= req_addr[1:0];
 			t_fill <= 1'b0; t_have <= 4'd0; t_ebuf <= 32'd0; t_noc <= 1'b0; t_first <= 1'b1;
 			t_opdone <= 1'b0;

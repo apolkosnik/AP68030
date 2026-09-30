@@ -589,11 +589,11 @@ cas2ok:
 	cmp2.w	($30A0).l,d0	; on the lower bound
 	chkccr	$04,135
 	moveq	#25,d0
-	cmp2.w	($30A0).l,d0	; above
-	chkccr	$01,136
+	cmp2.w	($30A0).l,d0	; above: C, and N (MC68030, WinUAE corpus)
+	chkccr	$09,136
 	moveq	#5,d0
-	cmp2.w	($30A0).l,d0	; below
-	chkccr	$01,137
+	cmp2.w	($30A0).l,d0	; below: C, and N
+	chkccr	$09,137
 	move.l	#$00003000,($30A8).l	; long bounds for an address register
 	move.l	#$00004000,($30AC).l
 	movea.l	#$3800,a1
@@ -657,7 +657,7 @@ c2dok:
 
 ;----------------------------------------------------------------- BCD with
 ; non-BCD digit inputs: the decimal correction is byte-wide; on the
-; MC68020/MC68030 N tracks the result and V the decimal correction
+; MC68030 N tracks the result and V is cleared
 	move.b	#$FF,d0
 	move.b	#$FF,d1
 	move.w	#0,ccr
@@ -711,6 +711,33 @@ c2dok:
 	chkccr	$15,164
 	and.l	#$FF,d0
 	chkl	d0,0,165
+
+; V is cleared by every BCD instruction on the MC68030 (WinUAE gencpu,
+; "a real 68030 clears V", checked by the cputest 68030 corpus). These
+; operands drive the result's bit 7 across the decimal correction, where
+; the MC68000 would set V.
+	move.b	#$1B,d0
+	move.b	#$FF,d1
+	move.w	#$02,ccr		; V preset: must be cleared
+	abcd	d1,d0			; $1B+$FF -> $80, X=N=C=1, V=0
+	chkccr	$19,248
+	and.l	#$FF,d0
+	chkl	d0,$80,249
+
+	move.b	#$00,d2
+	move.b	#$1B,d3
+	move.w	#$02,ccr
+	sbcd	d3,d2			; $00-$1B -> $7F, X=C=1, N=V=0
+	chkccr	$11,250
+	and.l	#$FF,d2
+	chkl	d2,$7F,251
+
+	move.b	#$1B,d4
+	move.w	#$02,ccr
+	nbcd	d4			; 0-$1B -> $7F, X=C=1, N=V=0
+	chkccr	$11,252
+	and.l	#$FF,d4
+	chkl	d4,$7F,253
 
 ;----------------------------------------------------------------- CHK flags
 ; in bounds: no trap; X is not affected (N, Z, V, C are undefined, PRM)
@@ -859,6 +886,111 @@ bsr_a7_forward_ok:
 bsr_after_reg_a7_write:
 	rts
 memretire_checks:
+
+;------------------------------------- checked against the WinUAE 68030 corpus
+; MOVE An,-(An) stores the initial An; LINK A7 pushes the initial A7
+	lea	($31E0).l,a1
+	move.l	a1,-(a1)
+	chkl	a1,$31DC,254
+	move.l	($31DC).l,d0
+	chkl	d0,$31E0,255
+	move.l	sp,d5
+	link	a7,#-8
+	move.l	sp,d4
+	move.l	8(sp),d3		; the pushed longword, at initial A7 - 4
+	move.l	d5,sp
+	sub.l	d5,d3
+	chkl	d3,0,256
+	sub.l	d5,d4
+	chkl	d4,$FFFFFFF4,257
+
+; DIVU.W overflow: V set, N set by a negative dividend, Z and C kept
+	move.l	#$80000000,d0
+	moveq	#1,d1
+	move.w	#$05,ccr
+	divu.w	d1,d0
+	chkccr	$0F,258
+	chkl	d0,$80000000,259
+	move.l	#$00020000,d0
+	move.w	#$00,ccr
+	divu.w	d1,d0
+	chkccr	$02,260
+; DIVS.W overflow: C clear, V set; N and Z from the low byte of |quotient|
+; unless |quotient| does not fit in 16 bits
+	move.l	#$00010000,d0
+	move.w	#$0D,ccr
+	divs.w	d1,d0
+	chkccr	$02,261
+	move.l	#$00008000,d0
+	move.w	#$09,ccr
+	divs.w	d1,d0
+	chkccr	$06,262
+	move.l	#$0000C080,d0
+	move.w	#$00,ccr
+	divs.w	d1,d0
+	chkccr	$0A,263
+; DIVx.L overflow: N and Z from the low dividend longword (and its high
+; longword for the signed 64-bit form)
+	moveq	#2,d2
+	moveq	#0,d3
+	move.w	#$19,ccr
+	divu.l	d1,d2:d3
+	chkccr	$16,264
+	moveq	#1,d2
+	move.l	#$80000000,d3
+	move.w	#$00,ccr
+	divs.l	d1,d2:d3
+	chkccr	$0A,265
+
+; CHK in bounds: N and Z from Dn, V and C clear, X kept
+	moveq	#5,d0
+	moveq	#10,d1
+	move.w	#$1F,ccr
+	chk.l	d1,d0
+	chkccr	$10,266
+
+; CMP2 N and V: value above both non-negative bounds sets N; a negative
+; value against them sets V and N (the subtraction wraps)
+	move.w	#$1020,($31D0).l
+	moveq	#$30,d0
+	move.w	#$00,ccr
+	cmp2.b	($31D0).l,d0
+	chkccr	$09,267
+	clr.l	($31D0).l
+	move.l	#$10,($31D4).l
+	move.l	#$80000000,d0
+	move.w	#$00,ccr
+	cmp2.l	($31D0).l,d0
+	chkccr	$0B,268
+
+; BFINS over five bytes inserts the source register, not the fifth byte
+	move.l	#$FFFFFFFF,($31C0).l
+	move.b	#$FF,($31C4).l
+	move.l	#$12345678,d1
+	bfins	d1,($31C0).l{4:32}
+	move.l	($31C0).l,d0
+	chkl	d0,$F1234567,269
+	moveq	#0,d0
+	move.b	($31C4).l,d0
+	chkl	d0,$8F,270
+
+; CAS2 mismatch with Dc1 = Dc2: the register receives operand 1
+	move.l	#$11111111,($31D8).l
+	move.l	#$22222222,($31DC).l
+	lea	($31D8).l,a0
+	lea	($31DC).l,a1
+	moveq	#0,d0
+	cas2.l	d0:d0,d2:d3,(a0):(a1)
+	chkl	d0,$11111111,271
+; CAS2 success on one address: operand 2 is written, then operand 1
+	move.l	a0,a1
+	move.l	#$11111111,d0
+	move.l	d0,d1
+	move.l	#$AAAAAAAA,d2
+	move.l	#$BBBBBBBB,d3
+	cas2.l	d0:d1,d2:d3,(a0):(a1)
+	move.l	($31D8).l,d4
+	chkl	d4,$AAAAAAAA,272
 
 ;----------------------------------------------------------------- all done
 	; Completed-load retirement: partial-register merge, flags, and immediate
@@ -1071,6 +1203,57 @@ overlap_isp_ok:
 	failt	237
 overlap_fallback_ok:
 	chkl	d1,$FFFFFFEE,238
+
+;------------------------------------------------- byte/word results into Dn keep that Dn's upper bits
+; (the decoder's default destination register field is bits 11-9, which
+; for these encodings are condition or opcode bits, not the register)
+	move.l	#$0000A000,d0		; the register bits 11-9 would name for ST
+	move.l	#$12345678,d7
+	st	d7			; cc = T: bits 11-9 = 000 (D0)
+	chkl	d7,$123456FF,239
+	move.l	#$87654321,d6
+	moveq	#0,d3
+	seq	d6			; Z clear after moveq? set Z first
+	move.w	#$2704,sr		; Z set
+	seq	d6			; cc = EQ (0111): bits 11-9 = 011 (D3)
+	chkl	d6,$876543FF,240
+	move.l	#$CAFE0000,d5
+	move.w	#$2700,sr
+	move.w	sr,d5			; bits 11-9 = 000 (D0)
+	chkl	d5,$CAFE2700,241
+	move.l	#$BEEF0000,d4
+	move.l	#$FFFFFFFF,d1		; MOVE from CCR: bits 11-9 = 001 (D1)
+	move.w	#$2705,sr
+	move.w	ccr,d4
+	chkl	d4,$BEEF0005,242
+	move.w	#$2700,sr
+
+;------------------------------------------------- PC-relative operands are program references (UM 2.4, 4.2)
+	moveq	#0,d0
+	movec	d0,cacr			; caches off: every read is a bus cycle
+	move.l	#pcdata,$F001C0		; watch this longword
+	move.l	(pcdata,pc),d1		; PC-relative: supervisor program space
+	move.w	$F001C4,d2
+	and.l	#7,d2
+	chkl	d2,6,243
+	chkl	d1,$5A5AA5A5,244
+	move.l	pcdata,d1		; absolute: supervisor data space
+	move.w	$F001C4,d2
+	and.l	#7,d2
+	chkl	d2,5,245
+	lea	pcptr(pc),a0
+	move.l	([pcptr,pc]),d1		; PC memory indirect: both accesses program space
+	move.w	$F001C4,d2
+	and.l	#7,d2
+	chkl	d2,6,246
+	chkl	d1,$5A5AA5A5,247
+	move.l	#$00003111,d0		; caches back on
+	movec	d0,cacr
+	bra.s	pcdata_end
+	cnop	0,4
+pcdata:	dc.l	$5A5AA5A5
+pcptr:	dc.l	pcdata
+pcdata_end:
 
 	move.w	#$600D,(DONEREG).l
 	stop	#$2700

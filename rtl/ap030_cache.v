@@ -48,6 +48,10 @@ module ap030_cache
 	// invalidate the entry addressed by wr_la (write aborted by the MMU)
 	input             inv_we,
 	input      [31:0] inv_la,
+	// invalidate the entry at an externally written address (bus snoop; the
+	// index alone selects it, whatever its tag)
+	input             snp_we,
+	input      [31:0] snp_la,
 
 	// CACR clear controls
 	input             clr_all,
@@ -119,6 +123,7 @@ always @(posedge clk) begin
 		end
 		if (wr_kill) valid[wr_idx][wr_ent] <= 1'b0;
 		if (inv_we) valid[inv_la[7:4]][inv_la[3:2]] <= 1'b0;
+		if (snp_we) valid[snp_la[7:4]][snp_la[3:2]] <= 1'b0;
 	end
 end
 

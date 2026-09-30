@@ -235,8 +235,8 @@ always @* begin
 	endcase
 end
 // fields that follow a zero width are ignored (UM Table 9-1)
-wire       fld_avail = (s_bitpos != 6'd63) && (fld_w != 4'd0) && !s_fld_done;
 reg        s_fld_done;
+wire       fld_avail = (s_bitpos != 6'd63) && (fld_w != 4'd0) && !s_fld_done;
 
 // index extraction: field of width w whose MSB is at bitpos
 function [14:0] field_of;
@@ -291,9 +291,9 @@ wire        d_lu   = s_lw0[31];
 wire [14:0] d_lim  = s_lw0[30:16];
 wire [31:0] d_addr = s_long ? s_lw1 : s_lw0;
 
+reg s_ptest_lvl0;
 assign w_active = (wst != W_IDLE) && (wst != W_ATC0) && (wst != W_DONE) && !s_ptest_lvl0;
 assign busy = (wst != W_IDLE);
-reg s_ptest_lvl0;
 
 // ATC entry creation
 reg        atc_wr;
@@ -396,6 +396,8 @@ wire [6:0] c_sum = {3'd0, reg_wdata_lo[19:16]} + {3'd0, reg_wdata_lo[23:20]} + {
                    ((c_tia == 0 || c_tib == 0 || c_tic == 0) ? 7'd0 : {3'd0, c_tid});
 wire tc_bad = reg_wdata_lo[31] && ((c_sum != 7'd32) || !reg_wdata_lo[23]);   // PS < 8 is reserved
 
+reg        mmusr_we;
+reg [15:0] mmusr_new;
 reg flush_req;
 always @(posedge clk) begin
 	cfg_err <= 1'b0;
@@ -431,8 +433,6 @@ initial begin
 	tc = 32'd0; srp_hi = 32'd0; srp_lo = 32'd0; crp_hi = 32'd0; crp_lo = 32'd0;
 	tt0 = 32'd0; tt1 = 32'd0; mmusr = 16'd0;
 end
-reg        mmusr_we;
-reg [15:0] mmusr_new;
 
 //---------------------------------------------------------------------------
 // the search state machine
@@ -525,6 +525,9 @@ always @(posedge clk) begin
 						s_l <= 1'b1; s_i <= 1'b1; wst <= W_DONE;
 					end else begin
 						s_pa <= root_pa_sum[31:8];
+						// no descriptor in memory to update: a write search
+						// makes the entry modified at once (UM 9.5.3.1)
+						s_m <= s_write && !s_ptest;
 						wst <= W_DONE;
 					end
 				end else begin

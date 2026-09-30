@@ -527,7 +527,7 @@ S_PMMU0: begin
 				end
 				3'b110: begin   // PFLUSH by function code and EA
 					if (!mmu_fc_ok(ext[4:0]) || !ea_ctrlalt) exc_pre(`VEC_FLINE);
-					else begin ea_ret <= S_PFLUSH; state <= S_EA; sub <= 8'd1; end
+					else begin ea_ret <= S_PFLUSH2; state <= S_EA; end
 				end
 				default: exc_pre(`VEC_FLINE);
 			endcase
@@ -555,16 +555,18 @@ S_PLOAD: begin
 	state <= S_PFLUSH;
 end
 S_PFLUSH: begin
-	if (sub[0]) begin
-		// PFLUSH fc,#mask,<ea> after the EA calculation
-		sub <= 8'd0;
-		op_req <= 1'b1; op_kind <= 3'd6; op_la <= ea; op_fc <= mmu_fc(ext[4:0], rf_a[2:0]); op_fcmask <= ext[7:5];
-	end else if (op_done) begin
+	if (op_done) begin
 		// translations changed: refill (UM 12.7.1)
 		flush_req = 1'b1; flush_pc = scan_pc;
 		trace_pend <= tr_t1;
 		state <= S_FETCH;
 	end
+end
+S_PFLUSH2: begin
+	// PFLUSH fc,#mask,<ea>: the EA is ready
+	op_req <= 1'b1; op_kind <= 3'd6; op_la <= ea;
+	op_fc <= mmu_fc(ext[4:0], rf_a[2:0]); op_fcmask <= ext[7:5];
+	state <= S_PFLUSH;
 end
 S_PTEST: begin
 	op_req <= 1'b1; op_kind <= {2'b01, ~ext[9]}; op_level <= ext[12:10]; op_la <= ea; op_fc <= mmu_fc(ext[4:0], rf_a[2:0]);

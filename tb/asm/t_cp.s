@@ -168,6 +168,19 @@ ucp:	dc.w	$F200,$000A	; user mode: privilege violation, pre-instruction
 	dc.w	$F200,$0010
 	chkw	exccnt,1,18
 
+;================================================================ 12b. busy with an interrupt pending
+; the interrupt is serviced with a pre-instruction frame: its PC is the
+; coprocessor instruction, which restarts after RTE (UM 10.4.3)
+	clr.w	exccnt
+	move.w	#$2000,sr
+	move.w	#3,$F001BC		; level 3 at the command write, busy again
+bsy:	dc.w	$F200,$0010
+	chkw	exccnt,1,68
+	chkw	lastvec,27,69
+	move.l	lastpc,d1
+	chkl	d1,bsy,70
+	move.w	#$2700,sr
+
 ;================================================================ 13. exceptions requested by the coprocessor
 	clr.w	exccnt
 pre1:	dc.w	$F200,$0006	; pre-instruction, vector 48
@@ -354,6 +367,15 @@ h_exc:
 	move.l	8(a6),lastia
 	bra.s	hx_out
 hx_fmt0:
+	move.w	6(a6),d6	; an interrupt: release the request
+	and.w	#$0FFF,d6
+	cmp.w	#24*4,d6
+	blo.s	hx_skip
+	cmp.w	#31*4,d6
+	bhi.s	hx_skip
+	move.w	#0,$F00110
+	bra.s	hx_out
+hx_skip:
 	move.l	skip,d6		; pre-instruction frame: step over the instruction
 	add.l	d6,2(a6)
 hx_out:

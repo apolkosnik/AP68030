@@ -130,6 +130,16 @@ line-crossing read is not burst.
 Table searches wait for the write buffer to drain (a descriptor may just
 have been written) and hold RMC for their duration.
 
+**System options** (inputs of `ap030_top`, tied to 0 for a plain MC68030):
+`snoop_we`/`snoop_addr` invalidate the data cache entry for an address
+another bus master has written. The MC68030 does not snoop; CIIN keeps
+DMA-written memory out of the caches on reads, but CIIN is ignored on
+writes, so with write allocation an aligned longword store still creates
+an entry (UM 6.1.2), and a system whose DMA writes such memory can report
+the writes here. `nmi_vec_nocache` makes the level 7 autovector fetch
+bypass the data cache, so an external overlay of that vector (a freezer
+cartridge) is always seen. The Minimig integration uses both.
+
 **Caches** (`ap030_cache.v`, UM 6): 256 bytes each, direct mapped, 16
 lines of four longword entries with individual valid bits, tagged by the
 logical address and FC2 (instruction) or FC2-0 (data). Bursts fill the

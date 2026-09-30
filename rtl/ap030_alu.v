@@ -12,8 +12,8 @@
 //  - shifts/rotates take the count in shcnt (0..63)                         //
 //                                                                          //
 // The architecturally undefined flags follow the MC68020/MC68030 silicon   //
-// as modelled by WinUAE's 68020 core (BCD N from the result, V from the     //
-// decimal correction; DIVx overflow leaves N set and Z clear).             //
+// as modelled by WinUAE's 68030 core (BCD N from the result and V cleared,  //
+// gencpu "a real 68030 clears V"; DIVx overflow leaves N set, Z clear).    //
 //--------------------------------------------------------------------------//
 
 `include "ap030_defs.svh"
@@ -81,21 +81,18 @@ wire [4:0] abcd_lo   = {1'b0, b[3:0]} + {1'b0, a[3:0]} + {4'd0, f_x};
 wire [9:0] abcd_raw  = {2'd0, b[7:0]} + {2'd0, a[7:0]} + {9'd0, f_x} + ((abcd_lo > 5'd9) ? 10'd6 : 10'd0);
 wire       abcd_c    = (abcd_raw[9:4] > 6'd9);
 wire [9:0] abcd_res  = abcd_raw + (abcd_c ? 10'h60 : 10'd0);
-wire       abcd_v    = !abcd_raw[7] && abcd_res[7];
 // SBCD: b - a - X
 wire       sbcd_lb   = ({1'b0, b[3:0]} < ({1'b0, a[3:0]} + {4'd0, f_x}));
 wire [9:0] sbcd_raw  = {2'd0, b[7:0]} - {2'd0, a[7:0]} - {9'd0, f_x};
 wire [9:0] sbcd_cor  = sbcd_raw - (sbcd_lb ? 10'd6 : 10'd0);
 wire [9:0] sbcd_res  = sbcd_cor - (sbcd_raw[9] ? 10'h60 : 10'd0);
 wire       sbcd_c    = sbcd_cor[9];
-wire       sbcd_v    = sbcd_cor[7] && !sbcd_res[7];
 // NBCD: 0 - b - X
 wire       nbcd_lb   = (b[3:0] != 4'd0) | f_x;
 wire [9:0] nbcd_raw  = 10'd0 - {2'd0, b[7:0]} - {9'd0, f_x};
 wire [9:0] nbcd_cor  = nbcd_raw - (nbcd_lb ? 10'd6 : 10'd0);
 wire [9:0] nbcd_res  = nbcd_cor - (nbcd_raw[9] ? 10'h60 : 10'd0);
 wire       nbcd_c    = nbcd_cor[9];
-wire       nbcd_v    = nbcd_cor[7] && !nbcd_res[7];
 
 //---------------------------------------------------------------------------
 // shifter: closed forms of shcnt single-bit steps.  The shifter works on
@@ -307,15 +304,15 @@ always @* begin
 		end
 		`ALU_ABCD: begin
 			result = {24'd0, abcd_res[7:0]};
-			flags_out = {abcd_c, abcd_res[7], f_z & (abcd_res[7:0] == 8'd0), abcd_v, abcd_c};
+			flags_out = {abcd_c, abcd_res[7], f_z & (abcd_res[7:0] == 8'd0), 1'b0, abcd_c};
 		end
 		`ALU_SBCD: begin
 			result = {24'd0, sbcd_res[7:0]};
-			flags_out = {sbcd_c, sbcd_res[7], f_z & (sbcd_res[7:0] == 8'd0), sbcd_v, sbcd_c};
+			flags_out = {sbcd_c, sbcd_res[7], f_z & (sbcd_res[7:0] == 8'd0), 1'b0, sbcd_c};
 		end
 		`ALU_NBCD: begin
 			result = {24'd0, nbcd_res[7:0]};
-			flags_out = {nbcd_c, nbcd_res[7], f_z & (nbcd_res[7:0] == 8'd0), nbcd_v, nbcd_c};
+			flags_out = {nbcd_c, nbcd_res[7], f_z & (nbcd_res[7:0] == 8'd0), 1'b0, nbcd_c};
 		end
 		`ALU_ASL, `ALU_ASR, `ALU_LSL, `ALU_LSR, `ALU_ROL, `ALU_ROR, `ALU_ROXL, `ALU_ROXR: begin
 			result = sh_result;

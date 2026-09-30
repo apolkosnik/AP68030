@@ -30,11 +30,14 @@
 
 #include <stdarg.h>
 
-#define CONSOLE   (*(volatile unsigned char *)0xF00190)
-#define CLOCKS    (*(volatile unsigned long *)0xF00150)
-#define RES_RUNS  (*(volatile unsigned long *)0xF001A0)
-#define RES_TIME  (*(volatile unsigned long *)0xF001A4)
-#define RES_DONE  (*(volatile unsigned short *)0xF001A8)
+#ifndef IO_BASE
+#define IO_BASE   0xF00100          /* testbench registers (-DIO_BASE= moves them) */
+#endif
+#define CONSOLE   (*(volatile unsigned char *)(IO_BASE + 0x90))
+#define CLOCKS    (*(volatile unsigned long *)(IO_BASE + 0x50))
+#define RES_RUNS  (*(volatile unsigned long *)(IO_BASE + 0xA0))
+#define RES_TIME  (*(volatile unsigned long *)(IO_BASE + 0xA4))
+#define RES_DONE  (*(volatile unsigned short *)(IO_BASE + 0xA8))
 
 #ifndef NUMBER_OF_RUNS
 #define NUMBER_OF_RUNS 2000
