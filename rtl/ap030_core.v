@@ -19,6 +19,9 @@
 `include "ap030_defs.svh"
 
 module ap030_core
+#(
+	parameter PCREL_PROGRAM_SPACE = 1   // see ap030_top
+)
 (
 	input             clk,
 	input             rst,

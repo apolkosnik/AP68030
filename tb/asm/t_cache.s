@@ -309,6 +309,51 @@ IPLREG	equ	$F00110
 	chkl	d0,2,44
 	move.w	#0,NMIOPT
 
+;---------------------------------------------------------------- read-modify-write reads and the data cache
+; the read of a CAS/TAS is always a bus cycle; the entry it reads is filled
+; from that data, so a stale entry does not survive it and a cold one is
+; allocated (single entry, no burst)
+	move.l	#$3111+$800,d0
+	movec	d0,cacr
+	move.l	#$3111,d0
+	movec	d0,cacr
+	move.l	#$11111111,($4330).l	; allocated
+	move.l	($4330).l,d1
+	move.l	#$4330,DMAADR
+	move.l	#$22222222,DMADAT
+	move.w	#2,DMAGO		; memory changes, the entry does not
+	nop
+	moveq	#0,d0			; compare fails: memory is $22222222
+	cas.l	d0,d2,($4330).l
+	chkl	d0,$22222222,45		; the RMW read went to memory
+	move.l	($4330).l,d1
+	chkl	d1,$22222222,46		; and the entry followed it
+	move.b	#$05,($4340).l		; allocated (byte write, WA)
+	move.b	($4340).l,d1
+	move.l	#$4340,DMAADR
+	move.l	#$06000000,DMADAT
+	move.w	#2,DMAGO
+	nop
+	tas	($4340).l		; reads $06, writes $86
+	move.b	($4340).l,d1
+	and.l	#$FF,d1
+	chkl	d1,$86,47
+	move.l	#$3111+$800,d0		; cold cache: a CAS read allocates
+	movec	d0,cacr
+	move.l	#$3111,d0
+	movec	d0,cacr
+	move.l	#$4350,DMAADR
+	move.l	#$33333333,DMADAT
+	move.w	#2,DMAGO		; memory $33333333
+	nop
+	moveq	#0,d0
+	cas.l	d0,d2,($4350).l		; fails, reads and allocates $33333333
+	move.l	#$44444444,DMADAT
+	move.w	#2,DMAGO		; memory changes behind the entry
+	nop
+	move.l	($4350).l,d1
+	chkl	d1,$33333333,48		; the allocated entry is used
+
 	move.w	#$600D,(DONEREG).l
 	stop	#$2700
 

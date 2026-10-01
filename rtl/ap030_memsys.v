@@ -589,7 +589,9 @@ always @(posedge clk) begin
 								b_addr <= tr_pa; b_nbytes <= c_pn; b_total <= c_rem;
 								b_rw <= 1'b1; b_fc <= d_fc; b_rmc <= d_rmc; b_rmc_last <= 1'b0;
 								b_ciout <= tr_ci; b_ocs <= c_ocs;
-								b_cache <= dc_fill_ok && !tr_ci && cachable_space && !d_rmc && !d_nocache;
+								// a read-modify-write read fills its entry (no burst): it is always a
+								// bus cycle, and a stale entry must not outlive it
+								b_cache <= dc_fill_ok && !tr_ci && cachable_space && !d_nocache;
 								b_cbreq <= dc_fill_ok && cacr[`CACR_DBE] && !tr_ci && cachable_space && !d_rmc && !d_nocache &&
 								           (!dc_tag_hit || dc_line_empty) && !((lk_first || r_first) && c_cross);
 								b_wdata <= 32'd0;
@@ -632,7 +634,7 @@ always @(posedge clk) begin
 					b_addr <= d_iack ? r_addr : r_pa_hold; b_nbytes <= r_pn; b_total <= r_rem;
 					b_rw <= 1'b1; b_fc <= d_fc; b_rmc <= d_rmc && !d_iack; b_rmc_last <= 1'b0;
 					b_ciout <= r_ci_hold && !d_iack; b_ocs <= r_ocs;
-					b_cache <= dc_fill_ok && !r_ci_hold && cachable_space && !d_rmc && !d_iack && !d_nocache;
+					b_cache <= dc_fill_ok && !r_ci_hold && cachable_space && !d_iack && !d_nocache;   // RMW reads fill, as above
 					b_cbreq <= dc_fill_ok && cacr[`CACR_DBE] && !r_ci_hold && cachable_space && !d_rmc && !d_iack && !d_nocache &&
 					           (!r_tag_hit || r_line_empty) && !(r_first && r_cross_line);
 					b_wdata <= 32'd0;

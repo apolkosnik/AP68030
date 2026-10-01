@@ -15,6 +15,13 @@
 `include "ap030_defs.svh"
 
 module ap030_top
+#(
+	// PC-relative operand reads use program space (UM 2.4, 4.2).  An
+	// integration whose glue reads "program space" as "instruction fetch"
+	// (a TG68-style busstate, as Minimig's cpu_wrapper) sets this to 0 so
+	// those reads keep the data function code there.
+	parameter PCREL_PROGRAM_SPACE = 1
+)
 (
 	input             clk,
 
@@ -128,7 +135,7 @@ assign dbg_cache_clear = cacr_ci | cacr_cd | cacr_cei | cacr_ced;
 wire  [7:2] caar_idx;
 wire        halted;
 
-ap030_core core (
+ap030_core #(.PCREL_PROGRAM_SPACE(PCREL_PROGRAM_SPACE)) core (
 	.clk(clk), .rst(rst),
 	.d_stb(d_stb), .d_addr(d_addr), .d_size(d_size), .d_rw(d_rw), .d_rmc(d_rmc), .d_rmc_last(d_rmc_last),
 	.d_rmc_release(d_rmc_release), .d_iack(d_iack), .d_nocache(d_nocache), .d_fc(d_fc), .d_wdata(d_wdata),

@@ -753,6 +753,78 @@ ovec_n:	moveq	#0,d0
 	move.l	lastpc,d0
 	chkl	d0,$10,134
 
+;---------------------------------------------------------------- interrupts into user-mode stack code
+; a level 3 request is swept over every clock of a user-mode loop that
+; pushes, pops, calls and links on A7 (as tasks do under Kickstart); the
+; interrupt runs on the ISP, and after each round USP, ISP and the
+; loop's results must be exact.  The loop returns to supervisor mode
+; through the privilege violation of an RTE.
+	move.w	#M_RTE,mode
+	move.w	#0,VECREG
+	move.l	#1,d7			; delay in clocks
+irs_round:
+	move.w	#$2700,sr
+	move.w	#0,IPLREG
+	move.l	sp,a5			; ISP before the round
+	lea	($2800).l,a0
+	move.l	a0,usp
+	clr.w	exccnt
+	move.w	#3,DLVREG
+	move.w	d7,DLYREG
+	move.w	#$0000,sr		; user mode, mask 0
+	moveq	#0,d0
+	moveq	#7,d2
+irs_loop:
+	move.l	d0,-(sp)
+	addq.l	#1,d0
+	move.w	d0,-(sp)
+	move.w	(sp)+,d1
+	move.l	(sp)+,d3
+	bsr	irs_sub
+	link	a6,#-8
+	move.l	d0,-4(a6)
+	unlk	a6
+	lea	-12(sp),sp
+	lea	12(sp),sp
+	dbf	d2,irs_loop
+	rte				; privileged: back to supervisor
+	move.w	#$2700,sr
+	cmpa.l	a5,sp
+	beq.s	irs_ok1
+	move.w	#135,d6
+	bra	irs_fail
+irs_ok1:
+	move.l	usp,a0
+	cmpa.l	#$2800,a0
+	beq.s	irs_ok2
+	move.w	#136,d6
+	bra	irs_fail
+irs_ok2:
+	cmp.l	#8,d0
+	bne.s	irs_bad
+	cmp.l	#8,d1
+	bne.s	irs_bad
+	cmp.l	#7,d3
+	bne.s	irs_bad
+	cmp.l	#8,d4
+	beq.s	irs_ok3
+irs_bad:
+	move.w	#137,d6
+	bra	irs_fail
+irs_ok3:
+	addq.l	#1,d7
+	cmp.l	#400,d7
+	bne	irs_round
+	move.w	#0,IPLREG
+	bra.s	irs_done
+irs_sub:
+	move.l	d0,d4			; d0 after the increment
+	rts
+irs_fail:
+	move.w	d6,d7
+	bra	fail_all
+irs_done:
+
 ;---------------------------------------------------------------- RESET instruction: 512 clocks on the pin
 	reset
 	move.l	RSTLEN,d0
@@ -847,9 +919,9 @@ ht1:
 	rte
 
 h_irq:
-	movem.l	d6,-(sp)
+	movem.l	d6/a6,-(sp)	; the interrupted code's A6 is preserved
 	move.l	sp,a6
-	addq.l	#4,a6
+	addq.l	#8,a6
 	record2
 	tst.w	irqhold
 	beq.s	h_irq_rel
@@ -858,7 +930,7 @@ h_irq:
 h_irq_rel:
 	move.w	#0,IPLREG	; release the request
 h_irq_out:
-	movem.l	(sp)+,d6
+	movem.l	(sp)+,d6/a6
 	rte
 
 h_buserr:
