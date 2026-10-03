@@ -1,0 +1,1198 @@
+--- a/Minimig.qsf
++++ b/Minimig.qsf
+@@ -55,7 +55,7 @@
+ set_global_assignment -name FITTER_EFFORT "STANDARD FIT"
+ set_global_assignment -name PLACEMENT_EFFORT_MULTIPLIER 4.0
+ set_global_assignment -name ROUTER_TIMING_OPTIMIZATION_LEVEL MAXIMUM
+-set_global_assignment -name SEED 7
++set_global_assignment -name SEED 8
+ set_global_assignment -name VERILOG_MACRO "MISTER_FB=1"
+ set_global_assignment -name VERILOG_MACRO "MISTER_FB_PALETTE=1"
+ 
+--- a/rtl/ap030/ap030_core.v
++++ b/rtl/ap030/ap030_core.v
+@@ -679,6 +679,20 @@
+ 			fetch_out <= fetch_out - {1'b0, i_ack | i_fault};
+ 			fetch_disc <= fetch_out - {1'b0, i_ack | i_fault};
+ 			refill_p <= 1'b1;
++			// Ordinary branches preserve the program function code. Issue
++			// their target fetch with the redirect, retaining the discard
++			// count for older requests. Exception/RTE/SR changes use the
++			// existing path so their new program space is selected first.
++			if ((state == S_BCC || state == S_JMP || state == S_RTS2 ||
++			     state == S_RTD2 || state == S_DBCC) && i_ready &&
++			    (fetch_out - {1'b0, i_ack | i_fault} != 2'd2) &&
++			    !halted_r && !fetch_hold) begin
++				i_stb <= 1'b1;
++				i_addr <= {flush_pc[31:2], 2'b00};
++				i_fc <= fc_prog;
++				fetch_pc <= {flush_pc[31:2], 2'b00} + 32'd4;
++				fetch_out <= fetch_out - {1'b0, i_ack | i_fault} + 2'd1;
++			end
+ 		end else if (pipe_load) begin
+ 			// RTE: stages C and B from the frame, fetching resumes behind them
+ 			begin : pipe_preload
+--- a/rtl/ap030/core/ap030_exec_a.vh
++++ b/rtl/ap030/core/ap030_exec_a.vh
+@@ -94,7 +94,9 @@
+ 			DW_FRAME: begin fr[cnt[4:0]] <= data; cnt <= cnt + 8'd1; end
+ 			default: ;
+ 		endcase
+-		state <= dw_ret;
++		if (dw_ret == S_MOVE_DEA) begin
++			ea_sel <= 1'b1; ea_ret <= S_MOVE_WR; state <= S_EA;
++		end else state <= dw_ret;
+ 	end else if (d_fault) begin
+ 		if (exc_busfault) begin
+ 			// UM 7.5.4: double bus fault
+@@ -127,7 +129,9 @@
+ 		else src <= {16'd0, w0};
+ 		pop(two ? 2'd2 : 2'd1);
+ 		imm_tgt <= 1'b1;
+-		state <= imm_ret;
++		if (imm_ret == S_MOVE_DEA) begin
++			ea_sel <= 1'b1; ea_ret <= S_MOVE_WR; state <= S_EA;
++		end else state <= imm_ret;
+ 	end
+ end
+ 
+@@ -137,27 +141,27 @@
+ 	bytes = size_bytes(g_size, ea_regn == 3'd7);
+ 	ea_pc <= ea_pcrel;          // the reads that follow use program space for PC-relative modes
+ 	case (ea_mode)
+-		3'b010: begin ea <= rf_a; state <= ea_ret; end
++		3'b010: begin ea_ready(rf_a); end
+ 		3'b011: begin
+-			ea <= rf_a; wreg({1'b1, ea_regn}, rf_a + bytes); state <= ea_ret;
++			ea_ready(rf_a); wreg({1'b1, ea_regn}, rf_a + bytes);
+ 			// a register destination that is this base register sees the update
+ 			if (g_dstk == DK_REG && g_dreg == {1'b1, ea_regn}) dst <= rf_a + bytes;
+ 		end
+ 		3'b100: begin
+-			ea <= rf_a - bytes; wreg({1'b1, ea_regn}, rf_a - bytes); state <= ea_ret;
++			ea_ready(rf_a - bytes); wreg({1'b1, ea_regn}, rf_a - bytes);
+ 			if (g_dstk == DK_REG && g_dreg == {1'b1, ea_regn}) dst <= rf_a - bytes;
+ 			// MOVE An,-(An) stores the initial value of An: the source is read
+ 			// before the destination address is formed (WinUAE 68030 cputest)
+ 		end
+ 		3'b101: begin
+ 			if (!w0_v) ; else if (w0_f) exc_stream_fault(1'b0, 1'b0);
+-			else begin ea <= rf_a + sext16(w0); pop(2'd1); state <= ea_ret; end
++			else begin ea_ready(rf_a + sext16(w0)); pop(2'd1); end
+ 		end
+ 		3'b110: begin
+ 			if (!w0_v) ; else if (w0_f) exc_stream_fault(1'b0, 1'b0);
+ 			else if (!w0[8]) begin
+-				ea <= rf_a + sext8(w0[7:0]) + index_val(rf_c, w0);
+-				pop(2'd1); state <= ea_ret;
++				ea_ready(rf_a + sext8(w0[7:0]) + index_val(rf_c, w0));
++				pop(2'd1);
+ 			end else begin
+ 				tmp <= w0[7] ? 32'd0 : rf_a;
+ 				tmp2 <= w0[6] ? 32'd0 : index_val(rf_c, w0);
+@@ -169,21 +173,21 @@
+ 			case (ea_regn)
+ 				3'b000: begin
+ 					if (!w0_v) ; else if (w0_f) exc_stream_fault(1'b0, 1'b0);
+-					else begin ea <= sext16(w0); pop(2'd1); state <= ea_ret; end
++					else begin ea_ready(sext16(w0)); pop(2'd1); end
+ 				end
+ 				3'b001: begin
+ 					if (!have2) ; else if (pipe_faulted(1'b1)) exc_stream_fault(1'b1, 1'b0);
+-					else begin ea <= {w0, w1}; pop(2'd2); state <= ea_ret; end
++					else begin ea_ready({w0, w1}); pop(2'd2); end
+ 				end
+ 				3'b010: begin
+ 					if (!w0_v) ; else if (w0_f) exc_stream_fault(1'b0, 1'b0);
+-					else begin ea <= scan_pc + sext16(w0); pop(2'd1); state <= ea_ret; end
++					else begin ea_ready(scan_pc + sext16(w0)); pop(2'd1); end
+ 				end
+ 				3'b011: begin
+ 					if (!w0_v) ; else if (w0_f) exc_stream_fault(1'b0, 1'b0);
+ 					else if (!w0[8]) begin
+-						ea <= scan_pc + sext8(w0[7:0]) + index_val(rf_c, w0);
+-						pop(2'd1); state <= ea_ret;
++						ea_ready(scan_pc + sext8(w0[7:0]) + index_val(rf_c, w0));
++						pop(2'd1);
+ 					end else begin
+ 						tmp <= w0[7] ? 32'd0 : scan_pc;
+ 						tmp2 <= w0[6] ? 32'd0 : index_val(rf_c, w0);
+@@ -215,8 +219,7 @@
+ 		if (sub[5:4] == 2'b10) pop(2'd1);
+ 		else if (sub[5:4] == 2'b11) pop(2'd2);
+ 		if (sub[2:0] == 3'b000) begin
+-			ea <= tmp + bd + tmp2;
+-			state <= ea_ret;
++			ea_ready(tmp + bd + tmp2);
+ 		end else begin
+ 			// memory indirect: preindexed unless IS=1 or I/IS[2]=1 (postindexed)
+ 			tmp <= tmp + bd + ((!sub[6] && !sub[2]) ? tmp2 : 32'd0);
+@@ -239,8 +242,7 @@
+ 	else begin
+ 		if (sub[1:0] == 2'b10) pop(2'd1);
+ 		else if (sub[1:0] == 2'b11) pop(2'd2);
+-		ea <= ea + od + ((!sub[6] && sub[2]) ? tmp2 : 32'd0);
+-		state <= ea_ret;
++		ea_ready(ea + od + ((!sub[6] && sub[2]) ? tmp2 : 32'd0));
+ 	end
+ end
+ 
+--- a/rtl/ap030/core/ap030_tasks.vh
++++ b/rtl/ap030/core/ap030_tasks.vh
+@@ -22,6 +22,28 @@
+ 		dw_dst <= dst_sel; dw_ret <= ret;
+ 		state <= S_DWAIT;
+ 	end
++endtask
++
++// Complete an effective address and launch a generic operand read in the
++// same clock. The read uses this address and the EA's program/data space;
++// ea and ea_pc are still being registered, so neither is read back here.
++task ea_ready;
++ input [31:0] addr;
++ begin
++  ea <= addr;
++  if (ea_ret == S_GEN_RD)
++   dreq(addr, g_size, 1'b1, 32'd0,
++        (ea_pcrel && PCREL_PROGRAM_SPACE) ? fc_prog : fc_data,
++        1'b0, 1'b0, (g_srck == SK_EA) ? DW_SRC : DW_DST,
++        g_move_mem ? S_MOVE_DEA : nx);
++  else if (ea_ret == S_MOVE_WR) begin
++   // MOVE's source and ALU controls are already registered. Its store
++   // and flags can be issued with the completed destination address.
++   sr[4:0] <= alu_f;
++   finish;
++   wr(addr, g_size, src, S_FETCH);
++  end else state <= ea_ret;
++ end
+ endtask
+ 
+ // convenience wrappers
+@@ -235,7 +257,7 @@
+ 			state <= S_EA;
+ 			ea_ret <= S_GEN_RD;
+ 		end else if (dc_dstk == DK_EA) begin
+-			if (dc_move_mem) state <= S_MOVE_DEA;
++			if (dc_move_mem) begin ea_sel <= 1'b1; ea_ret <= S_MOVE_WR; state <= S_EA; end
+ 			else begin state <= S_EA; ea_ret <= dc_dstrd ? S_GEN_RD : dc_first; end
+ 		end else if (dc_dstk == DK_IMM) begin
+ 			state <= S_IMM; imm_tgt <= 1'b1; imm_ret <= dc_first;
+--- a/rtl/ap030/ap030_memsys.v
++++ b/rtl/ap030/ap030_memsys.v
+@@ -24,6 +24,7 @@
+ `include "ap030_defs.svh"
+ 
+ module ap030_memsys
++#(parameter FAST_PORT = 0)
+ (
+ 	input             clk,
+ 	input             rst,
+@@ -102,6 +103,24 @@
+ 
+ 	output            bus_quiet,    // no posted write, no bus activity (NOP synchronization)
+ 
++	// Optional internal Fast RAM port, after translation. Request fields
++	// remain stable through fast_req && fast_ready. Responses have no
++	// backpressure: first word completes the operand, fast_last releases
++	// the slot; further words are wrapped cache-line fill beats.
++	// Address is physical; bit 3 of fast_be selects fast_wdata[31:24].
++	// Replies begin at least one clock after acceptance. The target must
++	// complete without BERR; potentially faulting/locked transfers use pins.
++	output            fast_req,
++	output     [31:0] fast_addr,
++	output      [2:0] fast_fc,
++	output            fast_rw, fast_ci, fast_burst,
++	output      [3:0] fast_be,
++	output     [31:0] fast_wdata,
++	input             fast_match, fast_ready,
++	input             fast_valid, fast_last,
++	input       [1:0] fast_word,
++	input      [31:0] fast_rdata,
++
+ 	// ---- MC68030 pins ------------------------------------------------------
+ 	output     [31:0] a_o,
+ 	output      [2:0] fc_o,
+@@ -224,14 +243,54 @@
+ wire [31:2] b_fill_addr;
+ reg         b_rmc_release;
+ 
++// Select the native route only for ordinary translated RAM transfers.
++// Atomic RMW and table walks retain pin-bus locking and fault semantics.
++wire native_sel = FAST_PORT && fast_match && b_kind == `BK_DATA && !b_rmc;
++reg native_active, native_first;
++wire pin_ack, pin_busy, pin_done, pin_berr, pin_avec, pin_ciin, pin_fill, pin_idle;
++wire [31:0] pin_rdata, pin_fill_data;
++wire [31:2] pin_fill_addr;
++assign fast_req = b_req && native_sel && !native_active && !pin_busy &&
++                  !bus_granted && !halted && halt_n;
++assign fast_addr = b_addr;
++assign fast_fc = b_fc;
++assign fast_rw = b_rw;
++assign fast_ci = b_ciout;
++assign fast_burst = b_rw && b_cache && b_cbreq && !b_ciout;
++assign fast_be = be_of(b_addr[1:0], b_nbytes);
++assign fast_wdata = (b_wdata << (8 * (3'd4 - b_total))) >> (8 * b_addr[1:0]);
++wire native_take = fast_req && fast_ready;
++wire native_response = native_active && fast_valid;
++always @(posedge clk) begin
++	if (rst) begin native_active <= 1'b0; native_first <= 1'b0; end
++	else begin
++		if (native_take) begin native_active <= 1'b1; native_first <= 1'b1; end
++		if (native_response) begin
++			native_first <= 1'b0;
++			if (fast_last) native_active <= 1'b0;
++		end
++	end
++end
++assign b_ack = pin_ack || native_take;
++assign b_busy = pin_busy || native_active;
++assign b_idle = pin_idle && !native_active;
++assign b_done = pin_done || (native_response && native_first);
++assign b_rdata = native_active ? extract(fast_rdata, b_addr[1:0], b_nbytes) : pin_rdata;
++assign b_berr = pin_berr && !native_active;
++assign b_avec = pin_avec && !native_active;
++assign b_ciin = pin_ciin && !native_active;
++assign b_fill_stb = pin_fill || (native_response && b_rw && b_cache && !b_ciout);
++assign b_fill_addr = native_active ? {b_addr[31:4], fast_word} : pin_fill_addr;
++assign b_fill_data = native_active ? fast_rdata : pin_fill_data;
++
+ ap030_bus bus (
+ 	.clk(clk), .rst(rst),
+-	.req(b_req), .req_kind(b_kind), .req_addr(b_addr), .req_nbytes(b_nbytes), .req_total(b_total),
++	.req(b_req && !native_sel && !native_active), .req_kind(b_kind), .req_addr(b_addr), .req_nbytes(b_nbytes), .req_total(b_total),
+ 	.req_rw(b_rw), .req_fc(b_fc), .req_rmc(b_rmc), .req_rmc_last(b_rmc_last), .req_ciout(b_ciout),
+ 	.req_cbreq(b_cbreq), .req_ocs(b_ocs), .req_cache(b_cache), .req_wdata(b_wdata),
+-	.req_ack(b_ack), .busy(b_busy), .done(b_done), .rd_data(b_rdata), .res_berr(b_berr),
+-	.res_avec(b_avec), .res_ciin(b_ciin), .fill_stb(b_fill_stb), .fill_addr(b_fill_addr),
+-	.fill_data(b_fill_data), .rmc_release(b_rmc_release), .halted(halted), .bus_idle(b_idle),
++	.req_ack(pin_ack), .busy(pin_busy), .done(pin_done), .rd_data(pin_rdata), .res_berr(pin_berr),
++	.res_avec(pin_avec), .res_ciin(pin_ciin), .fill_stb(pin_fill), .fill_addr(pin_fill_addr),
++	.fill_data(pin_fill_data), .rmc_release(b_rmc_release), .halted(halted), .bus_idle(pin_idle),
+ 	.a_o(a_o), .fc_o(fc_o), .siz_o(siz_o), .rw_o(rw_o), .rmc_n_o(rmc_n_o), .as_n_o(as_n_o),
+ 	.ds_n_o(ds_n_o), .dben_n_o(dben_n_o), .ecs_n_o(ecs_n_o), .ocs_n_o(ocs_n_o), .ciout_n_o(ciout_n_o),
+ 	.cbreq_n_o(cbreq_n_o), .bus_oe(bus_oe), .d_o(d_o), .d_oe(d_oe), .d_i(d_i),
+@@ -388,12 +447,16 @@
+ assign      i_data  = (is == IS_HIT) ? ic_data : i_data_r;
+ wire [31:0] ci_addr   = ilk_first ? {i_req_addr[31:2], 2'b00} : ir_addr;
+ wire  [2:0] ci_fc     = ilk_first ? i_req_fc : ir_fc;
+-// the data side owns the MMU port whenever it looks up
+-wire du_lookup = lk_act;
+-wire if_lookup = ilk_act && !du_lookup;
++// Reserve the MMU port from the pending request, before late burst/write
++// stalls are resolved. Including native_busy in the address mux otherwise
++// puts bus completion, ATC lookup and fault capture on one timing path.
++// A stalled data lookup may delay an instruction translation; cache hits
++// still proceed, and lookup side effects remain qualified by lk_act.
++wire du_select = FAST_PORT ? (((ds == DS_IDLE) && d_go) || ds == DS_LOOKUP) : lk_act;
++wire if_lookup = ilk_act && !du_select;
+ 
+ always @* begin
+-	if (du_lookup) begin
++	if (du_select) begin
+ 		tr_la = c_addr; tr_fc = d_fc; tr_rw = d_rw; tr_rmc = d_rmc && !d_iack;
+ 	end else begin
+ 		tr_la = ci_addr; tr_fc = ci_fc; tr_rw = 1'b1; tr_rmc = 1'b0;
+--- a/rtl/ap030/ap030_top.v
++++ b/rtl/ap030/ap030_top.v
+@@ -20,7 +20,8 @@
+ 	// integration whose glue reads "program space" as "instruction fetch"
+ 	// (a TG68-style busstate, as Minimig's cpu_wrapper) sets this to 0 so
+ 	// those reads keep the data function code there.
+-	parameter PCREL_PROGRAM_SPACE = 1
++	parameter PCREL_PROGRAM_SPACE = 1,
++	parameter FAST_PORT = 0
+ )
+ (
+ 	input             clk,
+@@ -65,6 +66,24 @@
+ 	output            refill_n,
+ 	output            status_n,
+ 
++	// Optional internal Fast RAM port, after translation. Request fields
++	// remain stable through fast_req && fast_ready. Responses have no
++	// backpressure: first word completes the operand, fast_last releases
++	// the slot; further words are wrapped cache-line fill beats.
++	// Address is physical; bit 3 of fast_be selects fast_wdata[31:24].
++	// Replies begin at least one clock after acceptance. The target must
++	// complete without BERR; potentially faulting/locked transfers use pins.
++	output            fast_req,
++	output     [31:0] fast_addr,
++	output      [2:0] fast_fc,
++	output            fast_rw, fast_ci, fast_burst,
++	output      [3:0] fast_be,
++	output     [31:0] fast_wdata,
++	input             fast_match, fast_ready,
++	input             fast_valid, fast_last,
++	input       [1:0] fast_word,
++	input      [31:0] fast_rdata,
++
+ 	// observation
+ 	output     [31:0] dbg_pc,
+ 	output     [15:0] dbg_sr,
+@@ -164,7 +183,7 @@
+ 	.nmi_vec_nocache(nmi_vec_nocache)
+ );
+ 
+-ap030_memsys memsys (
++ap030_memsys #(.FAST_PORT(FAST_PORT)) memsys (
+ 	.clk(clk), .rst(rst),
+ 	.cacr(cacr), .cacr_ci(cacr_ci), .cacr_cei(cacr_cei), .cacr_cd(cacr_cd), .cacr_ced(cacr_ced),
+ 	.caar_idx(caar_idx), .cdis(cdis_s), .mmudis(mmudis_s), .halted(halted),
+@@ -185,7 +204,11 @@
+ 	.d_o(d_o), .d_oe(d_oe), .d_i(d_i),
+ 	.dsack0_n(dsack0_n), .dsack1_n(dsack1_n), .sterm_n(sterm_n), .berr_n(berr_n), .halt_n(halt_n),
+ 	.avec_n(avec_n), .ciin_n(ciin_n), .cback_n(cback_n), .br_n(br_n), .bgack_n(bgack_n),
+-	.bg_n_o(bg_n), .bus_granted()
++	.bg_n_o(bg_n), .bus_granted(),
++	.fast_req(fast_req), .fast_addr(fast_addr), .fast_fc(fast_fc), .fast_rw(fast_rw),
++	.fast_ci(fast_ci), .fast_burst(fast_burst), .fast_be(fast_be), .fast_wdata(fast_wdata),
++	.fast_match(fast_match), .fast_ready(fast_ready), .fast_valid(fast_valid),
++	.fast_last(fast_last), .fast_word(fast_word), .fast_rdata(fast_rdata)
+ );
+ 
+ assign dbg_halted = halted;
+--- a/rtl/ap030/ap030_tg68k_compat.v
++++ b/rtl/ap030/ap030_tg68k_compat.v
+@@ -52,7 +52,8 @@
+ 	// on-board debug capture read over JTAG (ap030_dbgcap.v,
+ 	// tests/ap030/ap030_dbgread.tcl): about 600 ALMs and 15 M10Ks, so it
+ 	// is built only when a board problem needs it
+-	parameter DEBUG_CAPTURE = 0
++	parameter DEBUG_CAPTURE = 0,
++	parameter FAST_PORT = 1
+ )
+ (
+ 	input         clk,           // Minimig CPU bus (clk_sys)
+@@ -148,6 +149,22 @@
+ assign ramaddr[26:23] = (sel_z3_0 | sel_z3_1) ? a[26:23] : 4'd0;
+ assign ramaddr[22:1]  = a[22:1];
+ wire [28:0] ddr_addr  = {3'b001, ramaddr[28:3]};
++
++// The direct request uses the same physical mapping and NMI exclusion
++// as the pin-bus route. Autoconfiguration is already synchronized above.
++wire n_req, n_ready, n_valid, n_last, n_rw, n_ci, n_burst;
++wire [31:0] n_addr, n_wdata, n_rdata;
++wire [2:0] n_fc;
++wire [3:0] n_be;
++wire [1:0] n_word;
++wire n_z30 = (n_addr[31:27] == z3b0_c) && z3e0_c[1];
++wire n_z31 = (n_addr[31:28] == z3b1_c) && z3e1_c[1];
++wire n_z2 = (n_addr[31:24] == 8'h00) && (n_addr[23] ^ |n_addr[22:21]) && z2e_c[1];
++wire n_nmi = n_rw && n_fc[1:0] == 2'b01 && n_addr[31:2] == nmi_vec[31:2];
++wire n_match = n_fc != 3'd7 && !n_nmi && (n_z30 || n_z31 || n_z2);
++wire [28:1] n_ramaddr = {~n_z30, (~n_z31 | n_addr[27]),
++                        ((n_z30 || n_z31) ? n_addr[26:23] : 4'd0), n_addr[22:1]};
++wire [28:0] n_ddr_addr = {3'b001, n_ramaddr[28:3]};
+ 
+ // the Minimig port, processor side: a cycle is handed over with p_tgl and
+ // answered with k_tgl (clk side, below)
+@@ -221,7 +238,7 @@
+ // cpu_wrapper's busstate treats program space as an instruction fetch (the
+ // turbo chip/kick paths and the controllers' instruction caches), so the
+ // PC-relative operand reads keep the data function code here
+-ap030_top #(.PCREL_PROGRAM_SPACE(0)) cpu (
++ap030_top #(.PCREL_PROGRAM_SPACE(0), .FAST_PORT(FAST_PORT)) cpu (
+ 	.clk(clk_cpu),
+ 	.a(a), .fc(cfc), .siz(siz), .rw(rw), .rmc_n(), .as_n(as_n), .ds_n(ds_n), .dben_n(),
+ 	.ecs_n(), .ocs_n(), .ciout_n(ciout_n), .cbreq_n(cbreq_n), .bus_oe(),
+@@ -235,7 +252,10 @@
+ 	.dbg_pc(dbg_pc), .dbg_sr(dbg_sr), .dbg_state(dbg_state), .dbg_inst(dbg_inst), .dbg_halted(cpu_halted),
+ 	.dbg_vec(dbg_vec), .dbg_epc(dbg_epc), .dbg_esr(dbg_esr), .dbg_ir(dbg_ir), .dbg_ea(dbg_ea), .dbg_isp(dbg_isp), .dbg_trace(dbg_trace),
+ 	.dbg_vbr(vbr), .dbg_cacr(cacr), .dbg_cache_clear(cache_clear),
+-	.snoop_we(snp_we_c), .snoop_addr(snp_addr_c), .nmi_vec_nocache(1'b1)
++	.snoop_we(snp_we_c), .snoop_addr(snp_addr_c), .nmi_vec_nocache(1'b1),
++	.fast_req(n_req), .fast_addr(n_addr), .fast_fc(n_fc), .fast_rw(n_rw), .fast_ci(n_ci),
++	.fast_burst(n_burst), .fast_be(n_be), .fast_wdata(n_wdata), .fast_match(n_match),
++	.fast_ready(n_ready), .fast_valid(n_valid), .fast_last(n_last), .fast_word(n_word), .fast_rdata(n_rdata)
+ );
+ 
+ //---------------------------------------------------------------------------
+@@ -248,13 +268,16 @@
+ wire  [63:0] rsp_wdata, rsp_rdata;
+ wire   [3:0] rsp_wlevel;
+ 
+-ap030_fastram_fe fe (
++ap030_fastram_fe #(.NATIVE_PORT(FAST_PORT)) fe (
+ 	.clk(clk_cpu), .rst(rst_c),
+ 	.a(a), .fc(cfc), .siz(siz), .rw(rw), .as_n(as_n), .d_o(d_o), .d_oe(d_oe), .cbreq_n(cbreq_n),
+ 	.sel(fast_sel), .ci(!ciout_n), .clear(cache_clear), .ddr_addr(ddr_addr),
+ 	.sterm_n(fr_sterm_n), .cback_n(fr_cback_n), .d_i(fr_d),
+ 	.cmd_we(cmd_we), .cmd_wdata(cmd_wdata), .cmd_wlevel(cmd_wlevel),
+-	.rsp_rdata(rsp_rdata), .rsp_rempty(rsp_rempty), .rsp_re(rsp_re)
++	.rsp_rdata(rsp_rdata), .rsp_rempty(rsp_rempty), .rsp_re(rsp_re),
++	.n_req(n_req), .n_ready(n_ready), .n_addr(n_addr), .n_ddr_addr(n_ddr_addr),
++	.n_fc(n_fc), .n_rw(n_rw), .n_ci(n_ci), .n_burst(n_burst), .n_be(n_be), .n_wdata(n_wdata),
++	.n_valid(n_valid), .n_last(n_last), .n_word(n_word), .n_rdata(n_rdata)
+ );
+ 
+ ap030_async_fifo #(.W(102), .AW(3)) cmd_fifo (
+--- a/rtl/ap030/ap030_fastram_fe.v
++++ b/rtl/ap030/ap030_fastram_fe.v
+@@ -1,8 +1,8 @@
+ //--------------------------------------------------------------------------//
+ // AP030 - MC68030 compatible CPU                                           //
+ //                                                                          //
+-// ap030_fastram_fe.v - Fast RAM on the 68030 bus as a 32-bit synchronous   //
+-// port (UM 7.3.2, 7.3.7): STERM termination, burst fills with CBACK.  Runs //
++// ap030_fastram_fe.v - shared Fast RAM cache with optional native port.   //
++// Pin bus: STERM termination and CBACK bursts (UM 7.3.2, 7.3.7). Runs      //
+ // on the processor clock; the DDR3 side (ap030_fastram_be) is reached      //
+ // through two dual-clock FIFOs.                                            //
+ //                                                                          //
+@@ -16,6 +16,11 @@
+ // buffer; a miss reads the line from DDR3 and allocates it.  The           //
+ // processor's on-chip caches and CACR are unchanged; this cache is below   //
+ // the MMU, on physical addresses.                                          //
++//                                                                          //
++// With NATIVE_PORT, translated CPU requests can bypass the pin sequencer. //
++// Both ports share the buffers, block RAM and FIFO; locked transfers and //
++// MMU table walks still use pins. Native responses return the requested    //
++// longword first and wrap through the line without response backpressure. //
+ //                                                                          //
+ // Writes are posted: STERM as soon as the command FIFO has room.  They     //
+ // update any buffered copy of their line and the cache's copy (write      //
+@@ -40,6 +45,7 @@
+ //--------------------------------------------------------------------------//
+ 
+ module ap030_fastram_fe
++#(parameter NATIVE_PORT = 0)
+ (
+ 	input             clk,
+ 	input             rst,
+@@ -69,11 +75,35 @@
+ 	// response FIFO (from DDR3): 64-bit beats of a requested line
+ 	input      [63:0] rsp_rdata,
+ 	input             rsp_rempty,
+-	output            rsp_re
++	output            rsp_re,
++
++	// Processor-clock request/response port. It shares all cache state and
++	// DDR queues with pin-bus accesses. Responses are consumed every clock.
++	input             n_req,
++	output            n_ready,
++	input      [31:0] n_addr,
++	input      [28:0] n_ddr_addr,
++	input       [2:0] n_fc,
++	input             n_rw, n_ci, n_burst,
++	input       [3:0] n_be,
++	input      [31:0] n_wdata,
++	output reg        n_valid, n_last,
++	output reg  [1:0] n_word,
++	output reg [31:0] n_rdata
+ );
+ 
+ wire as_asserted = !as_n;
+-wire prog = (fc[1:0] == 2'b10);
++reg as_d;
++reg n_active, n_emit, n_rw_q, n_ci_q, n_prog_q;
++reg [28:1] n_line_q;
++reg [1:0] n_pos;
++reg [2:0] n_left;
++wire use_native = n_active || (NATIVE_PORT && n_req && as_n);
++wire prog = use_native ? (n_active ? n_prog_q : n_fc[1:0] == 2'b10) : fc[1:0] == 2'b10;
++wire access_ci = use_native ? (n_active ? n_ci_q : n_ci) : ci;
++wire access_rw = n_active ? n_rw_q : rw;
++wire access_active = n_active || (sel && as_asserted);
++
+ 
+ //---------------------------------------------------------------------------
+ // line buffers: 0 data, 1 program
+@@ -83,12 +113,12 @@
+ reg [28:1] lb_line  [0:1];        // DDR3 word address without the half bit
+ reg [31:0] lb_d     [0:1][0:3];   // longwords in address order
+ 
+-wire [28:1] cur_line = ddr_addr[28:1];
++wire [28:1] cur_line = use_native ? (n_active ? n_line_q : n_ddr_addr[28:1]) : ddr_addr[28:1];
+ wire        hit_d    = lb_valid[0] && (lb_line[0] == cur_line);
+ wire        hit_p    = lb_valid[1] && (lb_line[1] == cur_line);
+ wire        once_cur = prog ? lb_once[1] : lb_once[0];
+ // a cache-inhibited read is served only by a line fetched for it
+-wire        rd_hit   = (prog ? hit_p : hit_d) && (!ci || once_cur);
++wire        rd_hit   = (prog ? hit_p : hit_d) && (!access_ci || once_cur);
+ 
+ //---------------------------------------------------------------------------
+ // line reads
+@@ -108,8 +138,16 @@
+ // the cycle: STERM, CBACK, burst beats (the slave timing of UM Figure 7-45)
+ //---------------------------------------------------------------------------
+ wire wr_room  = (cmd_wlevel <= 4'd6);             // a push may still be pending
+-wire ready    = rw ? rd_hit : wr_room;
+-assign sterm_n = !(sel && as_asserted && ready);
++// Pin acknowledgements have a half-cycle path to the write capture. They
++// must not depend on the native request/address mux, even when no native
++// transfer can be accepted while AS is asserted.
++wire pin_prog = fc[1:0] == 2'b10;
++wire pin_hit_d = lb_valid[0] && lb_line[0] == ddr_addr[28:1];
++wire pin_hit_p = lb_valid[1] && lb_line[1] == ddr_addr[28:1];
++wire pin_once = pin_prog ? lb_once[1] : lb_once[0];
++wire pin_rd_hit = (pin_prog ? pin_hit_p : pin_hit_d) && (!ci || pin_once);
++wire ready    = rw ? pin_rd_hit : wr_room;
++assign sterm_n = !(sel && as_asserted && !n_active && ready);
+ assign cback_n = !(sel && as_asserted);
+ 
+ reg  [1:0] beat_idx;
+@@ -119,7 +157,7 @@
+ 	if (!as_asserted) begin beat_idx <= a[3:2]; burst_active <= 1'b0; end
+ 	else if (sterm_rec) begin burst_active <= 1'b1; beat_idx <= beat_idx + 2'd1; end
+ end
+-assign d_i = lb_d[prog][beat_idx];
++assign d_i = lb_d[fc[1:0] == 2'b10][beat_idx];
+ 
+ //---------------------------------------------------------------------------
+ // writes: the data is captured on the falling edge after STERM (as the
+@@ -165,13 +203,6 @@
+ 		         l[1] ? nw[15:8]  : old[15:8],  l[0] ? nw[7:0]   : old[7:0]};
+ 	end endfunction
+ 
+-// byte enables and data of the 64-bit DDR3 word for a longword at w_long[0]
+-// be bit 2k+1 = even byte of word k, 2k = odd byte; a longword is words
+-// 2m (offsets 0,1) and 2m+1 (offsets 2,3); w_lanes bit 3 is offset 0
+-wire [7:0]  be_long = {4'd0, w_lanes[1], w_lanes[0], w_lanes[3], w_lanes[2]};
+-wire [63:0] w_data64 = w_long[0] ? {w_data[15:0], w_data[31:16], 32'd0} : {32'd0, w_data[15:0], w_data[31:16]};
+-wire [7:0]  w_be8    = w_long[0] ? {be_long[3:0], 4'd0} : {4'd0, be_long[3:0]};
+-
+ //---------------------------------------------------------------------------
+ // the Fast RAM cache: 512 lines of 16 bytes, direct mapped.  Index = DDR3
+ // line address bits 9..1, tag = bits 28..10; one tag RAM {valid, tag} and
+@@ -199,14 +230,43 @@
+ // the fill write takes the RAMs for a clock: it waits for a write update's
+ // data write, and posting and new lookups wait for it (a read of what is
+ // being written would return the old contents)
+-wire        f_wr     = f_pend && (l2s != L_UPD);
++wire        f_wr     = f_pend && (l2s != L_UPD) && !clear && !rst;
+ wire        post_now = wcap && !wcap_ack && !f_wr;
+-wire        rd_miss  = sel && as_asserted && rw && !rd_hit && !rd_pend && !wcap && cmd_wlevel <= 4'd7;
+-wire        look_go  = rd_miss && !ci && !sweeping && (l2s == L_IDLE) && !f_pend;
+-wire        ddr_go   = rd_miss && (ci || sweeping) && (l2s != L_LOOK);
++wire        rd_miss  = access_active && access_rw && !(n_active && n_emit) && !rd_hit && !rd_pend && !wcap && cmd_wlevel <= 4'd7;
++wire        look_go  = rd_miss && !access_ci && !clear && !sweeping && (l2s == L_IDLE) && !f_pend;
++wire        ddr_go   = rd_miss && (access_ci || clear || sweeping) && (l2s != L_LOOK);
+ wire        look_hit = (l2s == L_LOOK) && !sweeping && !clear && l2_tag_q[19] && (l2_tag_q[18:0] == lk_line[28:10]);
+-wire        upd_hit  = (l2s == L_UPD) && !sweeping && l2_tag_q[19] && (l2_tag_q[18:0] == u_tag);
+-wire  [8:0] l2_ra    = post_now ? w_addr[9:1] : cur_line[9:1];
++wire        upd_hit  = (l2s == L_UPD) && !sweeping && !clear && !rst && l2_tag_q[19] && (l2_tag_q[18:0] == u_tag);
++assign n_ready = NATIVE_PORT && !rst && as_n && !as_d && !n_active &&
++                 !rd_pend && !wcap && !f_pend && l2s == L_IDLE &&
++                 (n_rw ? cmd_wlevel <= 4'd7 : wr_room);
++wire native_take = n_req && n_ready;
++wire native_post = native_take && !n_rw;
++wire [28:0] post_addr = post_now ? w_addr : n_ddr_addr;
++wire [1:0] post_long = post_now ? w_long : n_addr[3:2];
++wire [3:0] post_lanes = post_now ? w_lanes : n_be;
++wire [31:0] post_data = post_now ? w_data : n_wdata;
++// DDR packing swaps the two 16-bit words of a big-endian longword.
++wire [7:0] post_be = post_long[0] ? {post_lanes[1:0], post_lanes[3:2], 4'd0} :
++                                                  {4'd0, post_lanes[1:0], post_lanes[3:2]};
++wire [63:0] post_data64 = post_long[0] ? {post_data[15:0], post_data[31:16], 32'd0} :
++                                                     {32'd0, post_data[15:0], post_data[31:16]};
++wire [8:0] l2_ra = post_now ? w_addr[9:1] : native_take ? n_ddr_addr[9:1] : cur_line[9:1];
++
++// Return the requested longword first, then wrap through the other three.
++task native_reply;
++ input [31:0] value;
++ input [1:0] word_index;
++ input [2:0] remaining;
++ begin
++  n_valid <= 1'b1; n_rdata <= value; n_word <= word_index;
++  n_last <= remaining == 3'd1;
++  n_pos <= word_index + 2'd1;
++  n_left <= remaining - 3'd1;
++  n_active <= remaining != 3'd1;
++  n_emit <= remaining != 3'd1;
++ end
++endtask
+ 
+ wire        tag_we   = sweeping || f_wr;
+ wire  [8:0] tag_wa   = sweeping ? sw_idx : f_idx;
+@@ -229,13 +289,13 @@
+ // sequencing (processor clock)
+ //---------------------------------------------------------------------------
+ integer e, k;
+-reg as_d;
+ always @(posedge clk) begin
+ 	cmd_we <= 1'b0;
+ 	wcap_ack <= 1'b0;
+-	as_d <= as_asserted;
++	n_valid <= 1'b0;
++	as_d <= access_active;
+ 	// the end of a cycle drops lines that were fetched for it alone
+-	if (as_d && !as_asserted)
++	if (as_d && !access_active)
+ 		for (e = 0; e < 2; e = e + 1)
+ 			if (lb_once[e] && !(rd_pend && rd_ent == e)) begin lb_valid[e] <= 1'b0; lb_once[e] <= 1'b0; end
+ 	// the cache sweep: one tag per clock
+@@ -244,6 +304,7 @@
+ 		if (sw_idx == 9'd511) sweeping <= 1'b0;
+ 	end
+ 	if (rst) begin
++		n_active <= 1'b0; n_emit <= 1'b0;
+ 		for (e = 0; e < 2; e = e + 1) begin lb_valid[e] <= 1'b0; lb_once[e] <= 1'b0; end
+ 		// a line read still in flight completes into nothing
+ 		if (rd_pend) rd_drop <= 1'b1;
+@@ -254,12 +315,16 @@
+ 		// serves only the cycle waiting for it; the cache is swept
+ 		if (clear) begin
+ 			for (e = 0; e < 2; e = e + 1) begin
+-				if (rd_pend && rd_ent == e) lb_once[e] <= 1'b1;
++				if ((rd_pend && rd_ent == e) || (l2s == L_LOOK && lk_ent == e)) lb_once[e] <= 1'b1;
+ 				else begin lb_valid[e] <= 1'b0; lb_once[e] <= 1'b0; end
+ 			end
+ 			sweeping <= 1'b1; sw_idx <= 9'd0;
+ 			f_alloc <= 1'b0; f_pend <= 1'b0;
+ 		end
++		// Buffered native reads and continuation beats do not traverse the
++		// pin-bus sequencer. A cache lookup hit emits its first word below.
++		if (n_active && n_rw_q && (n_emit || (rd_hit && !rd_pend && l2s == L_IDLE)))
++			native_reply(lb_d[n_prog_q][n_pos], n_pos, n_left);
+ 		// a completed fill is written into the cache (data and tag)
+ 		if (f_wr) f_pend <= 1'b0;
+ 		// a posted write's tag compare: update the cached copy
+@@ -273,6 +338,7 @@
+ 				lb_valid[lk_ent] <= 1'b1;
+ 				lb_once[lk_ent]  <= 1'b0;
+ 				lb_line[lk_ent]  <= lk_line;
++				if (n_active) native_reply(l2_d_q[n_pos], n_pos, n_left);
+ 			end else begin
+ 				cmd_we    <= 1'b1;
+ 				cmd_wdata <= {1'b0, lk_line, 1'b0, 8'hFF, 64'd0};
+@@ -282,25 +348,44 @@
+ 				rd_drop   <= 1'b0;
+ 				f_alloc   <= !sweeping && !clear;
+ 				lb_valid[lk_ent] <= 1'b0;
+-				lb_once[lk_ent]  <= 1'b0;
++				lb_once[lk_ent]  <= clear;
+ 				lb_line[lk_ent]  <= lk_line;
+ 			end
+ 		end
+ 		// post a captured write (it always fits: STERM waited for room)
+-		else if (post_now) begin
++		else if (post_now || native_post) begin
+ 			cmd_we    <= 1'b1;
+-			cmd_wdata <= {1'b1, w_addr, w_be8, w_data64};
+-			wcap_ack  <= 1'b1;
++			cmd_wdata <= {1'b1, post_addr, post_be, post_data64};
++			wcap_ack <= post_now;
++			if (native_post) native_reply(32'd0, n_addr[3:2], 3'd1);
+ 			for (e = 0; e < 2; e = e + 1)
+-				if (lb_valid[e] && lb_line[e] == w_addr[28:1])
+-					lb_d[e][w_long] <= merge(lb_d[e][w_long], w_data, w_lanes);
++				if (lb_valid[e] && lb_line[e] == post_addr[28:1])
++					lb_d[e][post_long] <= merge(lb_d[e][post_long], post_data, post_lanes);
+ 			// its tag is read this clock and compared in the next
+ 			l2s     <= L_UPD;
+-			u_idx   <= w_addr[9:1];
+-			u_tag   <= w_addr[28:10];
+-			u_long  <= w_long;
+-			u_lanes <= w_lanes;
+-			u_data  <= w_data;
++			u_idx   <= post_addr[9:1];
++			u_tag   <= post_addr[28:10];
++			u_long  <= post_long;
++			u_lanes <= post_lanes;
++			u_data  <= post_data;
++		end
++		else if (native_take) begin
++			n_active <= 1'b1; n_emit <= 1'b0;
++			n_rw_q <= 1'b1; n_ci_q <= n_ci; n_prog_q <= prog;
++			n_line_q <= n_ddr_addr[28:1]; n_pos <= n_addr[3:2];
++			n_left <= n_burst ? 3'd4 : 3'd1;
++			if (rd_hit && !n_ci && !once_cur && !clear) begin
++				native_reply(lb_d[prog][n_addr[3:2]], n_addr[3:2], n_burst ? 3'd4 : 3'd1);
++			end else if (!n_ci && !sweeping && !clear) begin
++				l2s <= L_LOOK; lk_ent <= prog; lk_line <= n_ddr_addr[28:1];
++				lb_valid[prog] <= 1'b0;
++			end else begin
++				cmd_we <= 1'b1;
++				cmd_wdata <= {1'b0, n_ddr_addr[28:1], 1'b0, 8'hFF, 64'd0};
++				rd_pend <= 1'b1; rd_ent <= prog; rd_half <= 1'b0; rd_drop <= 1'b0;
++				f_alloc <= 1'b0; lb_valid[prog] <= 1'b0;
++				lb_once[prog] <= n_ci || clear; lb_line[prog] <= n_ddr_addr[28:1];
++			end
+ 		end
+ 		// a read that misses the buffers looks the line up in the cache
+ 		else if (look_go && !f_wr) begin
+@@ -319,13 +404,13 @@
+ 			rd_drop   <= 1'b0;
+ 			f_alloc   <= 1'b0;
+ 			lb_valid[prog] <= 1'b0;
+-			lb_once[prog]  <= ci;
++			lb_once[prog]  <= access_ci || clear;
+ 			lb_line[prog]  <= cur_line;
+ 		end
+ 	end
+ 	// the line arrives as two beats (lower half first)
+ 	if (rsp_re) begin
+-		if (!rd_drop) begin
++		if (!rd_drop && !rst) begin
+ 			lb_d[rd_ent][{rd_half, 1'b0}] <= beat_long(rsp_rdata, 1'b0);
+ 			lb_d[rd_ent][{rd_half, 1'b1}] <= beat_long(rsp_rdata, 1'b1);
+ 		end
+@@ -347,6 +432,9 @@
+ end
+ 
+ initial begin
++	n_active = 0; n_emit = 0; n_rw_q = 1; n_ci_q = 0; n_prog_q = 0;
++	n_line_q = 0; n_pos = 0; n_left = 0;
++	n_valid = 0; n_last = 0; n_word = 0; n_rdata = 0;
+ 	lb_valid[0] = 1'b0; lb_valid[1] = 1'b0; lb_line[0] = 0; lb_line[1] = 0;
+ 	lb_once[0] = 1'b0; lb_once[1] = 1'b0; as_d = 1'b0;
+ 	for (k = 0; k < 4; k = k + 1) begin lb_d[0][k] = 32'd0; lb_d[1][k] = 32'd0; end
+--- a/tests/ap030/tb_ap030_wrapchip.sv
++++ b/tests/ap030/tb_ap030_wrapchip.sv
+@@ -783,4 +783,15 @@
+ 	$finish;
+ end
+ 
++// The direct port must only claim ordinary physical Fast RAM transfers.
++// Locked operands, MMU table walks, CPU space and the NMI vector use pins.
++always @(posedge clk_cpu) begin
++ if (dut.cpu_inst_p.n_req && dut.cpu_inst_p.n_ready) begin
++  if (!dut.cpu_inst_p.as_n || !dut.cpu_inst_p.n_match ||
++      dut.cpu_inst_p.cpu.memsys.b_rmc || dut.cpu_inst_p.cpu.memsys.b_kind != 0 ||
++      dut.cpu_inst_p.n_fc == 7 || dut.cpu_inst_p.n_nmi)
++   $fatal(1, "FAIL: invalid native Fast RAM request");
++ end
++end
++
+ endmodule
+--- /dev/null
++++ b/tests/ap030/tb_native_cache.sv
+@@ -0,0 +1,427 @@
++`timescale 1ns/1ps
++module tb_native_cache;
++  reg clk=0; always #5 clk=~clk;
++  reg rst=1;
++  reg [31:0] a=0;
++  reg [2:0] fc=5;
++  reg [1:0] siz=0;
++  reg rw=1, as_n=1, d_oe=0, cbreq_n=1, sel=1, ci=0, clear=0;
++  reg [31:0] d_o=0;
++  wire [28:0] ddr_addr=a[31:3];
++  wire sterm_n,cback_n;
++  wire [31:0] d_i;
++  wire cmd_we,rsp_re;
++  wire [101:0] cmd_wdata;
++  reg [3:0] cmd_wlevel=0;
++  reg [63:0] rsp_rdata=0;
++  reg rsp_rempty=1;
++  reg n_req=0;
++  wire n_ready,n_valid,n_last;
++  reg [31:0] n_addr=0,n_wdata=0;
++  wire [28:0] n_ddr_addr=n_addr[31:3];
++  reg [2:0] n_fc=5;
++  reg n_rw=1,n_ci=0,n_burst=0;
++  reg [3:0] n_be=0;
++  wire [1:0] n_word;
++  wire [31:0] n_rdata;
++  ap030_fastram_fe #(.NATIVE_PORT(1)) dut(.*);
++
++  reg [63:0] mem[0:8191];
++  integer read_commands=0, write_commands=0;
++  integer backend_delay=9, backend_gap=3;
++  integer due=0, pending=0, half=0, base=0, ticks=0;
++  integer i,j;
++  reg [63:0] captured0,captured1;
++  // In-order backend model, including gaps between the two response beats.
++  // Memory words use the real DDR bridge's 16-bit-word packing.
++  always @(posedge clk) begin
++    ticks=ticks+1;
++    if(cmd_we) begin
++      if(cmd_wdata[101]) begin
++        write_commands=write_commands+1;
++        for(integer b=0;b<8;b=b+1)
++          if(cmd_wdata[64+b]) mem[cmd_wdata[100:72]][8*b+:8]=cmd_wdata[8*b+:8];
++      end else begin
++        if(pending) $fatal(1,"overlapping backend reads");
++        read_commands=read_commands+1;
++        pending=1; half=0; base=cmd_wdata[100:72]; due=ticks+backend_delay;
++        captured0=mem[base]; captured1=mem[base+1];
++      end
++    end
++    if(rsp_re) begin
++      rsp_rempty<=1;
++      if(half==0) begin half=1; due=ticks+backend_gap; end
++      else pending=0;
++    end else if(pending && rsp_rempty && ticks>=due) begin
++      rsp_rdata<=half ? captured1 : captured0;
++      rsp_rempty<=0;
++    end
++  end
++
++  function [31:0] memory_long(input [31:0] addr);
++    reg [63:0] b;
++    begin
++      b=mem[addr>>3];
++      memory_long=addr[2] ? {b[47:32],b[63:48]} : {b[15:0],b[31:16]};
++    end
++  endfunction
++  function [31:0] merged(input [31:0] oldv,input [31:0] newv,input integer off,input integer n);
++    reg [31:0] v;
++    begin
++      v=oldv;
++      for(integer b=0;b<4;b=b+1)
++        if(b>=off && b<off+n) v[31-8*b-:8]=newv[31-8*b-:8];
++      merged=v;
++    end
++  endfunction
++  task idle(input integer n);
++    repeat(n) begin @(posedge clk); #1; end
++  endtask
++  task start_bus(input [31:0] addr,input bit reading,input [1:0] size,input bit inhibited,input bit instruction);
++    begin
++      @(negedge clk); #1;
++      a=addr; rw=reading; siz=size; ci=inhibited; fc=instruction?6:5;
++      as_n=1; d_oe=!reading; cbreq_n=1;
++      @(negedge clk); #1; as_n=0;
++    end
++  endtask
++  task end_bus;
++    begin @(negedge clk); #1; as_n=1; cbreq_n=1; d_oe=0; idle(1); end
++  endtask
++  task wait_ack(output [31:0] value);
++    integer timeout;
++    bit accepted;
++    begin
++      timeout=0;
++      do begin
++        @(posedge clk); accepted=!sterm_n; value=d_i; #1;
++        timeout=timeout+1;
++        if(timeout>300) $fatal(1,"bus timeout a=%h",a);
++      end while(!accepted);
++    end
++  endtask
++  task read_long(input [31:0] addr,input [31:0] expected,input integer requests,input bit inhibited,input bit instruction);
++    integer before_count;
++    reg [31:0] got;
++    begin
++      before_count=read_commands;
++      start_bus(addr,1,0,inhibited,instruction);
++      wait_ack(got);
++      if(got!==expected) $fatal(1,"read %h got %h expected %h",addr,got,expected);
++      if(requests>=0 && read_commands-before_count!=requests)
++        $fatal(1,"read %h issued %0d DDR requests expected %0d",addr,read_commands-before_count,requests);
++      end_bus;
++    end
++  endtask
++  task write_part(input [31:0] addr,input [31:0] value,input [1:0] size);
++    integer before_count;
++    reg [31:0] unused;
++    begin
++      before_count=write_commands;
++      start_bus(addr,0,size,0,0); d_o=value;
++      wait_ack(unused); end_bus; idle(2);
++      if(write_commands-before_count!=1) $fatal(1,"write did not post exactly once");
++    end
++  endtask
++  task flush;
++    begin @(negedge clk); #1; clear=1; idle(1); clear=0; idle(515); end
++  endtask
++  task burst(input [31:0] addr,input integer requests);
++    integer before_count;
++    reg [31:0] got,word_addr;
++    begin
++      before_count=read_commands;
++      start_bus(addr,1,0,0,1); cbreq_n=0;
++      for(integer b=0;b<4;b=b+1) begin
++        wait_ack(got);
++        word_addr=(addr&32'hfffffff0)|(((addr+4*b)&15));
++        if(got!==memory_long(word_addr)) $fatal(1,"burst %h beat %0d got %h",addr,b,got);
++        if(cback_n) $fatal(1,"burst missing CBACK");
++      end
++      if(read_commands-before_count!=requests) $fatal(1,"burst request count");
++      end_bus;
++    end
++  endtask
++
++
++  task native_start(input [31:0] addr,input bit reading,input bit inhibited,
++                    input bit instruction,input bit burst_mode,input [3:0] enables,input [31:0] data);
++    integer timeout;
++    bit accepted;
++    begin
++      @(negedge clk); #1;
++      n_addr=addr; n_rw=reading; n_ci=inhibited; n_fc=instruction?6:5;
++      n_burst=burst_mode; n_be=enables; n_wdata=data; n_req=1;
++      timeout=0;
++      do begin
++        @(posedge clk); accepted=n_ready; #1; timeout=timeout+1;
++        if(timeout>100) $fatal(1,"native request timeout");
++      end while(!accepted);
++      @(negedge clk); #1; n_req=0;
++    end
++  endtask
++  task native_response(output [31:0] data,output bit last,output [1:0] word_index);
++    integer timeout;
++    bit received;
++    begin
++      timeout=0;
++      do begin
++        @(posedge clk); received=n_valid; data=n_rdata; last=n_last; word_index=n_word; #1;
++        timeout=timeout+1;
++        if(timeout>300) $fatal(1,"native response timeout addr=%h",n_addr);
++      end while(!received);
++    end
++  endtask
++  task native_read(input [31:0] addr,input bit inhibited,input bit instruction,
++                   input bit burst_mode,input integer requests);
++    integer before_count;
++    reg [31:0] got,word_addr;
++    reg [1:0] word_index;
++    bit last;
++    begin
++      before_count=read_commands;
++      native_start(addr,1,inhibited,instruction,burst_mode,0,0);
++      for(integer b=0;b<(burst_mode?4:1);b=b+1) begin
++        native_response(got,last,word_index);
++        word_addr=(addr&32'hfffffff0)|((addr+4*b)&12);
++        if(got!==memory_long(word_addr) || word_index!==word_addr[3:2])
++          $fatal(1,"native read %h beat %0d got %h expected %h word %0d",addr,b,got,memory_long(word_addr),word_index);
++        if(last !== (b==(burst_mode?3:0))) $fatal(1,"native last beat");
++      end
++      if(requests>=0 && read_commands-before_count!=requests)
++        $fatal(1,"native read %h requested %0d DDR lines, expected %0d",addr,read_commands-before_count,requests);
++    end
++  endtask
++  task native_write(input [31:0] addr,input [31:0] value,input [3:0] enables);
++    integer before_count;
++    reg [31:0] unused;
++    reg [1:0] word_index;
++    bit last;
++    begin
++      before_count=write_commands;
++      native_start(addr,0,0,0,0,enables,value);
++      native_response(unused,last,word_index);
++      if(!last) $fatal(1,"write must have one response");
++      idle(2);
++      if(write_commands-before_count!=1) $fatal(1,"native write posting count");
++    end
++  endtask
++  reg [31:0] expected,old_value,new_value,unused;
++  integer n,off,word_index,before_count;
++  reg [31:0] rng=32'h35279bad, random_addr;
++  initial begin
++    for(i=0;i<8192;i=i+1) mem[i]={32'hfedcba98^i,32'h01234567^(i*32'd17)};
++    idle(3); rst=0; idle(515);
++    read_long('h1000,memory_long('h1000),1,0,0);
++    read_long('h1010,memory_long('h1010),1,0,0);
++    read_long('h1000,memory_long('h1000),0,0,0);
++    // Program/data share physical cache lines even when the tiny buffers miss.
++    read_long('h1010,memory_long('h1010),0,0,1);
++    $display("PASS cache retention and shared physical tags");
++
++    // Check all words, offsets, byte/word/three-byte/long write sizes against
++    // an independent byte merge, with the target absent from both buffers.
++    for(word_index=0;word_index<4;word_index=word_index+1)
++      for(n=1;n<=4;n=n+1)
++        for(off=0;off<4;off=off+1) begin
++          read_long('h1010,memory_long('h1010),0,0,0);
++          read_long('h1010,memory_long('h1010),0,0,1);
++          old_value=memory_long('h1000+4*word_index);
++          new_value=32'h89abcdef^(word_index*'h1234+n*'h76543+off*'h1357);
++          expected=merged(old_value,new_value,off,n);
++          write_part('h1000+4*word_index+off,new_value,n[1:0]);
++          if(memory_long('h1000+4*word_index)!==expected) $fatal(1,"DDR byte merge");
++          read_long('h1000+4*word_index,expected,0,0,0);
++        end
++    $display("PASS 64 partial-write combinations with L2-only hits");
++
++    flush;
++    write_part('h1600,32'haabbccdd,0);
++    read_long('h1600,32'haabbccdd,1,0,0);
++    read_long('h1610,memory_long('h1610),1,0,0);
++    read_long('h1600,32'haabbccdd,0,0,0);
++    flush;
++    read_long('h1000,memory_long('h1000),1,0,0);
++    read_long('h3000,memory_long('h3000),1,0,0);
++    read_long('h1000,memory_long('h1000),1,0,0);
++    $display("PASS write-through/no-write-allocate and conflicting tags");
++
++    // A bypassed external change becomes visible on CI reads and on a clear.
++    old_value=memory_long('h1000);
++    mem['h1000>>3]=64'h9876543212345678;
++    read_long('h1000,memory_long('h1000),1,1,0);
++    read_long('h1000,memory_long('h1000),1,1,0);
++    flush;
++    read_long('h1000,memory_long('h1000),1,0,0);
++    flush;
++    read_long('h1200,memory_long('h1200),1,1,0);
++    read_long('h1200,memory_long('h1200),1,0,0);
++    $display("PASS inhibited reads bypass and do not allocate; clear invalidates");
++
++    for(i=0;i<4;i=i+1) begin
++      flush;
++      burst('h1800+4*i,1);
++      read_long('h1810,memory_long('h1810),1,0,1);
++      burst('h1800+4*i,0);
++    end
++    $display("PASS all four burst wrap positions, cold and cached");
++
++    // Clear on each lookup/response phase: the pending cycle must finish,
++    // and a later access must fetch again instead of resurrecting its fill.
++    for(j=0;j<4;j=j+1) begin
++      flush;
++      fork
++        begin read_long('h1a00,memory_long('h1a00),1,0,0); end
++        begin
++          if(j==0) wait(dut.l2s==1);
++          else if(j==1) wait(cmd_we && !cmd_wdata[101]);
++          else if(j==2) wait(rsp_re && !dut.rd_half);
++          else wait(rsp_re && dut.rd_half);
++          clear=1; @(posedge clk); #1; clear=0;
++        end
++      join
++      read_long('h1a10,memory_long('h1a10),1,0,0);
++      read_long('h1a00,memory_long('h1a00),1,0,0);
++    end
++    $display("PASS clear during lookup, outstanding read, and both response beats");
++
++    // An abandoned read drains before the new transaction, without retaining
++    // its old contents in either cache or line buffer.
++    flush; backend_delay=25;
++    start_bus('h1c00,1,0,0,0);
++    wait(read_commands>0 && pending);
++    @(negedge clk); #1; rst=1; as_n=1; idle(1); rst=0;
++    mem['h1c00>>3]=64'hbbaa998877665544;
++    read_long('h1c00,memory_long('h1c00),1,0,0);
++    backend_delay=9;
++    $display("PASS reset during outstanding read");
++
++    flush; cmd_wlevel=8; before_count=read_commands;
++    fork
++      begin read_long('h1e00,memory_long('h1e00),1,0,0); end
++      begin idle(20); if(read_commands!=before_count) $fatal(1,"read ignored full FIFO"); cmd_wlevel=0; end
++    join
++    cmd_wlevel=7; before_count=write_commands;
++    fork
++      begin write_part('h1e04,32'hdeadbeef,0); end
++      begin idle(20); if(write_commands!=before_count || !sterm_n) $fatal(1,"write ignored FIFO pressure"); cmd_wlevel=0; end
++    join
++    read_long('h1e10,memory_long('h1e10),1,0,0);
++    read_long('h1e04,32'hdeadbeef,0,0,0);
++    $display("PASS FIFO pressure and posted-write visibility");
++    // Exercise write tag mismatches and replacements across the full memory,
++    // alternating program/data reads with varying latency and response gaps.
++    for(integer trial=0;trial<1000;trial=trial+1) begin
++      rng=rng^(rng<<13); rng=rng^(rng>>17); rng=rng^(rng<<5);
++      random_addr={16'd0,rng[15:2],2'b00};
++      backend_delay=2+rng[19:16]; backend_gap=1+rng[22:20];
++      if(rng[31:27]==0) flush;
++      if(rng[24]) begin
++        n=1+int'(rng[26:25]); off=int'(rng[28:27]);
++        expected=merged(memory_long(random_addr),rng,off,n);
++        write_part(random_addr+off,rng,n[1:0]);
++        if(memory_long(random_addr)!==expected) $fatal(1,"random DDR write");
++      end else expected=memory_long(random_addr);
++      read_long(random_addr,expected,-1,rng[29],rng[30]);
++    end
++    $display("PASS 1000 deterministic mixed operations with variable backend latency");
++
++    flush;
++    // Both access routes share lines. Cover every burst start word, first
++    // from DDR, then from L2, then from the opposite port's line buffer.
++    for(integer first_word=0;first_word<4;first_word=first_word+1) begin
++      flush;
++      native_read('h2000+4*first_word,0,1,1,1);
++      native_read('h2010,0,1,0,1);
++      native_read('h2000+4*first_word,0,1,1,0);
++      burst('h2000+4*first_word,0);
++      read_long('h2010,memory_long('h2010),0,0,1);
++      native_read('h2000+4*first_word,0,1,1,0);
++    end
++    $display("PASS native DDR/L2/buffer bursts and native/pin sharing");
++
++    // Native writes must update copies used by locked pin-bus operations;
++    // pin writes must likewise update the native path, with no allocation.
++    for(integer bank=0;bank<4;bank=bank+1) begin
++      for(integer mask=1;mask<16;mask=mask+1) begin
++        native_read('h2010,0,0,0,-1); native_read('h2010,0,1,0,-1);
++        old_value=memory_long('h2000+4*bank); new_value=32'h2468abcd^(bank*17+mask);
++        expected=old_value;
++        for(integer b=0;b<4;b=b+1) if(mask&(1<<b)) expected[8*b+:8]=new_value[8*b+:8];
++        native_write('h2000+4*bank,new_value,mask[3:0]);
++        if(memory_long('h2000+4*bank)!==expected) $fatal(1,"native lane merge");
++        read_long('h2000+4*bank,expected,0,0,0);
++        native_read('h2000+4*bank,0,1,0,0);
++        native_read('h2010,0,0,0,-1); native_read('h2010,0,1,0,-1);
++        write_part('h2000+4*bank,~new_value,0);
++        native_read('h2000+4*bank,0,0,0,0);
++      end
++    end
++    $display("PASS all native byte-enable masks and cross-port write visibility");
++
++    native_read('h2000,0,0,0,0);
++    mem['h2000>>3]=64'hffeeddccbbaa9988;
++    native_read('h2000,1,0,0,1);
++    native_read('h2000,1,0,0,1);
++    flush;
++    native_read('h2000,0,0,0,1);
++    $display("PASS native CI bypass and cache clear");
++
++    for(j=0;j<4;j=j+1) begin
++      flush;
++      fork
++        begin native_read('h2200,0,0,1,1); end
++        begin
++          if(j==0) wait(dut.l2s==1);
++          else if(j==1) wait(cmd_we && !cmd_wdata[101]);
++          else if(j==2) wait(rsp_re && !dut.rd_half);
++          else wait(rsp_re && dut.rd_half);
++          clear=1; @(posedge clk); #1; clear=0;
++        end
++      join
++      idle(515);
++      // A fill crossed by clear must not survive even in its line buffer.
++      native_read('h2200,0,0,0,1);
++    end
++    $display("PASS native clear during lookup/request/each response half");
++
++    flush; backend_delay=25;
++    native_start('h2400,1,0,0,0,0,0);
++    wait(pending);
++    @(negedge clk); #1; rst=1; idle(1); rst=0;
++    mem['h2400>>3]=64'h123456789abcdef0;
++    native_read('h2400,0,0,0,1);
++    backend_delay=9;
++    $display("PASS native reset-abandoned response draining");
++
++    flush; cmd_wlevel=8; before_count=read_commands;
++    fork
++      begin native_read('h2600,0,0,1,1); end
++      begin idle(20); if(read_commands!=before_count || n_ready) $fatal(1,"native full FIFO"); cmd_wlevel=0; end
++    join
++    cmd_wlevel=7; before_count=write_commands;
++    fork
++      begin native_write('h2604,32'h13579bdf,15); end
++      begin idle(20); if(write_commands!=before_count || n_ready) $fatal(1,"native write FIFO pressure"); cmd_wlevel=0; end
++    join
++    native_read('h2604,0,0,0,0);
++    $display("PASS native FIFO backpressure");
++
++    for(integer trial=0;trial<1000;trial=trial+1) begin
++      rng=rng^(rng<<13); rng=rng^(rng>>17); rng=rng^(rng<<5);
++      random_addr={16'd0,rng[15:2],2'b00};
++      backend_delay=2+rng[19:16]; backend_gap=1+rng[22:20];
++      if(rng[31:27]==0) flush;
++      if(rng[24]) begin
++        if(rng[25]) native_write(random_addr,rng,rng[29:26]);
++        else write_part(random_addr,rng,0);
++      end
++      if(rng[30]) native_read(random_addr,rng[29],rng[28],rng[26]&&!rng[29],-1);
++      else read_long(random_addr,memory_long(random_addr),-1,rng[29],rng[28]);
++    end
++    $display("PASS 1000 mixed native/pin operations and latency variation");
++    $display("ALL CACHE UNIT TESTS PASSED");
++    $finish;
++  end
++  initial begin #10000000; $fatal(1,"global timeout"); end
++endmodule
+--- /dev/null
++++ b/tests/ap030/run_native_cache.sh
+@@ -0,0 +1,8 @@
++#!/bin/sh
++set -eu
++cd "$(dirname "$0")"
++WORK=${1:-build/native-cache}
++mkdir -p "$WORK"
++iverilog -g2012 -s tb_native_cache -o "$WORK/tb_native_cache" tb_native_cache.sv \
++    ../../rtl/ap030/ap030_fastram_fe.v ../../rtl/ap030/ap030_l2ram.sv
++vvp "$WORK/tb_native_cache"

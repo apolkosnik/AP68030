@@ -46,6 +46,7 @@ module), Python 3.
 ```
 cd tb
 sh run_tests.sh            # everything: bus bench, every program, with and without wait states
+FAST_PORT=1 sh run_tests.sh /tmp/ap030-native-suite  # native RAM plus pin-bus fallbacks
 ./run_prog.sh t_mmu +trace # one program, with the instruction trace (+bustrace, +ctrace, +rftrace, +itrace, +strace)
 ```
 
@@ -69,17 +70,27 @@ check.
 
 ## Timing and performance
 
+The standalone FPGA figures below are historical measurements, before the
+current throughput and optional native-port changes. Current full Minimig
+fits are reported under the native-port results below. The updated RTL has
+not been validated on a board.
+
 `syn/run_syn.sh` runs Quartus Prime (Cyclone V 5CSEBA6U23I7, 50 MHz
 constraint, ports as virtual pins with a 2 ns budget) and prints the Fmax
 summary. Quartus Prime 17.0 reports Fmax 53.0 MHz (slow 1100 mV 100 C
 corner, slack +0.57 ns at 50 MHz), 17.0k ALMs and 9.5k registers.
 
+Run Quartus outside the execution sandbox. Here, sandboxed invocations
+report expired-evaluation error 292037, while the same installation runs
+successfully outside the sandbox. Use an isolated source snapshot for a
+build so concurrent RTL edits cannot change its inputs.
+
 Dhrystone 2.1 (`tb/c`, compiled with vbcc `-O2 -speed -cpu=68030`, caches
-on, 2000 runs, checked against the published final values) runs in 2656
-clocks per Dhrystone on the synchronous burst port: **18,825 Dhrystones/s =
-10.7 DMIPS at 50 MHz (0.214 DMIPS/MHz)**. With two wait states on every
-port it is 3019 clocks, 9.4 DMIPS. `run_tests.sh` builds and runs it when
-vbcc is installed (`VBCC=/opt/amiga-cc/vbcc` by default).
+on, 2000 runs, checked against its final values) now runs in 2423 clocks
+per Dhrystone on the synchronous burst port: **11.74 DMIPS at 50 MHz**.
+With two wait states it takes 2802 clocks, **10.16 DMIPS**. These are
+simulation results normalized to 50 MHz. `run_tests.sh` builds and runs it
+when vbcc is installed (`VBCC=/opt/amiga-cc/vbcc` by default).
 
 | FPGA resource (Cyclone V) | used |
 |---|---|
@@ -94,6 +105,98 @@ to 6.6 on the exception and MMU suites, which are dominated by long
 instructions (absolute long operands, MOVEM, exception frames, table
 searches); instruction cache hits stream at one longword per clock, a data
 cache hit takes two clocks and consecutive stores run four clocks apart.
+
+## Optional native Fast RAM port
+
+`ap030_top` defaults to `FAST_PORT=0`, retaining the pin-bus interface.
+With `FAST_PORT=1`, an integration can decode the translated `fast_addr`
+and `fast_fc`, then assert `fast_match` for reliable internal RAM.
+The memory system keeps locked RMW transfers, MMU table searches and
+interrupt acknowledgements on the pin bus. Translation and protection
+checks precede either route. Instruction fetches and ordinary data accesses
+can use the native port.
+
+The request is accepted on a rising edge with `fast_req && fast_ready`;
+fields remain stable until acceptance. `fast_rw=1` reads. `fast_be[3]`
+selects `fast_wdata[31:24]`, the lowest-address byte of the aligned word.
+Responses start at least one clock after acceptance, with `fast_valid`
+and an aligned 32-bit `fast_rdata`. The first response completes the operand;
+`fast_word` identifies its word within the 16-byte line. A burst returns
+four words, requested word first, wrapping modulo four; `fast_last` releases
+the slot. Writes require one completion response. There is one transaction
+at a time and no response backpressure or bus-error response. Targets that
+can fault must use the pin route. Reset must cancel or drain the target's
+outstanding transaction before accepting a new request.
+
+The prepared Minimig integration enables this port and shares the existing
+8 KiB cache, line buffers, posted-write queue and DDR clock crossings between
+native and pin traffic. CPU-space accesses and the special NMI-vector path
+retain the pin route. Cache-inhibited accesses, clears, byte writes and
+cross-port coherence follow the existing cache rules. The implementation
+also prevents an interrupted fill from surviving a concurrent cache clear.
+
+The same 500-run Fast RAM Dhrystone image produced these simulated results:
+
+| Integration variant | CPU cycles | DMIPS normalized to 50 MHz |
+|---|---:|---:|
+| Committed 8 KiB cache (`04af1491`) | 1,470,205 | 9.68 |
+| EA/MOVE/branch throughput changes | 1,360,257 | 10.46 |
+| Throughput changes plus native port | 1,170,812 | 12.15 |
+| Native port, slower DDR and stalls | 1,172,264 | 12.14 |
+| Native port on original core, without throughput changes | 1,307,759 | 10.88 |
+
+The native port adds **16.2%** over the throughput changes; together they
+add **25.6%** over the committed cached integration. The integrated bench
+uses a 20.6 ns CPU period and reports normalized 50 MHz results. These are
+not board measurements.
+
+Quartus Prime 17.0.2 full-project fits, Cyclone V 5CSEBA6U23I7, original
+timing constraints:
+
+| Integration variant | ALMs | RAM blocks | CPU Fmax, slow 100 C | CPU setup slack at 50 MHz |
+|---|---:|---:|---:|---:|
+| Previous board report (2026-10-01 21:29) | 37,072 | 287 | 50.27 MHz | +0.053 ns |
+| Selected combined version, seed 8 | 38,203 | 287 | 50.55 MHz | +0.108 ns |
+| Corrected combined version, seed 7 | 38,221 | 287 | 50.48 MHz | +0.191 ns |
+| Native port on original core, seed 7 | 37,343 | 287 | 50.41 MHz | +0.081 ns |
+
+The previous board report is a reference measurement, not a fresh baseline
+rebuild. The initial combined fit failed CPU timing (42.27 MHz). Selecting
+the MMU port before resolving late bus stalls and separating the pin-path
+cache-hit comparison shortened those critical paths without changing the
+Dhrystone cycle count. The selected seed-8 build passes project-wide setup,
+hold, recovery, removal and pulse-width checks at all four available corners.
+It costs 1,131 more ALMs than the prior board report (3.1%); this change
+improves speed rather than reducing area. Its tightest project-wide setup
+margin is +0.012 ns in the HDMI scaler at the slow -40 C corner. CPU timing
+passes at 50 MHz; this is not an overclocking result.
+
+Neither seed-7 fit meets timing for the full project: the corrected combined
+build has a -0.099 ns setup path from the shared DDR arbiter into the HPS
+SDRAM interface. The original-core variant has -0.277 ns DDR and -0.015 ns
+HDMI setup failures at the default corner; its CPU also misses timing at the
+slow -40 C corner (-0.011 ns, 49.95 MHz Fmax). Seed 8 uses identical RTL and
+SDC to the corrected combined seed-7 version; no timing exceptions were
+added. The selected build is ready for board testing, but has not been
+programmed onto a board.
+
+Validation includes 58 integration runs; 18 standalone runs with the native
+port disabled and 18 enabled; frontend tests with mixed native/pin traffic,
+partial writes, FIFO pressure, wrapped fills and clear/reset races; and
+28,987 selected WinUAE rounds across 51 slices with zero mismatches. The
+native corpus mode routes ordinary data through the direct port and leaves
+instruction fetches on pins for the replay harness's observation points.
+Use `tb/cputest/run_cputest.py --native` with a separate work directory to
+repeat that mode. This is a targeted corpus subset, not a complete corpus run.
+
+The [board patch](doc/minimig-native.patch) includes placement seed 8 and
+targets integration commit `04af149119925f1a33dbe9807cf131a120f07b68`.
+[Validation records](doc/native-port-results.json) include the selected
+build, comparison fits and artifact hashes. The fitted image is
+`/tmp/ap030-native/quartus-timing-seed8/output_files/Minimig.rbf`; exact source
+hashes and timing reports are in that build directory. Applying the patch
+to the board-build worktree is pending confirmation that no Quartus compile
+is using that tree. All builds here used isolated source snapshots.
 
 ## Licence
 

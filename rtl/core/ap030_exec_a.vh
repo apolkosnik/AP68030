@@ -94,7 +94,9 @@ S_DWAIT: begin
 			DW_FRAME: begin fr[cnt[4:0]] <= data; cnt <= cnt + 8'd1; end
 			default: ;
 		endcase
-		state <= dw_ret;
+		if (dw_ret == S_MOVE_DEA) begin
+			ea_sel <= 1'b1; ea_ret <= S_MOVE_WR; state <= S_EA;
+		end else state <= dw_ret;
 	end else if (d_fault) begin
 		if (exc_busfault) begin
 			// UM 7.5.4: double bus fault
@@ -127,7 +129,9 @@ S_IMM: begin : imm_state
 		else src <= {16'd0, w0};
 		pop(two ? 2'd2 : 2'd1);
 		imm_tgt <= 1'b1;
-		state <= imm_ret;
+		if (imm_ret == S_MOVE_DEA) begin
+			ea_sel <= 1'b1; ea_ret <= S_MOVE_WR; state <= S_EA;
+		end else state <= imm_ret;
 	end
 end
 
@@ -137,27 +141,27 @@ S_EA: begin : ea_state
 	bytes = size_bytes(g_size, ea_regn == 3'd7);
 	ea_pc <= ea_pcrel;          // the reads that follow use program space for PC-relative modes
 	case (ea_mode)
-		3'b010: begin ea <= rf_a; state <= ea_ret; end
+		3'b010: begin ea_ready(rf_a); end
 		3'b011: begin
-			ea <= rf_a; wreg({1'b1, ea_regn}, rf_a + bytes); state <= ea_ret;
+			ea_ready(rf_a); wreg({1'b1, ea_regn}, rf_a + bytes);
 			// a register destination that is this base register sees the update
 			if (g_dstk == DK_REG && g_dreg == {1'b1, ea_regn}) dst <= rf_a + bytes;
 		end
 		3'b100: begin
-			ea <= rf_a - bytes; wreg({1'b1, ea_regn}, rf_a - bytes); state <= ea_ret;
+			ea_ready(rf_a - bytes); wreg({1'b1, ea_regn}, rf_a - bytes);
 			if (g_dstk == DK_REG && g_dreg == {1'b1, ea_regn}) dst <= rf_a - bytes;
 			// MOVE An,-(An) stores the initial value of An: the source is read
 			// before the destination address is formed (WinUAE 68030 cputest)
 		end
 		3'b101: begin
 			if (!w0_v) ; else if (w0_f) exc_stream_fault(1'b0, 1'b0);
-			else begin ea <= rf_a + sext16(w0); pop(2'd1); state <= ea_ret; end
+			else begin ea_ready(rf_a + sext16(w0)); pop(2'd1); end
 		end
 		3'b110: begin
 			if (!w0_v) ; else if (w0_f) exc_stream_fault(1'b0, 1'b0);
 			else if (!w0[8]) begin
-				ea <= rf_a + sext8(w0[7:0]) + index_val(rf_c, w0);
-				pop(2'd1); state <= ea_ret;
+				ea_ready(rf_a + sext8(w0[7:0]) + index_val(rf_c, w0));
+				pop(2'd1);
 			end else begin
 				tmp <= w0[7] ? 32'd0 : rf_a;
 				tmp2 <= w0[6] ? 32'd0 : index_val(rf_c, w0);
@@ -169,21 +173,21 @@ S_EA: begin : ea_state
 			case (ea_regn)
 				3'b000: begin
 					if (!w0_v) ; else if (w0_f) exc_stream_fault(1'b0, 1'b0);
-					else begin ea <= sext16(w0); pop(2'd1); state <= ea_ret; end
+					else begin ea_ready(sext16(w0)); pop(2'd1); end
 				end
 				3'b001: begin
 					if (!have2) ; else if (pipe_faulted(1'b1)) exc_stream_fault(1'b1, 1'b0);
-					else begin ea <= {w0, w1}; pop(2'd2); state <= ea_ret; end
+					else begin ea_ready({w0, w1}); pop(2'd2); end
 				end
 				3'b010: begin
 					if (!w0_v) ; else if (w0_f) exc_stream_fault(1'b0, 1'b0);
-					else begin ea <= scan_pc + sext16(w0); pop(2'd1); state <= ea_ret; end
+					else begin ea_ready(scan_pc + sext16(w0)); pop(2'd1); end
 				end
 				3'b011: begin
 					if (!w0_v) ; else if (w0_f) exc_stream_fault(1'b0, 1'b0);
 					else if (!w0[8]) begin
-						ea <= scan_pc + sext8(w0[7:0]) + index_val(rf_c, w0);
-						pop(2'd1); state <= ea_ret;
+						ea_ready(scan_pc + sext8(w0[7:0]) + index_val(rf_c, w0));
+						pop(2'd1);
 					end else begin
 						tmp <= w0[7] ? 32'd0 : scan_pc;
 						tmp2 <= w0[6] ? 32'd0 : index_val(rf_c, w0);
@@ -215,8 +219,7 @@ S_EA_FULL: begin : ea_full
 		if (sub[5:4] == 2'b10) pop(2'd1);
 		else if (sub[5:4] == 2'b11) pop(2'd2);
 		if (sub[2:0] == 3'b000) begin
-			ea <= tmp + bd + tmp2;
-			state <= ea_ret;
+			ea_ready(tmp + bd + tmp2);
 		end else begin
 			// memory indirect: preindexed unless IS=1 or I/IS[2]=1 (postindexed)
 			tmp <= tmp + bd + ((!sub[6] && !sub[2]) ? tmp2 : 32'd0);
@@ -239,8 +242,7 @@ S_EA_IND: begin : ea_ind_blk
 	else begin
 		if (sub[1:0] == 2'b10) pop(2'd1);
 		else if (sub[1:0] == 2'b11) pop(2'd2);
-		ea <= ea + od + ((!sub[6] && sub[2]) ? tmp2 : 32'd0);
-		state <= ea_ret;
+		ea_ready(ea + od + ((!sub[6] && sub[2]) ? tmp2 : 32'd0));
 	end
 end
 

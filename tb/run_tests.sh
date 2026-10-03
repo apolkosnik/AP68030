@@ -1,7 +1,7 @@
 #!/bin/sh
 # AP68030 self-test suite under Verilator.
 # Needs verilator (5.x), vasmm68k_mot (vbcc) and python3.
-# Usage: sh run_tests.sh [workdir]
+# Usage: [FAST_PORT=1] sh run_tests.sh [workdir]
 set -eu
 cd "$(dirname "$0")"
 
@@ -53,7 +53,7 @@ build() {
 }
 build bus  tb_ap030_bus     tb_ap030_bus.sv $RTL/ap030_bus.v &
 pid_bus=$!
-build prog tb_ap030_program tb_ap030_program.sv $SRC &
+build prog tb_ap030_program "-GFAST_PORT=${FAST_PORT:-0}" tb_ap030_program.sv $SRC &
 pid_prog=$!
 wait $pid_bus || exit 1
 wait $pid_prog || exit 1

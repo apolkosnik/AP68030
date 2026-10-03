@@ -24,6 +24,28 @@ task dreq;
 	end
 endtask
 
+// Complete an effective address and launch a generic operand read in the
+// same clock. The read uses this address and the EA's program/data space;
+// ea and ea_pc are still being registered, so neither is read back here.
+task ea_ready;
+ input [31:0] addr;
+ begin
+  ea <= addr;
+  if (ea_ret == S_GEN_RD)
+   dreq(addr, g_size, 1'b1, 32'd0,
+        (ea_pcrel && PCREL_PROGRAM_SPACE) ? fc_prog : fc_data,
+        1'b0, 1'b0, (g_srck == SK_EA) ? DW_SRC : DW_DST,
+        g_move_mem ? S_MOVE_DEA : nx);
+  else if (ea_ret == S_MOVE_WR) begin
+   // MOVE's source and ALU controls are already registered. Its store
+   // and flags can be issued with the completed destination address.
+   sr[4:0] <= alu_f;
+   finish;
+   wr(addr, g_size, src, S_FETCH);
+  end else state <= ea_ret;
+ end
+endtask
+
 // convenience wrappers
 task rd;   input [31:0] addr; input [1:0] size; input [3:0] dst_sel; input [7:0] ret;
 	begin dreq(addr, size, 1'b1, 32'd0, (ea_pc && PCREL_PROGRAM_SPACE) ? fc_prog : fc_data, 1'b0, 1'b0, dst_sel, ret); end endtask
@@ -235,7 +257,7 @@ task dispatch;
 			state <= S_EA;
 			ea_ret <= S_GEN_RD;
 		end else if (dc_dstk == DK_EA) begin
-			if (dc_move_mem) state <= S_MOVE_DEA;
+			if (dc_move_mem) begin ea_sel <= 1'b1; ea_ret <= S_MOVE_WR; state <= S_EA; end
 			else begin state <= S_EA; ea_ret <= dc_dstrd ? S_GEN_RD : dc_first; end
 		end else if (dc_dstk == DK_IMM) begin
 			state <= S_IMM; imm_tgt <= 1'b1; imm_ret <= dc_first;

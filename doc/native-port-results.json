@@ -1,0 +1,250 @@
+{
+  "base": "04af149119925f1a33dbe9807cf131a120f07b68",
+  "production_paths": [
+    "rtl/ap030/ap030_core.v",
+    "rtl/ap030/core/ap030_exec_a.vh",
+    "rtl/ap030/core/ap030_tasks.vh",
+    "rtl/ap030/ap030_memsys.v",
+    "rtl/ap030/ap030_top.v",
+    "rtl/ap030/ap030_tg68k_compat.v",
+    "rtl/ap030/ap030_fastram_fe.v"
+  ],
+  "fast": {
+    "runs": 500,
+    "cpu_cycles": 1170812,
+    "dmips_at_50mhz": 12.152932400211869
+  },
+  "slow": {
+    "cpu_cycles": 1172264,
+    "dmips_at_50mhz": 12.13787942763478
+  },
+  "native_speedup": 1.161806506937066,
+  "combined_speedup": 1.2557139831159914,
+  "integration_runs": 58,
+  "standalone_native_enabled_runs": 18,
+  "standalone_native_disabled_runs": 18,
+  "winuae_rounds": 28987,
+  "winuae_slices": 51,
+  "winuae_mismatches": 0,
+  "hardware_validation": {
+    "execution": "Quartus must run outside sandbox; it works there.",
+    "initial_fit": {
+      "directory": "/tmp/ap030-native/quartus-build",
+      "alms": 37609,
+      "ram_blocks": 287,
+      "cpu_fmax_mhz": 42.27,
+      "cpu_setup_slack_ns": -1.99,
+      "cpu_50mhz_pass": false
+    },
+    "corrected_fit": {
+      "directory": "/tmp/ap030-native/quartus-timing",
+      "provenance": {
+        "base": "04af149119925f1a33dbe9807cf131a120f07b68",
+        "variant": "native port with early MMU port selection and separate pin hit compare",
+        "source": "/tmp/ap030-native/timing_candidate",
+        "settings": "Original project constraints and seed 7; no added timing exceptions",
+        "execution": "outside sandbox"
+      },
+      "source_files_verified": 251,
+      "alms": 38221,
+      "registers": 41402,
+      "ram_blocks": 287,
+      "ram_bits": 2051160,
+      "dsp_blocks": 67,
+      "corners": [
+        {
+          "name": "Slow 1100mV 100C Model",
+          "cpu_setup_slack_ns": 0.191,
+          "cpu_hold_slack_ns": 0.327,
+          "all_setup_slack_ns": -0.099,
+          "all_hold_slack_ns": 0.248,
+          "cpu_fmax_mhz": 50.48
+        },
+        {
+          "name": "Slow 1100mV -40C Model",
+          "cpu_setup_slack_ns": 0.193,
+          "cpu_hold_slack_ns": 0.308,
+          "all_setup_slack_ns": 0.057,
+          "all_hold_slack_ns": 0.084,
+          "cpu_fmax_mhz": 50.49
+        },
+        {
+          "name": "Fast 1100mV 100C Model",
+          "cpu_setup_slack_ns": 4.256,
+          "cpu_hold_slack_ns": 0.174,
+          "all_setup_slack_ns": 3.097,
+          "all_hold_slack_ns": 0.12
+        },
+        {
+          "name": "Fast 1100mV -40C Model",
+          "cpu_setup_slack_ns": 4.962,
+          "cpu_hold_slack_ns": 0.124,
+          "all_setup_slack_ns": 3.483,
+          "all_hold_slack_ns": 0.072
+        }
+      ],
+      "cpu_setup_hold_pass_all_four_corners": true,
+      "project_setup_hold_pass_all_four_corners": false,
+      "default_sta_summary_all_checks_pass": false,
+      "board_tested": false
+    },
+    "board_tested": false,
+    "seed8_fit": {
+      "directory": "/tmp/ap030-native/quartus-timing-seed8",
+      "provenance": {
+        "base": "04af149119925f1a33dbe9807cf131a120f07b68",
+        "variant": "native port with early MMU port selection and separate pin hit compare",
+        "source": "/tmp/ap030-native/timing_candidate",
+        "settings": "Original project timing constraints; placement seed 8; no added timing exceptions",
+        "execution": "outside sandbox"
+      },
+      "source_files_verified": 251,
+      "alms": 38203,
+      "registers": 41386,
+      "ram_blocks": 287,
+      "ram_bits": 2051160,
+      "dsp_blocks": 67,
+      "corners": [
+        {
+          "name": "Slow 1100mV 100C Model",
+          "cpu_setup_slack_ns": 0.108,
+          "cpu_hold_slack_ns": 0.351,
+          "all_setup_slack_ns": 0.108,
+          "all_hold_slack_ns": 0.226,
+          "all_recovery_slack_ns": 3.523,
+          "all_removal_slack_ns": 0.995,
+          "pulse_width_slack_ns": 1.101,
+          "cpu_fmax_mhz": 50.55
+        },
+        {
+          "name": "Slow 1100mV -40C Model",
+          "cpu_setup_slack_ns": 0.337,
+          "cpu_hold_slack_ns": 0.298,
+          "all_setup_slack_ns": 0.012,
+          "all_hold_slack_ns": 0.11,
+          "all_recovery_slack_ns": 3.662,
+          "all_removal_slack_ns": 0.962,
+          "pulse_width_slack_ns": 1.101,
+          "cpu_fmax_mhz": 51.53
+        },
+        {
+          "name": "Fast 1100mV 100C Model",
+          "cpu_setup_slack_ns": 4.369,
+          "cpu_hold_slack_ns": 0.178,
+          "all_setup_slack_ns": 3.009,
+          "all_hold_slack_ns": 0.099,
+          "all_recovery_slack_ns": 4.768,
+          "all_removal_slack_ns": 0.479,
+          "pulse_width_slack_ns": 1.101
+        },
+        {
+          "name": "Fast 1100mV -40C Model",
+          "cpu_setup_slack_ns": 5.106,
+          "cpu_hold_slack_ns": 0.142,
+          "all_setup_slack_ns": 3.418,
+          "all_hold_slack_ns": 0.055,
+          "all_recovery_slack_ns": 5.072,
+          "all_removal_slack_ns": 0.345,
+          "pulse_width_slack_ns": 1.101
+        }
+      ],
+      "cpu_setup_hold_pass_all_four_corners": true,
+      "project_setup_hold_pass_all_four_corners": true,
+      "project_all_checks_pass_all_four_corners": true,
+      "default_sta_summary_all_checks_pass": true,
+      "board_tested": false
+    },
+    "selected_build": "/tmp/ap030-native/quartus-timing-seed8",
+    "status": "Full compile and all four timing corners pass; not yet tested on board.",
+    "artifacts": {
+      "/tmp/ap030-native/quartus-timing-seed8/output_files/Minimig.rbf": "bf1d31050a1afa46b937e14937676682a805fd039de9362536467821a8a9363c",
+      "/tmp/ap030-native/quartus-timing-seed8/output_files/Minimig.sof": "c6058063359c87508c5d57104ccb3430fc5029e8fd4a8df1e439192fa75c7784"
+    }
+  },
+  "current_candidate": "/tmp/ap030-native/timing_candidate",
+  "source_manifest": "/tmp/ap030-native/timing-source-sha256.json",
+  "combined_patch": "/tmp/ap030-native/combined-minimig-final.patch",
+  "native_only_comparison": {
+    "source": "/tmp/ap030-native/native_only",
+    "description": "Native port and timing corrections on original core; excludes EA/MOVE/branch throughput changes",
+    "fast": {
+      "runs": 500,
+      "cpu_cycles": 1307759,
+      "dmips_at_50mhz": 10.880291467584515
+    },
+    "slow": {
+      "runs": 500,
+      "cpu_cycles": 1309196,
+      "dmips_at_50mhz": 10.868349039683027
+    },
+    "speedup_over_committed_cache": 1.1242170766937944,
+    "integration_runs": 58,
+    "standalone_native_enabled_runs": 18,
+    "standalone_native_disabled_runs": 18,
+    "winuae_rounds": 28987,
+    "winuae_slices": 51,
+    "winuae_mismatches": 0,
+    "fit": {
+      "directory": "/tmp/ap030-native/quartus-native-only",
+      "provenance": {
+        "base": "04af149119925f1a33dbe9807cf131a120f07b68",
+        "variant": "native port plus timing fixes, original execution core without earlier EA/MOVE/branch optimizations",
+        "source": "/tmp/ap030-native/native_only",
+        "settings": "Original project constraints and seed 7",
+        "execution": "outside sandbox"
+      },
+      "source_files_verified": 251,
+      "alms": 37343,
+      "registers": 40537,
+      "ram_blocks": 287,
+      "ram_bits": 2051160,
+      "dsp_blocks": 67,
+      "corners": [
+        {
+          "name": "Slow 1100mV 100C Model",
+          "cpu_setup_slack_ns": 0.081,
+          "cpu_hold_slack_ns": 0.397,
+          "all_setup_slack_ns": -0.277,
+          "all_hold_slack_ns": 0.212,
+          "cpu_fmax_mhz": 50.41
+        },
+        {
+          "name": "Slow 1100mV -40C Model",
+          "cpu_setup_slack_ns": -0.011,
+          "cpu_hold_slack_ns": 0.326,
+          "all_setup_slack_ns": -0.56,
+          "all_hold_slack_ns": 0.106,
+          "cpu_fmax_mhz": 49.95
+        },
+        {
+          "name": "Fast 1100mV 100C Model",
+          "cpu_setup_slack_ns": 4.399,
+          "cpu_hold_slack_ns": 0.179,
+          "all_setup_slack_ns": 2.836,
+          "all_hold_slack_ns": 0.101
+        },
+        {
+          "name": "Fast 1100mV -40C Model",
+          "cpu_setup_slack_ns": 5.24,
+          "cpu_hold_slack_ns": 0.151,
+          "all_setup_slack_ns": 3.43,
+          "all_hold_slack_ns": 0.053
+        }
+      ],
+      "cpu_setup_hold_pass_all_four_corners": false,
+      "project_setup_hold_pass_all_four_corners": false,
+      "default_sta_summary_all_checks_pass": false,
+      "board_tested": false
+    }
+  },
+  "combined_patch_sha256": "4d297cd8cc6765d197b56f38da69c792c4737e7fbd69cccf21bd04686e85d712",
+  "area_delta_vs_previous_report": 1131,
+  "previous_board_report": {
+    "alms": 37072,
+    "ram_blocks": 287,
+    "cpu_fmax_mhz": 50.27,
+    "cpu_setup_slack_ns": 0.053,
+    "fitter_finished": "2026-10-01 21:29:07",
+    "fresh_baseline_rebuild": false
+  }
+}

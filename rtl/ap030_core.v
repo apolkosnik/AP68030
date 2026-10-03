@@ -664,6 +664,20 @@ always @(posedge clk) begin
 			fetch_out <= fetch_out - {1'b0, i_ack | i_fault};
 			fetch_disc <= fetch_out - {1'b0, i_ack | i_fault};
 			refill_p <= 1'b1;
+			// Ordinary branches preserve the program function code. Issue
+			// their target fetch with the redirect, retaining the discard
+			// count for older requests. Exception/RTE/SR changes use the
+			// existing path so their new program space is selected first.
+			if ((state == S_BCC || state == S_JMP || state == S_RTS2 ||
+			     state == S_RTD2 || state == S_DBCC) && i_ready &&
+			    (fetch_out - {1'b0, i_ack | i_fault} != 2'd2) &&
+			    !halted_r && !fetch_hold) begin
+				i_stb <= 1'b1;
+				i_addr <= {flush_pc[31:2], 2'b00};
+				i_fc <= fc_prog;
+				fetch_pc <= {flush_pc[31:2], 2'b00} + 32'd4;
+				fetch_out <= fetch_out - {1'b0, i_ack | i_fault} + 2'd1;
+			end
 		end else if (pipe_load) begin
 			// RTE: stages C and B from the frame, fetching resumes behind them
 			begin : pipe_preload

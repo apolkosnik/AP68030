@@ -20,7 +20,8 @@ module ap030_top
 	// integration whose glue reads "program space" as "instruction fetch"
 	// (a TG68-style busstate, as Minimig's cpu_wrapper) sets this to 0 so
 	// those reads keep the data function code there.
-	parameter PCREL_PROGRAM_SPACE = 1
+	parameter PCREL_PROGRAM_SPACE = 1,
+	parameter FAST_PORT = 0
 )
 (
 	input             clk,
@@ -64,6 +65,24 @@ module ap030_top
 	input             mmudis_n,
 	output            refill_n,
 	output            status_n,
+
+	// Optional internal Fast RAM port, after translation. Request fields
+	// remain stable through fast_req && fast_ready. Responses have no
+	// backpressure: first word completes the operand, fast_last releases
+	// the slot; further words are wrapped cache-line fill beats.
+	// Address is physical; bit 3 of fast_be selects fast_wdata[31:24].
+	// Replies begin at least one clock after acceptance. The target must
+	// complete without BERR; potentially faulting/locked transfers use pins.
+	output            fast_req,
+	output     [31:0] fast_addr,
+	output      [2:0] fast_fc,
+	output            fast_rw, fast_ci, fast_burst,
+	output      [3:0] fast_be,
+	output     [31:0] fast_wdata,
+	input             fast_match, fast_ready,
+	input             fast_valid, fast_last,
+	input       [1:0] fast_word,
+	input      [31:0] fast_rdata,
 
 	// observation
 	output     [31:0] dbg_pc,
@@ -157,7 +176,7 @@ ap030_core #(.PCREL_PROGRAM_SPACE(PCREL_PROGRAM_SPACE)) core (
 	.nmi_vec_nocache(nmi_vec_nocache)
 );
 
-ap030_memsys memsys (
+ap030_memsys #(.FAST_PORT(FAST_PORT)) memsys (
 	.clk(clk), .rst(rst),
 	.cacr(cacr), .cacr_ci(cacr_ci), .cacr_cei(cacr_cei), .cacr_cd(cacr_cd), .cacr_ced(cacr_ced),
 	.caar_idx(caar_idx), .cdis(cdis_s), .mmudis(mmudis_s), .halted(halted),
@@ -178,7 +197,11 @@ ap030_memsys memsys (
 	.d_o(d_o), .d_oe(d_oe), .d_i(d_i),
 	.dsack0_n(dsack0_n), .dsack1_n(dsack1_n), .sterm_n(sterm_n), .berr_n(berr_n), .halt_n(halt_n),
 	.avec_n(avec_n), .ciin_n(ciin_n), .cback_n(cback_n), .br_n(br_n), .bgack_n(bgack_n),
-	.bg_n_o(bg_n), .bus_granted()
+	.bg_n_o(bg_n), .bus_granted(),
+	.fast_req(fast_req), .fast_addr(fast_addr), .fast_fc(fast_fc), .fast_rw(fast_rw),
+	.fast_ci(fast_ci), .fast_burst(fast_burst), .fast_be(fast_be), .fast_wdata(fast_wdata),
+	.fast_match(fast_match), .fast_ready(fast_ready), .fast_valid(fast_valid),
+	.fast_last(fast_last), .fast_word(fast_word), .fast_rdata(fast_rdata)
 );
 
 assign dbg_halted = halted;

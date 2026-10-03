@@ -84,14 +84,15 @@ def gunzip_to(src: Path, dst: Path) -> Path:
     return dst
 
 
-def build(work: Path, rebuild: bool) -> Path:
-    exe = work / "obj" / "tb_cputest"
+def build(work: Path, rebuild: bool, native: bool = False) -> Path:
+    obj = work / ("obj_native" if native else "obj")
+    exe = obj / "tb_cputest"
     if exe.exists() and not rebuild:
         return exe
     cmd = ["verilator", "--binary", "--timing", "-Wno-fatal", "-Wno-lint", "-Wno-style", "-Wno-WIDTH",
            "-Wno-TIMESCALEMOD", "-Wno-CASEINCOMPLETE", "-Wno-MULTIDRIVEN", "-O2",
            "-I%s" % RTL, "-I%s" % (RTL / "core"), "--top-module", "tb_cputest",
-           "--Mdir", str(work / "obj"), "-o", "tb_cputest", str(HERE / "tb_cputest.sv")] + \
+           "-GFAST_PORT=%d" % native, "--Mdir", str(obj), "-o", "tb_cputest", str(HERE / "tb_cputest.sv")] + \
           [str(RTL / s) for s in SOURCES]
     log = work / "build.log"
     with log.open("w") as f:
@@ -193,6 +194,7 @@ def main():
     ap.add_argument("--limit", type=int, help="records per slice")
     ap.add_argument("--jobs", type=int, default=min(os.cpu_count() or 1, 24))
     ap.add_argument("--rebuild", action="store_true")
+    ap.add_argument("--native", action="store_true", help="use the native port for ordinary corpus data accesses")
     ap.add_argument("--verbose", action="store_true")
     args = ap.parse_args()
     args.group = args.group or ["*"]
@@ -202,7 +204,7 @@ def main():
     for d in ("jobs", "logs", "mem"):
         (work / d).mkdir(parents=True, exist_ok=True)
     root = corpus_root(args.corpus.resolve(), work)
-    exe = build(work, args.rebuild)
+    exe = build(work, args.rebuild, args.native)
     items = discover(root, args)
     print("slices:", len(items), flush=True)
     results = []

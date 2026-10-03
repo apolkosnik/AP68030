@@ -2,7 +2,8 @@
 // AP68030 - tb_ap030_program.sv                                            //
 //                                                                          //
 // Runs an assembled self-checking program against the processor on a       //
-// pin-level MC68030 bus.  Memory is a 32-bit synchronous (STERM) port with  //
+// pin-level MC68030 bus (FAST_PORT=1 adds the native RAM interface).       //
+// Memory is a 32-bit synchronous (STERM) port with                          //
 // burst support; a 16-bit and an 8-bit asynchronous (DSACK) window exercise //
 // dynamic bus sizing.  The program reports through memory-mapped registers: //
 //   $F100 word  failing test number                                          //
@@ -40,7 +41,7 @@
 `timescale 1ns/1ps
 `include "ap030_defs.svh"
 
-module tb_ap030_program;
+module tb_ap030_program #(parameter FAST_PORT = 0);
 
 reg clk = 0;
 always #10 clk = ~clk;
@@ -61,8 +62,20 @@ reg         dsack0_n = 1, dsack1_n = 1, sterm_n = 1, berr_n = 1, halt_n = 1, ave
 reg         br_n = 1, bgack_n = 1, cdis_n = 1, mmudis_n = 1;
 reg   [2:0] ipl_n = 3'b111;
 
-ap030_top dut (
+wire n_req, n_ready, n_rw, n_ci, n_burst, n_match;
+wire [31:0] n_addr, n_wdata;
+wire [2:0] n_fc;
+wire [3:0] n_be;
+reg n_valid = 0, n_last = 0;
+reg [1:0] n_word = 0;
+reg [31:0] n_rdata = 0;
+wire n_take = n_req && n_ready;
+ap030_top #(.FAST_PORT(FAST_PORT)) dut (
 	.clk(clk),
+    .fast_req(n_req), .fast_ready(n_ready), .fast_match(n_match),
+    .fast_addr(n_addr), .fast_fc(n_fc), .fast_rw(n_rw), .fast_ci(n_ci),
+    .fast_burst(n_burst), .fast_be(n_be), .fast_wdata(n_wdata),
+    .fast_valid(n_valid), .fast_last(n_last), .fast_word(n_word), .fast_rdata(n_rdata),
 	.a(a), .fc(fc), .siz(siz), .rw(rw), .rmc_n(rmc_n), .as_n(as_n), .ds_n(ds_n), .dben_n(dben_n),
 	.ecs_n(ecs_n), .ocs_n(ocs_n), .ciout_n(ciout_n), .cbreq_n(cbreq_n), .bus_oe(bus_oe),
 	.d_o(d_o), .d_oe(d_oe), .d_i(d_i),
@@ -113,9 +126,9 @@ integer    bus_cycles = 0;      // bus cycles (AS assertions)
 reg        as_was = 0;
 always @(posedge clk) begin
 	as_was <= as_asserted;
-	if (as_was && !as_asserted) begin
+	if ((as_was && !as_asserted) || n_take) begin
 		bus_cycles <= bus_cycles + 1;
-		if (ciout_seen) ciout_cycles <= ciout_cycles + 1;
+		if (n_take ? n_ci : ciout_seen) ciout_cycles <= ciout_cycles + 1;
 	end
 end
 reg ciout_seen = 0;
@@ -133,6 +146,55 @@ always @(posedge clk) begin
 	if (reset_n_oe) reset_cnt <= reset_cnt + 1;
 	else if (reset_cnt != 0) begin reset_len <= reset_cnt; reset_cnt <= 0; end
 end
+
+// Native memory model: the same bytes as the pin bus, with programmable
+// latency and wrapped burst replies. Fault-injected addresses stay on pins.
+// Instruction replies model a buffer hit; data replies add eight clocks so
+// t_cache's timed miss/hit comparison is not masked by instruction fetches.
+reg n_pending = 0;
+reg [19:4] n_line;
+reg [1:0] n_pos;
+integer n_delay = 0, n_left = 0;
+integer n_reads = 0, n_writes = 0, n_ci_reads = 0;
+integer ni, nb;
+assign n_match = n_addr[23:20] == 0 && n_fc != 7 &&
+                 !(berr_addr != 0 && n_addr[31:2] == berr_addr[31:2]);
+assign n_ready = reset_n && !n_pending;
+always @(posedge clk) begin
+ n_valid <= 0;
+ if (!reset_n) begin n_pending <= 0; n_left <= 0; end
+ else begin
+  if (n_take) begin
+   if ($test$plusargs("bustrace")) $display("%8d NATIVE a=%08x fc=%0d rw=%0d burst=%0d",clocks,n_addr,n_fc,n_rw,n_burst);
+   if (as_asserted || dut.memsys.b_rmc || dut.memsys.b_kind != `BK_DATA)
+    $fatal(1, "FAIL: native route used for pin/locked/special cycle");
+   if (n_rw) begin
+    n_reads <= n_reads + 1;
+    if (n_ci) n_ci_reads <= n_ci_reads + 1;
+    n_pending <= 1; n_line <= n_addr[19:4]; n_pos <= n_addr[3:2];
+    n_left <= n_burst ? 4 : 1; n_delay <= (n_fc[1:0] == 2'b10 ? 0 : 8) + wait_states; // buffered instruction path, slower data RAM
+   end else begin
+    n_writes <= n_writes + 1;
+    nb = {n_addr[19:2], 2'b00};
+    for (ni = 0; ni < 4; ni = ni + 1)
+     if (n_be[3-ni]) mem[nb+ni] = n_wdata[31-8*ni -: 8];
+    n_valid <= 1; n_last <= 1; n_word <= n_addr[3:2]; n_rdata <= 0;
+   end
+  end
+  if (n_pending) begin
+   if (n_delay != 0) n_delay <= n_delay - 1;
+   else begin
+    nb = {n_line, n_pos, 2'b00};
+    n_rdata <= {mem[nb], mem[nb+1], mem[nb+2], mem[nb+3]};
+    n_valid <= 1; n_last <= n_left == 1; n_word <= n_pos;
+    n_pos <= n_pos + 1; n_left <= n_left - 1;
+    if (n_left == 1) n_pending <= 0;
+   end
+  end
+ end
+end
+final if (FAST_PORT) $display("NATIVE reads=%0d writes=%0d ci_reads=%0d", n_reads, n_writes, n_ci_reads);
+
 // CPU space (UM 7.4): interrupt acknowledge, breakpoint acknowledge, coprocessor
 wire is_cpu    = (fc == 3'd7);
 wire is_bkpt   = is_cpu && (a[19:16] == 4'h0);
@@ -249,16 +311,21 @@ reg [15:0] fail_num = 0;
 // the last bus read of it
 reg [31:0] watch_addr = 32'hFFFFFFFF;
 reg  [2:0] watch_fc = 0;
-always @(posedge clk) if (as_asserted && rw && ({a[31:2], 2'b00} == {watch_addr[31:2], 2'b00})) watch_fc <= fc;
+always @(posedge clk) begin
+ if (as_asserted && rw && a[31:2] == watch_addr[31:2]) watch_fc <= fc;
+ if (n_take && n_rw && n_addr[31:2] == watch_addr[31:2]) watch_fc <= n_fc;
+end
 // Execution in the vector table: the programs start at $400 and never run
 // code below it, so a program fetch there after the start means control
 // was lost (a program restarting through the reset vector could otherwise
 // still report a pass)
 reg started = 0;
-always @(posedge clk) if (as_asserted && rw && (fc == 3'd2 || fc == 3'd6)) begin
-	if (a >= 32'h400) started <= 1;
+wire native_exec = n_take && n_rw && (n_fc == 3'd2 || n_fc == 3'd6);
+wire [31:0] exec_addr = native_exec ? n_addr : a;
+always @(posedge clk) if (native_exec || (as_asserted && rw && (fc == 3'd2 || fc == 3'd6))) begin
+ if (exec_addr >= 32'h400) started <= 1;
 	else if (started && !$test$plusargs("allow_low_code")) begin
-		if (errors < 3) $display("FAIL: program fetch at %08x (below $400) at clock %0d", a, clocks);
+		if (errors < 3) $display("FAIL: program fetch at %08x (below $400) at clock %0d", exec_addr, clocks);
 		errors = errors + 1;
 	end
 end

@@ -24,6 +24,7 @@
 `include "ap030_defs.svh"
 
 module ap030_memsys
+#(parameter FAST_PORT = 0)
 (
 	input             clk,
 	input             rst,
@@ -101,6 +102,24 @@ module ap030_memsys
 	output     [15:0] mmusr,
 
 	output            bus_quiet,    // no posted write, no bus activity (NOP synchronization)
+
+	// Optional internal Fast RAM port, after translation. Request fields
+	// remain stable through fast_req && fast_ready. Responses have no
+	// backpressure: first word completes the operand, fast_last releases
+	// the slot; further words are wrapped cache-line fill beats.
+	// Address is physical; bit 3 of fast_be selects fast_wdata[31:24].
+	// Replies begin at least one clock after acceptance. The target must
+	// complete without BERR; potentially faulting/locked transfers use pins.
+	output            fast_req,
+	output     [31:0] fast_addr,
+	output      [2:0] fast_fc,
+	output            fast_rw, fast_ci, fast_burst,
+	output      [3:0] fast_be,
+	output     [31:0] fast_wdata,
+	input             fast_match, fast_ready,
+	input             fast_valid, fast_last,
+	input       [1:0] fast_word,
+	input      [31:0] fast_rdata,
 
 	// ---- MC68030 pins ------------------------------------------------------
 	output     [31:0] a_o,
@@ -224,14 +243,54 @@ wire [31:0] b_rdata, b_fill_data;
 wire [31:2] b_fill_addr;
 reg         b_rmc_release;
 
+// Select the native route only for ordinary translated RAM transfers.
+// Atomic RMW and table walks retain pin-bus locking and fault semantics.
+wire native_sel = FAST_PORT && fast_match && b_kind == `BK_DATA && !b_rmc;
+reg native_active, native_first;
+wire pin_ack, pin_busy, pin_done, pin_berr, pin_avec, pin_ciin, pin_fill, pin_idle;
+wire [31:0] pin_rdata, pin_fill_data;
+wire [31:2] pin_fill_addr;
+assign fast_req = b_req && native_sel && !native_active && !pin_busy &&
+                  !bus_granted && !halted && halt_n;
+assign fast_addr = b_addr;
+assign fast_fc = b_fc;
+assign fast_rw = b_rw;
+assign fast_ci = b_ciout;
+assign fast_burst = b_rw && b_cache && b_cbreq && !b_ciout;
+assign fast_be = be_of(b_addr[1:0], b_nbytes);
+assign fast_wdata = (b_wdata << (8 * (3'd4 - b_total))) >> (8 * b_addr[1:0]);
+wire native_take = fast_req && fast_ready;
+wire native_response = native_active && fast_valid;
+always @(posedge clk) begin
+	if (rst) begin native_active <= 1'b0; native_first <= 1'b0; end
+	else begin
+		if (native_take) begin native_active <= 1'b1; native_first <= 1'b1; end
+		if (native_response) begin
+			native_first <= 1'b0;
+			if (fast_last) native_active <= 1'b0;
+		end
+	end
+end
+assign b_ack = pin_ack || native_take;
+assign b_busy = pin_busy || native_active;
+assign b_idle = pin_idle && !native_active;
+assign b_done = pin_done || (native_response && native_first);
+assign b_rdata = native_active ? extract(fast_rdata, b_addr[1:0], b_nbytes) : pin_rdata;
+assign b_berr = pin_berr && !native_active;
+assign b_avec = pin_avec && !native_active;
+assign b_ciin = pin_ciin && !native_active;
+assign b_fill_stb = pin_fill || (native_response && b_rw && b_cache && !b_ciout);
+assign b_fill_addr = native_active ? {b_addr[31:4], fast_word} : pin_fill_addr;
+assign b_fill_data = native_active ? fast_rdata : pin_fill_data;
+
 ap030_bus bus (
 	.clk(clk), .rst(rst),
-	.req(b_req), .req_kind(b_kind), .req_addr(b_addr), .req_nbytes(b_nbytes), .req_total(b_total),
+	.req(b_req && !native_sel && !native_active), .req_kind(b_kind), .req_addr(b_addr), .req_nbytes(b_nbytes), .req_total(b_total),
 	.req_rw(b_rw), .req_fc(b_fc), .req_rmc(b_rmc), .req_rmc_last(b_rmc_last), .req_ciout(b_ciout),
 	.req_cbreq(b_cbreq), .req_ocs(b_ocs), .req_cache(b_cache), .req_wdata(b_wdata),
-	.req_ack(b_ack), .busy(b_busy), .done(b_done), .rd_data(b_rdata), .res_berr(b_berr),
-	.res_avec(b_avec), .res_ciin(b_ciin), .fill_stb(b_fill_stb), .fill_addr(b_fill_addr),
-	.fill_data(b_fill_data), .rmc_release(b_rmc_release), .halted(halted), .bus_idle(b_idle),
+	.req_ack(pin_ack), .busy(pin_busy), .done(pin_done), .rd_data(pin_rdata), .res_berr(pin_berr),
+	.res_avec(pin_avec), .res_ciin(pin_ciin), .fill_stb(pin_fill), .fill_addr(pin_fill_addr),
+	.fill_data(pin_fill_data), .rmc_release(b_rmc_release), .halted(halted), .bus_idle(pin_idle),
 	.a_o(a_o), .fc_o(fc_o), .siz_o(siz_o), .rw_o(rw_o), .rmc_n_o(rmc_n_o), .as_n_o(as_n_o),
 	.ds_n_o(ds_n_o), .dben_n_o(dben_n_o), .ecs_n_o(ecs_n_o), .ocs_n_o(ocs_n_o), .ciout_n_o(ciout_n_o),
 	.cbreq_n_o(cbreq_n_o), .bus_oe(bus_oe), .d_o(d_o), .d_oe(d_oe), .d_i(d_i),
@@ -264,6 +323,7 @@ localparam DS_FLTWAIT= 4'd8;   // a later portion faulted: the first one is stil
 
 reg  [3:0] ds;
 reg [31:0] r_addr;       // current portion address (logical)
+reg [31:4] d_fill_line;  // logical line of the bus read, retained until its fill ends
 reg  [2:0] r_rem;        // operand bytes remaining
 reg  [2:0] r_pn;         // bytes in the current portion
 reg [31:0] r_data;       // assembled read data / remaining write data (right justified)
@@ -387,12 +447,16 @@ assign      i_ack   = i_ack_r | (is == IS_HIT);
 assign      i_data  = (is == IS_HIT) ? ic_data : i_data_r;
 wire [31:0] ci_addr   = ilk_first ? {i_req_addr[31:2], 2'b00} : ir_addr;
 wire  [2:0] ci_fc     = ilk_first ? i_req_fc : ir_fc;
-// the data side owns the MMU port whenever it looks up
-wire du_lookup = lk_act;
-wire if_lookup = ilk_act && !du_lookup;
+// Reserve the MMU port from the pending request, before late burst/write
+// stalls are resolved. Including native_busy in the address mux otherwise
+// puts bus completion, ATC lookup and fault capture on one timing path.
+// A stalled data lookup may delay an instruction translation; cache hits
+// still proceed, and lookup side effects remain qualified by lk_act.
+wire du_select = FAST_PORT ? (((ds == DS_IDLE) && d_go) || ds == DS_LOOKUP) : lk_act;
+wire if_lookup = ilk_act && !du_select;
 
 always @* begin
-	if (du_lookup) begin
+	if (du_select) begin
 		tr_la = c_addr; tr_fc = d_fc; tr_rw = d_rw; tr_rmc = d_rmc && !d_iack;
 	end else begin
 		tr_la = ci_addr; tr_fc = ci_fc; tr_rw = 1'b1; tr_rmc = 1'b0;
@@ -426,6 +490,7 @@ always @(posedge clk) begin
 		b_req <= 1'b0; b_kind <= 2'd0; b_addr <= 32'd0; b_nbytes <= 3'd0; b_total <= 3'd0; b_rw <= 1'b1;
 		b_fc <= 3'd0; b_rmc <= 1'b0; b_rmc_last <= 1'b0; b_ciout <= 1'b0; b_cbreq <= 1'b0; b_ocs <= 1'b0;
 		b_cache <= 1'b0; b_wdata <= 32'd0;
+		d_fill_line <= 28'd0;
 		r_addr <= 32'd0; r_rem <= 3'd0; r_pn <= 3'd0; r_data <= 32'd0; r_got <= 3'd0;
 		r_ocs <= 1'b0; r_first <= 1'b1; r_cross_line <= 1'b0; d_pend <= 1'b0; i_pend <= 1'b0;
 		ip_addr <= 32'd0; ip_fc <= 3'd0;
@@ -440,7 +505,10 @@ always @(posedge clk) begin
 		wb_rmc <= 1'b0; wb_rmc_last <= 1'b0;
 	end else begin
 		//------------------------------------------------------------ request handshake
-		if (b_req && b_ack) b_req <= 1'b0;
+		if (b_req && b_ack) begin
+			b_req <= 1'b0;
+			if (owner == OWN_DU && !own_ifetch && b_rw) d_fill_line <= r_addr[31:4];
+		end
 		d_pend <= (ds == DS_IDLE) && d_go && (dburst_busy || wr_stall);
 		// a fetch that cannot be looked up now waits in the pending slot; a
 		// lookup from the idle state consumes the pending one first
@@ -706,9 +774,11 @@ always @(posedge clk) begin
 			default: ds <= DS_IDLE;
 		endcase
 
-		// data cache fills (the transfer is the data unit's)
+		// The operand may finish before a narrow-port or burst fill does:
+		// r_addr can advance to the next portion and d_fc to the next access.
+		// Use the saved logical line and b_fc, held by the bus slot owner.
 		if (b_fill_stb && owner == OWN_DU && !own_ifetch && dc_fill_ok) begin
-			dc_fi_we <= 1'b1; dc_fi_addr <= {r_addr[31:4], b_fill_addr[3:2]}; dc_fi_fc <= d_fc; dc_fi_data <= b_fill_data;
+			dc_fi_we <= 1'b1; dc_fi_addr <= {d_fill_line, b_fill_addr[3:2]}; dc_fi_fc <= b_fc; dc_fi_data <= b_fill_data;
 		end
 
 		//------------------------------------------------------------ instruction port

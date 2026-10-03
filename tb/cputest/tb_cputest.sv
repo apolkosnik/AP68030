@@ -18,7 +18,7 @@
 //     the corpus.
 `timescale 1ns/1ns
 
-module tb_cputest;
+module tb_cputest #(parameter FAST_PORT = 0);
 
 localparam [31:0] TMEM_MAX = 32'h0020_0000;
 reg [31:0] TBASE;
@@ -54,8 +54,21 @@ reg         sterm_n, berr_n, avec_n, dsack0_n, dsack1_n;
 reg   [2:0] ipl;               // active low
 wire [31:0] dbg_pc;
 
-ap030_top dut (
+// Keep instruction fetches on pins for the replay driver's fetch-hold and
+// exception-entry observations; send ordinary corpus data through FAST_PORT.
+wire n_req, n_ready, n_rw, n_ci, n_burst, n_match;
+wire [31:0] n_addr, n_wdata;
+wire [2:0] n_fc;
+wire [3:0] n_be;
+reg n_valid = 0, n_last = 0;
+reg [1:0] n_word = 0;
+reg [31:0] n_rdata = 0;
+ap030_top #(.FAST_PORT(FAST_PORT)) dut (
 	.clk(clk),
+ .fast_req(n_req), .fast_ready(n_ready), .fast_match(n_match),
+ .fast_addr(n_addr), .fast_fc(n_fc), .fast_rw(n_rw), .fast_ci(n_ci),
+ .fast_burst(n_burst), .fast_be(n_be), .fast_wdata(n_wdata),
+ .fast_valid(n_valid), .fast_last(n_last), .fast_word(n_word), .fast_rdata(n_rdata),
 	.a(a), .fc(fc), .siz(siz), .rw(rw), .rmc_n(), .as_n(as_n), .ds_n(ds_n), .dben_n(),
 	.ecs_n(), .ocs_n(), .ciout_n(), .cbreq_n(cbreq_n), .bus_oe(bus_oe),
 	.d_o(d_o), .d_oe(d_oe), .d_i(d_i),
@@ -165,6 +178,32 @@ task write_byte;
 		end
 	end
 endtask
+
+
+assign n_match = n_fc[1:0] == 2'b01 &&
+                (n_addr[31:15] == 0 || (n_addr >= TBASE && n_addr < TBASE+TSIZE));
+assign n_ready = nreset;
+integer n_reads = 0, n_writes = 0;
+integer ni;
+reg [31:0] nba;
+always @(posedge clk) begin
+ n_valid <= 0;
+ if (n_req && n_ready) begin
+  if (as_asserted || dut.memsys.b_rmc || n_burst)
+   $fatal(1, "HARNESS: unexpected native bus overlap/lock/burst");
+  nba = {n_addr[31:2], 2'b00};
+  n_valid <= 1; n_last <= 1; n_word <= n_addr[3:2];
+  n_rdata <= {rd8(nba), rd8(nba+1), rd8(nba+2), rd8(nba+3)};
+  if (n_rw) n_reads <= n_reads + 1;
+  else begin
+   n_writes <= n_writes + 1;
+   for (ni=0; ni<4; ni=ni+1) if(n_be[3-ni])
+    if (nba+ni < 32'h8000 || (nba+ni >= TBASE && nba+ni < TBASE+TSIZE))
+     write_byte(nba+ni,n_wdata[31-8*ni -: 8]);
+  end
+ end
+end
+final if (FAST_PORT) $display("NATIVE data reads=%0d writes=%0d", n_reads, n_writes);
 
 // processor writes: the byte lanes of a 32-bit port (UM Table 7-7)
 reg wr_seen;
