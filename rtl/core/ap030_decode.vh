@@ -501,7 +501,7 @@ always @* begin
 				3'b001: begin
 					if (ea_an) dc_first = S_CPDBCC;          // cpDBcc
 					else if (em == 3'b111 && (er[1] || er == 3'b100)) dc_first = S_CPTRAP;   // cpTRAPcc (opmode 010/011/100 in er)
-					else begin dc_first = S_CPSCC; dc_dreg = {1'b0, dw[2:0]}; end   // cpScc
+					else begin dc_first = S_CPSCC; dc_dreg = {1'b0, dw[2:0]}; dc_size = `SZ_B; end   // cpScc: byte operand
 				end
 				3'b010, 3'b011: dc_first = S_CPBCC;        // cpBcc.W / .L
 				3'b100: begin dc_first = S_CPSAVE0; dc_priv = 1'b1; if (!(ea_ctrlalt || ea_pd)) dc_illegal = 1'b1; end
