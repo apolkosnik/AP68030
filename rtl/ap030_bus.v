@@ -34,6 +34,8 @@
 module ap030_bus
 (
 	input             clk,
+	input             ce,           // clock enable: the core advances on enabled rising edges
+	input             ce_f,         // ... and on the falling edge after an enabled rising edge
 	input             rst,          // synchronous, active high (RESET pin, synchronized)
 
 	// ---- transfer request ---------------------------------------------
@@ -101,7 +103,7 @@ module ap030_bus
 //---------------------------------------------------------------------------
 reg [1:0] dsack_l;    // {DSACK1, DSACK0}, active high
 reg       berr_l, halt_l, avec_l, br_l, bgack_l;
-always @(negedge clk) begin
+always @(negedge clk) if (ce_f) begin
 	dsack_l <= {~dsack1_n, ~dsack0_n};
 	berr_l  <= ~berr_n;
 	halt_l  <= ~halt_n;
@@ -176,7 +178,7 @@ reg        as_n_r, ds_n_r, cbreq_n_r, bg_n_r;
 reg        ecs_tog_n;
 reg [31:0] din_l;
 
-always @(negedge clk) begin
+always @(negedge clk) if (ce_f) begin
 	if (rst) begin
 		as_n_r <= 1'b1; ds_n_r <= 1'b1; cbreq_n_r <= 1'b1;
 		ecs_tog_n <= 1'b0; din_l <= 32'd0;
@@ -211,7 +213,7 @@ reg [2:0] arb;
 reg       arb_g, arb_t, tristate;
 wire      arb_r = br_l & ~rmc_p;      // BG is never asserted while RMC is asserted
 wire      arb_a = bgack_l;
-always @(posedge clk) begin
+always @(posedge clk) if (ce) begin
 	if (rst) begin
 		arb <= 3'd0; arb_g <= 1'b0; arb_t <= 1'b0;
 	end else case (arb)
@@ -229,11 +231,11 @@ always @(posedge clk) begin
 		default: arb <= 3'd0;
 	endcase
 end
-always @(negedge clk) bg_n_r <= rst ? 1'b1 : ~arb_g;   // BG moves on the falling edge
+always @(negedge clk) if (ce_f) bg_n_r <= rst ? 1'b1 : ~arb_g;   // BG moves on the falling edge
 assign bg_n_o = bg_n_r;
 // T takes effect once the current cycle (and RMW operation) is over
 wire cycle_active = (bst == B_S0) || (bst == B_S2) || (bst == B_WAIT) || (bst == B_BURST);
-always @(posedge clk) begin
+always @(posedge clk) if (ce) begin
 	if (rst) tristate <= 1'b1;
 	else if (arb_t) begin if (!cycle_active && !rmc_p && !chk_late) tristate <= 1'b1; end
 	else tristate <= 1'b0;
@@ -529,7 +531,7 @@ end
 wire enter_burst = t_term && t_term_sync && !t_term_err && cbreq_p && cback && !ciin &&
                    t_rw && t_cache && t_first && !t_fill && (t_kind == `BK_DATA);
 
-always @(posedge clk) begin
+always @(posedge clk) if (ce) begin
 	if (rst) begin
 		bst <= B_IDLE; t_valid <= 1'b0; t_kind <= 2'd0; t_addr <= 32'd0; t_rem <= 3'd0;
 		t_total <= 3'd0; t_rw <= 1'b1; t_fc <= 3'd0; t_rmc_last <= 1'b0; t_rmc <= 1'b0; t_ciout <= 1'b0;

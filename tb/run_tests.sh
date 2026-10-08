@@ -71,11 +71,28 @@ run() {
 		fail=1
 	fi
 }
+# the processor clocks and instructions a passing run reports
+counts() { grep -o "ALL TESTS PASSED ([0-9]* clocks, [0-9]* instructions" "$WORK/$1.log" || true; }
+same_clocks() {
+	if [ -n "$(counts "$1")" ] && [ "$(counts "$1")" != "$(counts "$2")" ]; then
+		echo "  FAIL  $1  takes other clocks than $2: $(counts "$1" | cut -c19-) / $(counts "$2" | cut -c19-)"
+		fail=1
+	fi
+}
 run bus "$WORK/obj_bus/tb_bus"
 for t in $PROGS; do
 	[ -f "$WORK/$t.hex" ] || continue
 	run "$t" "$WORK/obj_prog/tb_prog" "+prog=$WORK/$t.hex"
 	run "${t}_waits" "$WORK/obj_prog/tb_prog" "+prog=$WORK/$t.hex" +waits=2
+	# with the processor clock enable: half and quarter rate, and a random
+	# pattern; the bench runs on the processor clock, so each must take
+	# exactly the processor clocks of the run without the enable
+	run "${t}_ce2" "$WORK/obj_prog/tb_prog" "+prog=$WORK/$t.hex" +ce=2
+	same_clocks "${t}_ce2" "$t"
+	run "${t}_ce4_waits" "$WORK/obj_prog/tb_prog" "+prog=$WORK/$t.hex" +ce=4 +waits=2
+	same_clocks "${t}_ce4_waits" "${t}_waits"
+	run "${t}_cerand" "$WORK/obj_prog/tb_prog" "+prog=$WORK/$t.hex" +ce_rand
+	same_clocks "${t}_cerand" "$t"
 done
 for t in $CPROGS; do
 	run "$t" "$WORK/obj_prog/tb_prog" "+prog=$WORK/$t.hex" +maxclk=20000000

@@ -15,6 +15,7 @@
 module ap030_muldiv
 (
 	input             clk,
+	input             ce,          // clock enable: the core advances on enabled rising edges
 	input             rst,
 	input             start,
 	input             is_div,
@@ -56,7 +57,7 @@ wire [96:0] div4  = div_step(div_step(div_step(div_step(acc, den), den), den), d
 wire [63:0] q_raw = div_r ? acc[63:0] : prod;
 wire [31:0] r_raw = acc[95:64];
 
-always @(posedge clk) begin
+always @(posedge clk) if (ce) begin
 	if (rst) begin
 		running <= 1'b0; done <= 1'b0; div_r <= 1'b0; neg_q <= 1'b0; neg_r <= 1'b0;
 		count <= 5'd0; den <= 32'd0; mcand <= 32'd0; prod <= 64'd0; acc <= 97'd0;

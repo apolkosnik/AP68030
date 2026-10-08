@@ -45,13 +45,16 @@ module), Python 3.
 
 ```
 cd tb
-sh run_tests.sh            # everything: bus bench, every program, with and without wait states
+sh run_tests.sh            # everything: bus bench, every program, with and without wait states and the clock enable
 FAST_PORT=1 sh run_tests.sh /tmp/ap030-native-suite  # native RAM plus pin-bus fallbacks
 ./run_prog.sh t_mmu +trace # one program, with the instruction trace (+bustrace, +ctrace, +rftrace, +itrace, +strace)
 ```
 
 Every passing program reports its clock count, instruction count and the
-resulting clocks per instruction; `+strace` prints the sequencer state and
+resulting clocks per instruction (processor clocks: with `+ce=N` or
+`+ce_rand` the bench and its memory run on the processor clock, and the
+suite checks that each such run takes exactly the clocks of the run without
+the enable); `+strace` prints the sequencer state and
 the memory unit's handshakes every clock for profiling.
 
 The programs report through memory-mapped test registers (documented at
@@ -197,6 +200,29 @@ build, comparison fits and artifact hashes. The fitted image is
 hashes and timing reports are in that build directory. Applying the patch
 to the board-build worktree is pending confirmation that no Quartus compile
 is using that tree. All builds here used isolated source snapshots.
+
+## Clock enable
+
+With `USE_CE=1` the processor clock is `clk` gated by `ce`, a clock enable
+in the `clk` domain: the core advances on the rising edges of `clk` with
+`ce` set and on the falling edge that follows each of them.  `ce` on every
+second clock runs it at half the `clk` rate, on every fourth at a quarter;
+any pattern works, and the rate may change at any time.  A system that runs
+the processor slower than its own clock (the Falcon030 core: 16 or 8 MHz
+from 32 MHz, with a 32 MHz turbo setting) needs no second clock domain.
+
+The surroundings see an MC68030 whose clock is the enabled edges.  The
+pins change only on those edges, and the inputs are sampled only on them,
+so an asynchronous slave (DSACKx, BERR, AVEC held until AS negates) works
+unchanged.  A synchronous one (STERM, CBACK, the native port) must also
+advance on the enabled edges, as a board's memory controller would run on
+the processor clock.  `snoop_we` is the exception: it is taken on every
+clock, since another bus master's write is a single-clock pulse in the
+system's clock, and a snoop between the two enabled edges of a cache fill
+is applied again after that fill.
+
+`USE_CE=0` (the default) ignores `ce`; the enables are then constant and
+the logic is the same as without them.
 
 ## Licence
 

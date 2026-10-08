@@ -24,6 +24,8 @@ module ap030_core
 )
 (
 	input             clk,
+	input             ce,          // clock enable: the core advances on enabled rising edges
+	input             ce_f,        // ... and on the falling edge after an enabled rising edge
 	input             rst,
 
 	// ---- data port (ap030_memsys) ---------------------------------------
@@ -141,7 +143,7 @@ reg  [31:0] sp_wdata;
 wire [31:0] usp_q, isp_q, msp_q;
 
 ap030_regfile rf (
-	.clk(clk), .rst(rst), .sr_s(sr_s), .sr_m(sr_m),
+	.clk(clk), .ce(ce), .rst(rst), .sr_s(sr_s), .sr_m(sr_m),
 	.we(rf_we), .waddr(rf_waddr), .wact(rf_wact), .wdata(rf_wdata),
 	.raddr_a(ra_a), .rdata_a(rf_a), .raddr_b(ra_b), .rdata_b(rf_b), .raddr_c(ra_c), .rdata_c(rf_c),
 	.raddr_d(ra_d), .rdata_d(rf_d), .raddr_e(ra_e), .rdata_e(rf_e),
@@ -160,14 +162,14 @@ wire [31:0] alu_r;
 // ALU operand selection per state (see ap030_exec.vh)
 `define ALU_SET(op_, sz_, a_, b_, cnt_) begin alu_op = op_; alu_size = sz_; alu_a = a_; alu_b = b_; alu_cnt = cnt_; end
 wire  [4:0] alu_f;
-ap030_alu alu (.clk(clk), .op(alu_op), .size(alu_size), .shcnt(alu_cnt), .a(alu_a), .b(alu_b),
+ap030_alu alu (.clk(clk), .ce(ce), .op(alu_op), .size(alu_size), .shcnt(alu_cnt), .a(alu_a), .b(alu_b),
                .flags_in(sr[4:0]), .result(alu_r), .flags_out(alu_f));
 
 reg         md_start, md_div, md_sign;
 reg  [31:0] md_a, md_hi, md_lo;
 wire        md_done, md_ovf;
 wire [31:0] md_rhi, md_rlo;
-ap030_muldiv md (.clk(clk), .rst(rst), .start(md_start), .is_div(md_div), .sign_op(md_sign),
+ap030_muldiv md (.clk(clk), .ce(ce), .rst(rst), .start(md_start), .is_div(md_div), .sign_op(md_sign),
                  .op_a(md_a), .op_hi(md_hi), .op_lo(md_lo), .done(md_done), .res_hi(md_rhi),
                  .res_lo(md_rlo), .ovf(md_ovf));
 
@@ -204,14 +206,14 @@ wire        have2 = pq_v[0] & pq_v[1];
 // interrupt synchronizer (UM 8.1.9: two consecutive falling-edge samples)
 //---------------------------------------------------------------------------
 reg [2:0] ipl_s1, ipl_s2;
-always @(negedge clk) begin
+always @(negedge clk) if (ce_f) begin
 	ipl_s1 <= ~ipl_n;
 	ipl_s2 <= ipl_s1;
 end
 reg [2:0] irq_lvl;         // recognized level
 reg       nmi_edge;        // a transition to level 7 has not been serviced
 reg       irq_taken7;      // pulse from the sequencer: level 7 accepted
-always @(posedge clk) begin
+always @(posedge clk) if (ce) begin
 	if (rst) begin irq_lvl <= 3'd0; nmi_edge <= 1'b0; end
 	else begin
 		if (ipl_s1 == ipl_s2) begin
@@ -519,7 +521,7 @@ end
 // STATUS / REFILL (asserted from falling edges, UM 12.7.1)
 //---------------------------------------------------------------------------
 reg status_n_r, refill_n_r;
-always @(negedge clk) begin
+always @(negedge clk) if (ce_f) begin
 	status_n_r <= rst ? 1'b1 : ~(status_p | halted_r);
 	refill_n_r <= rst ? 1'b1 : ~refill_p;
 end
@@ -564,7 +566,7 @@ end
 // the sequencer
 //---------------------------------------------------------------------------
 integer k;
-always @(posedge clk) begin
+always @(posedge clk) if (ce) begin
 	// per-clock defaults
 	pop_n = 2'd0;
 	flush_req = 1'b0;

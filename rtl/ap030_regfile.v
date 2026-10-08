@@ -12,6 +12,7 @@
 module ap030_regfile
 (
 	input             clk,
+	input             ce,          // clock enable: the core advances on enabled rising edges
 	input             rst,
 	input             sr_s,
 	input             sr_m,
@@ -73,7 +74,7 @@ assign isp_q = isp;
 assign msp_q = msp;
 
 integer i;
-always @(posedge clk) begin
+always @(posedge clk) if (ce) begin
 	if (rst) begin
 		for (i = 0; i < 15; i = i + 1) r[i] <= 32'd0;
 		usp <= 32'd0; isp <= 32'd0; msp <= 32'd0;
