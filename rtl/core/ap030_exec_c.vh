@@ -156,7 +156,7 @@ S_CPNULL: begin
 	// null primitive (UM Table 10-3)
 	if (cp_resp[15]) begin
 		// come again; IA allows interrupts, serviced with a mid-instruction frame
-		if (cp_resp[8] && irq_pend) begin exc_ilvl <= irq_lvl; state <= S_IACK; end
+		if (cp_resp[8] && irq_pend) begin iack_cpmid <= 1'b1; exc_ilvl <= irq_lvl; state <= S_IACK; end
 		else state <= S_CP1;
 	end else if (cp_cond) begin
 		// TF completes the conditional instruction
@@ -168,7 +168,7 @@ S_CPNULL: begin
 		endcase
 	end else if ((tr_t1 || cp_trace_wait) && !cp_resp[1]) begin
 		// a pending trace waits for processing finished (UM 10.5.2.5)
-		if (cp_resp[8] && irq_pend) begin exc_ilvl <= irq_lvl; state <= S_IACK; end
+		if (cp_resp[8] && irq_pend) begin iack_cpmid <= 1'b1; exc_ilvl <= irq_lvl; state <= S_IACK; end
 		else state <= S_CP1;
 	end else finish;
 end

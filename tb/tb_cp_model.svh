@@ -18,6 +18,8 @@
 //   command $000E: evaluate and transfer effective address, then null
 //   command $000F: transfer multiple main processor registers D0,D1,A0 to the coprocessor
 //   command $0010: busy once, then null
+//   command $0011: come again with IA ($8900) three times, then transfer 4 bytes
+//                  ($11223344) from the coprocessor to EA, then null
 //   condition word: bit 0 = true/false returned in the null primitive
 //   The save CIR returns cp_save_fmt (test register $F180); a "not ready"
 //   value ($01xx) becomes format $F1 of the same length after one read.
@@ -35,6 +37,7 @@ reg [31:0] cp_rdata;
 reg [15:0] cp_save_fmt = 16'h0000;  // format word for cpSAVE (empty/reset)
 reg [15:0] cp_restore_resp = 0;
 reg        cp_busy_done = 0;
+integer    cp_ca_left = 0;
 reg [31:0] cp_last_ea = 0;
 reg [15:0] cp_regsel = 16'h0803;    // for the control register test: D0,D1,A0 mask / VBR code
 always @* begin
@@ -42,7 +45,7 @@ always @* begin
 		5'h00: cp_rdata = {cp_resp, 16'd0};
 		5'h04: cp_rdata = {cp_save_fmt, 16'd0};
 		5'h06: cp_rdata = {16'd0, cp_restore_resp};   // offset 2 of its longword: D15-D0 (UM 7.2.1)
-		5'h10: cp_rdata = cp_operand[0];
+		5'h10: cp_rdata = (cp_cmd == 16'h0011) ? 32'h11223344 : cp_operand[0];   // ($0011: its own data)
 		5'h14: cp_rdata = {cp_regsel, 16'd0};
 		default: cp_rdata = 32'd0;
 	endcase
@@ -74,6 +77,7 @@ task cp_start;
 			16'h000E: cp_resp = 16'h8A00;                 // CA, evaluate and transfer EA
 			16'h000F: cp_resp = 16'h8600;                 // CA, transfer multiple main processor registers
 			16'h0010: begin cp_resp = cp_busy_done ? 16'h0902 : 16'hA400; cp_busy_done = 1; end   // busy once (UM Figure 10-23)
+			16'h0011: begin cp_resp = 16'h8900; cp_ca_left = 3; end   // null, CA, IA: come again
 			default:  cp_resp = 16'h1C0B;                 // pre-instruction exception, F-line (11)
 		endcase
 	end
@@ -127,9 +131,14 @@ always @(posedge clk) begin
 		if (cp_rd_off == 5'h10) begin
 			// operand delivered (DR=1 transfers)
 			case (cp_cmd)
-				16'h0003, 16'h0005, 16'h0009, 16'h000D: cp_resp <= 16'h0902;
+				16'h0003, 16'h0005, 16'h0009, 16'h000D, 16'h0011: cp_resp <= 16'h0902;
 				default: ;
 			endcase
+		end
+		if (cp_rd_off == 5'h00 && cp_cmd == 16'h0011 && cp_resp == 16'h8900) begin
+			// come again: after the third read, the data transfer
+			cp_ca_left = cp_ca_left - 1;
+			if (cp_ca_left == 0) cp_resp <= 16'hB704;
 		end
 		if (cp_rd_off == 5'h00 && cp_cmd == 16'h000A) begin
 			// supervisor check passed: the processor reads the response again

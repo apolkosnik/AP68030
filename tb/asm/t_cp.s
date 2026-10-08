@@ -181,6 +181,28 @@ bsy:	dc.w	$F200,$0010
 	chkl	d1,bsy,70
 	move.w	#$2700,sr
 
+;================================================================ 12c. come again (IA) with an interrupt pending
+; the interrupt is serviced with a coprocessor mid-instruction frame (format
+; $9: PC = the next instruction, instruction address = this one); its RTE
+; reads the response CIR again and the instruction completes (UM 10.4.8)
+	clr.w	exccnt
+	clr.l	lastia
+	lea	buf,a0
+	clr.l	(a0)
+	move.w	#$2000,sr
+	move.w	#3,$F001BC		; level 3 at the command write
+cag:	dc.w	$F210,$0011		; come again x3, then 4 bytes to (a0)
+cagn:	chkw	exccnt,1,71
+	chkw	lastvec,27,72
+	chkw	lastfmt,9,73
+	move.l	lastpc,d1
+	chkl	d1,cagn,74
+	move.l	lastia,d1
+	chkl	d1,cag,75
+	move.l	buf,d1
+	chkl	d1,$11223344,76
+	move.w	#$2700,sr
+
 ;================================================================ 13. exceptions requested by the coprocessor
 	clr.w	exccnt
 pre1:	dc.w	$F200,$0006	; pre-instruction, vector 48
@@ -362,9 +384,21 @@ h_exc:
 	move.w	6(a6),d6
 	and.w	#$F000,d6
 	beq.s	hx_fmt0
+	cmp.w	#$9000,d6
+	beq.s	hx_fmt9
 	cmp.w	#$2000,d6
 	bne.s	hx_out
 	move.l	8(a6),lastia
+	bra.s	hx_out
+hx_fmt9:
+	move.l	8(a6),lastia	; coprocessor mid-instruction: instruction address
+	move.w	6(a6),d6
+	and.w	#$0FFF,d6
+	cmp.w	#24*4,d6
+	blo.s	hx_out
+	cmp.w	#31*4,d6
+	bhi.s	hx_out
+	move.w	#0,$F00110	; an interrupt during come-again: release it
 	bra.s	hx_out
 hx_fmt0:
 	move.w	6(a6),d6	; an interrupt: release the request

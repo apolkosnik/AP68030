@@ -61,10 +61,13 @@ S_DWAIT: begin
 		// interrupt vector: supplied, autovector, or spurious (bus error)
 		d_iack <= 1'b0;
 		// a coprocessor busy/not-ready service stacks the instruction's own
-		// address so that it restarts (UM 10.4.3); otherwise the next one
+		// address so that it restarts (UM 10.4.3); a come-again null
+		// primitive with IA stacks a coprocessor mid-instruction frame, whose
+		// RTE reads the response CIR again (UM 10.4.8); otherwise the next one
 		exc_go(d_iack_berr ? `VEC_SPURIOUS : (d_avec ? (`VEC_AUTOVEC + {5'd0, exc_ilvl}) : d_rdata[7:0]),
-		       `FMT_NORMAL, iack_pc_i ? pc_i : scan_pc, 32'd0);
+		       iack_cpmid ? `FMT_CPMID : `FMT_NORMAL, iack_pc_i ? pc_i : scan_pc, iack_cpmid ? pc_i : 32'd0);
 		iack_pc_i <= 1'b0;
+		iack_cpmid <= 1'b0;
 		exc_is_irq <= 1'b1;
 		if (exc_ilvl == 3'd7) irq_taken7 <= 1'b1;
 	end else if (rte_fake || d_ack) begin : deliver
