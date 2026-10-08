@@ -324,6 +324,7 @@ reg        exc_active;     // exception processing in progress
 reg        cpu_flt_ill;    // a bus error on this CPU-space cycle is an illegal instruction (BKPT)
 reg        cpu_flt_fline;  // ... is an F-line exception (first coprocessor access)
 reg        iack_pc_i;      // interrupt frame carries the instruction address (Busy primitive)
+reg        iack_cpmid;     // interrupt frame is a coprocessor mid-instruction frame (null, CA, IA)
 
 // interrupt processing in progress (masks IPEND)
 wire exc_is_irq_active = (state == S_EXC0 || state == S_EXC1 || state == S_EXC2 || state == S_EXC3 || state == S_IACK) && exc_is_irq;
@@ -625,7 +626,7 @@ always @(posedge clk) begin
 		sh_wait <= 1'b0;
 		g_sext <= 1'b0; g_bitop <= 1'b0; g_shift <= 1'b0; g_move_mem <= 1'b0; g_dstrd <= 1'b0; nx <= S_FETCH;
 		rte_fake <= 1'b0; rte_fake_data <= 32'd0; rerun_merge <= 1'b0; exc_active <= 1'b0;
-		cpu_flt_ill <= 1'b0; cpu_flt_fline <= 1'b0; iack_pc_i <= 1'b0;
+		cpu_flt_ill <= 1'b0; cpu_flt_fline <= 1'b0; iack_pc_i <= 1'b0; iack_cpmid <= 1'b0;
 		cp_id <= 3'd0; cp_resp <= 16'd0; cp_cond <= 1'b0; cp_len <= 8'd0; cp_pos <= 8'd0; cp_dr <= 1'b0;
 		cp_ca <= 1'b0; cp_pcbit <= 1'b0; cp_base <= 32'd0; cp_kind <= 4'd0;
 		md_div <= 1'b0; md_sign <= 1'b0; md_a <= 32'd0; md_hi <= 32'd0; md_lo <= 32'd0;

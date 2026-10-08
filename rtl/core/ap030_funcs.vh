@@ -112,7 +112,7 @@ function cp_ea_ok; input [2:0] cat;
 			3'b011: cp_ea_ok = ea_alt;
 			3'b100: cp_ea_ok = ea_ctrl;
 			3'b101: cp_ea_ok = ea_data;
-			3'b110: cp_ea_ok = ea_mem;
+			3'b110: cp_ea_ok = ea_mem | ea_imm;   // memory includes immediate (MC68030 UM table 10-4)
 			default: cp_ea_ok = ea_any;
 		endcase
 	end
