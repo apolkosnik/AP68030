@@ -96,6 +96,11 @@ module ap030_top
 	output     [15:0] dbg_sr,
 	output      [7:0] dbg_state,
 	output            dbg_inst,
+	// timing hooks (ap030_core): instruction words taken from the prefetch
+	// queue, and a word-size multiply/divide started (1 MUL.W, 2 DIVU.W,
+	// 3 DIVS.W), each for one processor clock
+	output      [1:0] tm_pop,
+	output      [1:0] tm_md,
 	output            dbg_halted,
 	// system glue (emulator integration): VBR, CACR, cache-clear pulses
 	output     [31:0] dbg_vbr,
@@ -182,7 +187,7 @@ ap030_core #(.PCREL_PROGRAM_SPACE(PCREL_PROGRAM_SPACE)) core (
 	.tt0(tt0), .tt1(tt1), .mmusr(mmusr), .bus_quiet(bus_quiet),
 	.cacr(cacr), .cacr_ci(cacr_ci), .cacr_cei(cacr_cei), .cacr_cd(cacr_cd), .cacr_ced(cacr_ced), .caar_idx(caar_idx),
 	.ipl_n(ipl_n), .ipend_n(ipend_n), .reset_drive(reset_drive), .status_n(status_n), .refill_n(refill_n),
-	.halted(halted), .dbg_pc(dbg_pc), .dbg_sr(dbg_sr), .dbg_state(dbg_state), .dbg_inst(dbg_inst),
+	.halted(halted), .dbg_pc(dbg_pc), .dbg_sr(dbg_sr), .dbg_state(dbg_state), .dbg_inst(dbg_inst), .tm_pop(tm_pop), .tm_md(tm_md),
 	.dbg_vbr(dbg_vbr)
 ,
 	.nmi_vec_nocache(nmi_vec_nocache)

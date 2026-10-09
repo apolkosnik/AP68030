@@ -107,6 +107,11 @@ module ap030_core
 	output     [15:0] dbg_sr,
 	output      [7:0] dbg_state,
 	output reg        dbg_inst,     // pulse: an instruction was dispatched (statistics)
+	// timing hooks for an external timing model (one processor clock each):
+	// instruction words taken from the prefetch queue; a word-size
+	// multiply/divide started (1 MULU.W/MULS.W, 2 DIVU.W, 3 DIVS.W)
+	output reg  [1:0] tm_pop,
+	output reg  [1:0] tm_md,
 	output     [31:0] dbg_vbr       // VBR (system glue: NMI vector address)
 );
 
@@ -582,6 +587,7 @@ always @(posedge clk) if (ce) begin
 	i_stb <= 1'b0;
 	op_req <= 1'b0;
 	dbg_inst <= 1'b0;
+	tm_md <= 2'd0;
 	reg_we <= 1'b0;
 	cacr_ci <= 1'b0; cacr_cei <= 1'b0; cacr_cd <= 1'b0; cacr_ced <= 1'b0;
 	md_start <= 1'b0;
@@ -591,6 +597,7 @@ always @(posedge clk) if (ce) begin
 	if (status_cnt != 2'd0) status_cnt <= status_cnt - 2'd1;
 
 	if (rst) begin
+		tm_pop <= 2'd0;
 		state <= S_RESET0;
 		sr <= `SR_RESET;
 		vbr <= 32'd0;
@@ -658,6 +665,7 @@ always @(posedge clk) if (ce) begin
 		end
 
 		//---------------------------------------------------------- prefetch and pipe maintenance
+		tm_pop <= pop_n;
 		if (flush_req) begin
 			pq_v <= 6'd0; pq_f <= 6'd0; pq_n <= 3'd0;
 			scan_pc <= flush_pc;

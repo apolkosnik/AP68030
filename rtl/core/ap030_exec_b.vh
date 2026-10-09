@@ -295,6 +295,7 @@ S_MULDIV0: begin : muldiv0
 		md_start <= 1'b1;
 		md_div <= is_div;
 		md_sign <= sgn;
+		if (!long) tm_md <= is_div ? (sgn ? 2'd3 : 2'd2) : 2'd1;
 		if (long) begin
 			md_a <= src;
 			md_lo <= rf_a;                            // Dq

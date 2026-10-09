@@ -224,6 +224,16 @@ is applied again after that fill.
 `USE_CE=0` (the default) ignores `ce`; the enables are then constant and
 the logic is the same as without them.
 
+## Timing hooks
+
+Two outputs let an external timing model follow the instruction stream
+(the Falcon030 core maps the processor's internal time onto Hatari's with
+them): `tm_pop` is the number of instruction words taken from the prefetch
+queue in a processor clock, and `tm_md` reports a word-size multiply or
+divide starting (1 MULU.W/MULS.W, 2 DIVU.W, 3 DIVS.W).  Both are registered
+and hold for one processor clock, like `dbg_inst` (an instruction
+dispatched).  They change nothing inside the processor.
+
 ## Licence
 
 GPL, see `LICENSE`.
