@@ -93,6 +93,8 @@ for t in $PROGS; do
 	same_clocks "${t}_ce4_waits" "${t}_waits"
 	run "${t}_cerand" "$WORK/obj_prog/tb_prog" "+prog=$WORK/$t.hex" +ce_rand
 	same_clocks "${t}_cerand" "$t"
+	# Hatari-style instruction prefetch (fetch_lazy), at half rate with wait states
+	run "${t}_lazy" "$WORK/obj_prog/tb_prog" "+prog=$WORK/$t.hex" +lazy +ce=2 +waits=2
 done
 for t in $CPROGS; do
 	run "$t" "$WORK/obj_prog/tb_prog" "+prog=$WORK/$t.hex" +maxclk=20000000

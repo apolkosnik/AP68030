@@ -39,6 +39,7 @@ module ap030_core
 	output reg        d_iack,
 	output reg        d_nocache,    // this read bypasses the data cache (system option, see ap030_top)
 	input             nmi_vec_nocache,
+	input             fetch_lazy,   // prefetch as Hatari's 68030 model (see ap030_top)
 	output reg  [2:0] d_fc,
 	output reg [31:0] d_wdata,
 	input             d_ack,
@@ -112,6 +113,18 @@ module ap030_core
 	// multiply/divide started (1 MULU.W/MULS.W, 2 DIVU.W, 3 DIVS.W)
 	output reg  [1:0] tm_pop,
 	output reg  [1:0] tm_md,
+	// the prefetch queue for an external pipeline model (words from scan_pc
+	// on; valid count; a flush or reload of the queue in the last clock),
+	// and that model's stop point: with fetch_lazy no longword is fetched
+	// once the next word to take is at fetch_stop - 2 or beyond
+	output     [95:0] tm_q,
+	output      [2:0] tm_qn,
+	output     [31:0] tm_scan,
+	output reg        tm_flush,
+	input             fetch_stop_v,
+	input      [31:0] fetch_stop,
+	input             fetch_scan_v,  // the model is scanning: wait until it has passed
+	input      [31:0] fetch_scan_to, //   the word two ahead (or the words below the fetch)
 	output     [31:0] dbg_vbr       // VBR (system glue: NMI vector address)
 );
 
@@ -185,6 +198,13 @@ reg [15:0] pq [0:5];
 reg  [5:0] pq_v, pq_f;
 reg  [2:0] pq_n;
 reg [31:0] scan_pc;        // address of pq[0] (stage C)
+reg  [5:0] stop_wait;      // clocks with the queue empty under the pipeline model's stop
+reg        due_v;          // the next longword's fetch is due ...
+reg [31:0] due_scan;       // ... since the consumption reached this word
+wire       stop_starve = (stop_wait == 6'd63);
+assign tm_q    = {pq[0], pq[1], pq[2], pq[3], pq[4], pq[5]};
+assign tm_qn   = pq_n;
+assign tm_scan = scan_pc;
 reg [31:0] fetch_pc;       // next longword to request
 reg        fetch_skip;     // discard the first word of the next fetched longword
 reg  [1:0] fetch_out;      // fetches outstanding (they return in order, two at most)
@@ -588,6 +608,7 @@ always @(posedge clk) if (ce) begin
 	op_req <= 1'b0;
 	dbg_inst <= 1'b0;
 	tm_md <= 2'd0;
+	tm_flush <= 1'b0;
 	reg_we <= 1'b0;
 	cacr_ci <= 1'b0; cacr_cei <= 1'b0; cacr_cd <= 1'b0; cacr_ced <= 1'b0;
 	md_start <= 1'b0;
@@ -606,7 +627,7 @@ always @(posedge clk) if (ce) begin
 		sfc <= 3'd0; dfc <= 3'd0;
 		pq_v <= 6'd0; pq_f <= 6'd0; pq_n <= 3'd0;
 		scan_pc <= 32'd0; fetch_pc <= 32'd0; fetch_skip <= 1'b0; fetch_out <= 2'd0;
-		fetch_disc <= 2'd0; fetch_hold <= 1'b1;
+		fetch_disc <= 2'd0; fetch_hold <= 1'b1; stop_wait <= 6'd0; due_v <= 1'b0;
 		trace_pend <= 1'b0; late_fault_pend <= 1'b0; stream_fault_pend <= 1'b0;
 		stopped <= 1'b0; halted_r <= 1'b0;
 		reset_drive <= 1'b0; rst_cnt <= 10'd0;
@@ -666,6 +687,7 @@ always @(posedge clk) if (ce) begin
 
 		//---------------------------------------------------------- prefetch and pipe maintenance
 		tm_pop <= pop_n;
+		if (flush_req || pipe_load) begin tm_flush <= 1'b1; due_v <= 1'b0; end
 		if (flush_req) begin
 			pq_v <= 6'd0; pq_f <= 6'd0; pq_n <= 3'd0;
 			scan_pc <= flush_pc;
@@ -712,6 +734,8 @@ always @(posedge clk) if (ce) begin
 				reg [5:0] nv, nf;
 				reg [2:0] nn;
 				reg ret, disc_now;
+				reg due_now;
+				reg [31:0] due_at;
 				reg [1:0] out_after, disc_after, live;
 				integer j;
 				ret = i_ack | i_fault;                    // a fetch returns this clock
@@ -740,8 +764,24 @@ always @(posedge clk) if (ce) begin
 				pq_n <= nn;
 				fetch_disc <= disc_after;
 				// another longword when the queue has room for everything in flight
-				// and the memory system can take it (two fetches at most)
-				if (out_after != 2'd2 && i_ready && !halted_r && !fetch_hold && (nn + {live, 1'b0} <= 3'd4)) begin
+				// and the memory system can take it (two fetches at most); with
+				// fetch_lazy only when two words or fewer are left, and not past the
+				// pipeline model's stop point (a stop is on a branch whose words are
+				// queued and which flushes the queue; should the queue stay empty
+				// for 63 clocks, the stop is ignored rather than stall)
+				if (fetch_lazy && fetch_stop_v && (nn + {live, 1'b0} == 3'd0)) begin
+					if (!stop_starve) stop_wait <= stop_wait + 6'd1;
+				end else stop_wait <= 6'd0;
+				// the model decides at the consumption where this fetch became
+				// due (Hatari fetches there, its scan two words ahead)
+				due_now = nn + {live, 1'b0} <= (fetch_lazy ? 3'd2 : 3'd4);
+				due_at  = due_v ? due_scan : scan_pc + {29'd0, pop_n, 1'b0};
+				if (due_now && !due_v) begin due_v <= 1'b1; due_scan <= due_at; end
+				if (out_after != 2'd2 && i_ready && !halted_r && !fetch_hold && due_now &&
+				    (!fetch_lazy || stop_starve ||
+				     ((!fetch_stop_v || (due_at + 32'd2 < fetch_stop)) &&
+				      (!fetch_scan_v || (fetch_scan_to >= ((fetch_pc < due_at + 32'd4) ? fetch_pc : due_at + 32'd4)))))) begin
+					due_v <= 1'b0;
 					i_stb <= 1'b1;
 					i_addr <= fetch_pc;
 					i_fc <= fc_prog;

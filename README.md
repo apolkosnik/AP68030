@@ -234,6 +234,26 @@ divide starting (1 MULU.W/MULS.W, 2 DIVU.W, 3 DIVS.W).  Both are registered
 and hold for one processor clock, like `dbg_inst` (an instruction
 dispatched).  They change nothing inside the processor.
 
+`fetch_lazy` gives the instruction prefetch the policy of Hatari's
+cycle-exact 68030 (`get_word_ce030_prefetch`, `fill_prefetch_030_ntx`): a
+longword is fetched only when two words or fewer are left, queued or on the
+way, after the words taken in a clock (instead of four), and a branch
+refills the queue with the target's longword and the next one.  Hatari also
+stops prefetching "one word early" ahead of an unconditional flow change
+(RTS, RTE, RTD, RTR, JSR, JMP, BSR), which it finds by decoding instruction
+lengths ahead of execution (`pipeline_020`); the processor leaves that
+decoding to an external model and exports the queue for it: `tm_q`/`tm_qn`
+(the queued words, the next to take in `tm_q[95:80]`), `tm_scan` (its
+address) and `tm_flush` (the queue was flushed or reloaded).  The model
+answers with `fetch_stop_v`/`fetch_stop` (no longword is fetched once the
+next word to take is at `fetch_stop - 2` or beyond) and
+`fetch_scan_v`/`fetch_scan_to` (fetch decisions wait until the model has
+scanned two words past the consumption that made the fetch due).  With
+`fetch_lazy` at 0 the model inputs are ignored and the processor fetches as
+before; `tb/run_tests.sh` runs every program once more with `+lazy`.  The
+Falcon030 core's model is `falcon_pipescan` (Hatari's opcode table in block
+RAM).
+
 ## Licence
 
 GPL, see `LICENSE`.

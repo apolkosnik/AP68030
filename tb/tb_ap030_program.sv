@@ -72,6 +72,9 @@ end
 // edges -- so a run with the enable takes the same number of processor
 // clocks as one without
 reg cpu_ce_f = 1'b1;
+// +lazy: the processor's Hatari-style instruction prefetch (fetch_lazy)
+reg fetch_lazy;
+initial fetch_lazy = $test$plusargs("lazy");
 always @(posedge clk) cpu_ce_f <= cpu_ce;
 
 wire [31:0] a, d_o;
@@ -110,9 +113,9 @@ ap030_top #(.FAST_PORT(FAST_PORT), .USE_CE(1)) dut (
 	.avec_n(avec_n), .ciin_n(ciin_n), .cback_n(cback_n), .br_n(br_n), .bg_n(bg_n), .bgack_n(bgack_n),
 	.ipl_n(ipl_n), .ipend_n(ipend_n), .reset_n_i(reset_n), .reset_n_oe(reset_n_oe),
 	.cdis_n(cdis_n), .mmudis_n(mmudis_n), .refill_n(refill_n), .status_n(status_n),
-	.dbg_pc(dbg_pc), .dbg_sr(dbg_sr), .dbg_state(dbg_state), .dbg_halted(dbg_halted), .dbg_inst(dbg_inst),
+	.dbg_pc(dbg_pc), .dbg_sr(dbg_sr), .dbg_state(dbg_state), .dbg_halted(dbg_halted), .dbg_inst(dbg_inst), .fetch_stop_v(1'b0), .fetch_stop(32'd0), .fetch_scan_v(1'b0), .fetch_scan_to(32'd0),
 	.dbg_vbr(), .dbg_cacr(), .dbg_cache_clear(),
-	.snoop_we(snoop_we), .snoop_addr(snoop_addr), .nmi_vec_nocache(nmi_nc)
+	.snoop_we(snoop_we), .snoop_addr(snoop_addr), .nmi_vec_nocache(nmi_nc), .fetch_lazy(fetch_lazy)
 );
 
 //---------------------------------------------------------------------------

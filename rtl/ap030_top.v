@@ -101,6 +101,26 @@ module ap030_top
 	// 3 DIVS.W), each for one processor clock
 	output      [1:0] tm_pop,
 	output      [1:0] tm_md,
+	// the prefetch queue, for an external pipeline model, and that model's
+	// limits on the next fetches (ap030_core; used with fetch_lazy only, tie
+	// the inputs to 0 without a model): tm_q holds tm_qn queued words, word
+	// 0 (the next to take, at address tm_scan) in [95:80]; tm_flush: the
+	// queue was flushed or reloaded (branch, exception) in the last clock.
+	// fetch_stop_v/fetch_stop: no longword is fetched once the next word to
+	// take, at the consumption that made the fetch due, is at fetch_stop - 2
+	// or beyond; fetch_scan_v/fetch_scan_to (the first word not yet
+	// scanned): while the model scans, a fetch waits until it has scanned
+	// the words below that word + 4 (or below the longword it wants).  A
+	// fetch the stop holds back for 63 clocks with nothing queued or on the
+	// way goes ahead anyway, so a wrong stop cannot hang the processor.
+	output     [95:0] tm_q,
+	output      [2:0] tm_qn,
+	output     [31:0] tm_scan,
+	output            tm_flush,
+	input             fetch_stop_v,
+	input      [31:0] fetch_stop,
+	input             fetch_scan_v,
+	input      [31:0] fetch_scan_to,
 	output            dbg_halted,
 	// system glue (emulator integration): VBR, CACR, cache-clear pulses
 	output     [31:0] dbg_vbr,
@@ -111,9 +131,16 @@ module ap030_top
 	//    cache entry for it is invalidated (the MC68030 has no snooping --
 	//    this is glue for systems whose DMA writes cachable-by-allocation RAM)
 	//  nmi_vec_nocache: the level 7 autovector fetch bypasses the data cache
+	//  fetch_lazy: instruction prefetch as Hatari's 68030 model: a longword
+	//    is fetched only when two words or fewer are left (queued or on the
+	//    way) after the words taken in a clock, instead of four; after a
+	//    branch that fetches the target's longword and the next one (and a
+	//    third for a target at an odd word), as Hatari's three-word queue
+	//    does (get_word_ce030_prefetch, fill_prefetch_030_ntx)
 	input             snoop_we,
 	input      [31:0] snoop_addr,
-	input             nmi_vec_nocache
+	input             nmi_vec_nocache,
+	input             fetch_lazy
 );
 
 //---------------------------------------------------------------------------
@@ -188,9 +215,12 @@ ap030_core #(.PCREL_PROGRAM_SPACE(PCREL_PROGRAM_SPACE)) core (
 	.cacr(cacr), .cacr_ci(cacr_ci), .cacr_cei(cacr_cei), .cacr_cd(cacr_cd), .cacr_ced(cacr_ced), .caar_idx(caar_idx),
 	.ipl_n(ipl_n), .ipend_n(ipend_n), .reset_drive(reset_drive), .status_n(status_n), .refill_n(refill_n),
 	.halted(halted), .dbg_pc(dbg_pc), .dbg_sr(dbg_sr), .dbg_state(dbg_state), .dbg_inst(dbg_inst), .tm_pop(tm_pop), .tm_md(tm_md),
+	.tm_q(tm_q), .tm_qn(tm_qn), .tm_scan(tm_scan), .tm_flush(tm_flush),
+	.fetch_stop_v(fetch_stop_v), .fetch_stop(fetch_stop),
+	.fetch_scan_v(fetch_scan_v), .fetch_scan_to(fetch_scan_to),
 	.dbg_vbr(dbg_vbr)
 ,
-	.nmi_vec_nocache(nmi_vec_nocache)
+	.nmi_vec_nocache(nmi_vec_nocache), .fetch_lazy(fetch_lazy)
 );
 
 ap030_memsys #(.FAST_PORT(FAST_PORT)) memsys (
