@@ -50,7 +50,10 @@ end
 S_EXC4: begin
 	exc_active <= 1'b0; exc_is_irq <= 1'b0; exc_throw <= 1'b0; exc_busfault <= 1'b0;
 	if (trace_after_exc) begin trace_pend <= 1'b1; trace_after_exc <= 1'b0; end
-	pc_i <= tmp;
+	// the trace that follows an instruction trap stacks the address of the
+	// trapping instruction, the instruction that caused it (UM Table 8-6;
+	// WinUAE trace_pc): pc_i keeps it until that trace
+	if (!trace_after_exc) pc_i <= tmp;
 	if (tmp[0]) begin
 		// odd vector: address error (a double fault while processing a bus fault)
 		if (exc_busfault) begin halted_r <= 1'b1; state <= S_HALT; end

@@ -105,8 +105,16 @@ part's bus would have done.
 Interrupts: the IPL lines are synchronised, level 7 is edge sensitive
 (a transition to 7, or the mask dropping below 7 with the request held),
 IPEND reflects a pending interrupt, STOP wakes on a request above the
-mask. Trace T1/T0 follow UM 8.1.7: T1 survives the instruction traps
-(DIVZ, CHK, TRAPcc, TRAP), T0 traces changes of flow.
+mask. Trace T1/T0 follow UM 8.1.7: T0 traces changes of flow, instruction
+traps included.  The trace of an instruction trap (TRAP, TRAPcc/TRAPV,
+cpTRAPcc, CHK/CHK2, divide by zero) or a coprocessor post-instruction
+exception is taken after that exception's processing (UM 8.1.12), with
+the trapping instruction's address in its frame (UM Table 8-6); this is
+decided by the instruction, not the vector, so an interrupt or a
+coprocessor exception with any vector gets no extra trace, and a
+mid-instruction coprocessor exception is traced when the instruction
+completes after its RTE.  With a trace pending, a general coprocessor
+instruction's dialog runs until a null CA=0 primitive (UM 10.5.2.5).
 
 Posted writes that fail on the bus are reported at the next instruction
 boundary with a format $A frame (UM 8.1.2), and RTE reruns the write.  A

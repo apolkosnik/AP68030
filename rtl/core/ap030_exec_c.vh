@@ -137,6 +137,9 @@ end
 S_CPWAIT: begin
 	if (cp_ca) state <= S_CP1;
 	else if (cp_cond) exc_go(`VEC_CPPROTO, `FMT_CPMID, scan_pc, pc_i);   // conditional needs a null to finish
+	// a pending trace: the dialog goes on until null CA=0 PF=1 or a take
+	// post-instruction exception (UM 10.5.2.5)
+	else if (tr_t1 || cp_trace_wait) state <= S_CP1;
 	else finish;
 end
 S_CP_ABORT: begin
@@ -170,7 +173,12 @@ S_CPNULL: begin
 		// a pending trace waits for processing finished (UM 10.5.2.5)
 		if (cp_resp[8] && irq_pend) begin iack_cpmid <= 1'b1; exc_ilvl <= irq_lvl; state <= S_IACK; end
 		else state <= S_CP1;
-	end else finish;
+	end else begin
+		finish;
+		// trace on change of flow: a transfer of SR and scanPC into the
+		// processor made the trace pending (UM 10.4.17, 10.5.2.5)
+		if (cp_trace_wait) trace_pend <= 1'b1;
+	end
 end
 
 //-------------------------------------------------------------- conditional completions

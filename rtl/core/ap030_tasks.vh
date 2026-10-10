@@ -111,9 +111,18 @@ task exc_go;
 		exc_cnt <= cnt; exc_dw_dst <= dw_dst; exc_dw_ret <= dw_ret;
 		exc_is_irq <= 1'b0; exc_is_reset <= 1'b0; exc_throw <= 1'b0; exc_late <= 1'b0;
 		exc_busfault <= (vec == `VEC_BUSERR) || (vec == `VEC_ADDRERR);
-		// T1 tracing survives the instruction traps (UM 8.1.7 / 8.1.12)
-		trace_after_exc <= (tr_t1 | tr_t0) && ((vec == `VEC_DIVZERO) || (vec == `VEC_CHK) ||
-		                   (vec == `VEC_TRAPCC) || (vec[7:4] == 4'h2 || vec[7:4] == 4'h3 && vec[7:0] < 8'd48));
+		// A trace pending for an instruction whose own exception is part of
+		// its execution is taken after that exception's processing (UM 8.1.4,
+		// 8.1.12 Table 8-5): TRAP #n, TRAPcc/TRAPV/cpTRAPcc, CHK/CHK2 and divide
+		// by zero (instruction traps, traced in both trace modes, UM 8.1.7),
+		// and a coprocessor post-instruction exception (UM 10.5.2.5).  Decided
+		// by the instruction, not the vector: an interrupt or a coprocessor
+		// can supply any vector, and a pre-instruction exception (not
+		// executed) or a mid-instruction one (resumed) has no trace now
+		trace_after_exc <= (vec != `VEC_BUSERR) &&
+		                   (((state == S_TRAP || state == S_TRAPCC || state == S_CHK || state == S_CHK2_2 ||
+		                      state == S_DIVZ || state == S_CPTRAP2) && (tr_t1 | tr_t0)) ||
+		                    (state == S_CP_EXC && sub[1:0] == 2'd2 && (tr_t1 | cp_trace_wait)));
 		trace_pend <= 1'b0;
 		if (vec == `VEC_BUSERR || vec == `VEC_ADDRERR || vec == `VEC_SPURIOUS || vec == `VEC_FLINE ||
 		    (vec >= `VEC_AUTOVEC && vec < `VEC_TRAP)) status_cnt <= 2'd3;
