@@ -33,6 +33,11 @@
 //               the native port reads it), the DMA model writes $F1B4      //
 //               to $F1B0 and holds the snoop until the next processor      //
 //               clock                                                      //
+//   $F1F0 long  read: program-space bus cycles begun with RMC asserted     //
+//   $F1F4 long  read: bit 0 = RMC asserted during this very read           //
+//   $F1F8 word  write: another bus master requests the bus once (BR, then  //
+//               BGACK for 4 clocks once BG is asserted and AS negated);    //
+//               long read: bus tenures that master completed               //
 // Memory map (24-bit decode):                                               //
 //   $000000-$0FFFFF  RAM, 32-bit synchronous, burst                          //
 //   $200000-$2FFFFF  RAM alias, 16-bit asynchronous                          //
@@ -305,6 +310,9 @@ always @* begin
 			8'h88: rdata = cp_operand[0];
 			8'h8C: rdata = cp_operand[1];
 			8'hC4: rdata = {13'd0, watch_fc, 16'd0};
+			8'hF0: rdata = rmc_fetches[31:0];
+			8'hF4: rdata = {31'd0, ~rmc_n};
+			8'hF8: rdata = bm_done[31:0];
 			default: rdata = 32'd0;
 		endcase
 	end else if (is_sync) rdata = {mem[{ma[19:4], beat_idx, 2'b00}], mem[{ma[19:4], beat_idx, 2'b01}],
@@ -356,6 +364,23 @@ reg  [2:0] watch_fc = 0;
 always @(posedge clk) begin
  if (as_asserted && rw && a[31:2] == watch_addr[31:2]) watch_fc <= fc;
  if (n_take && n_rw && n_addr[31:2] == watch_addr[31:2]) watch_fc <= n_fc;
+end
+// RMC (UM 7.1.1, 7.3.3): $F1F0 counts the instruction fetches begun while
+// RMC is asserted (none belong to a read-modify-write operation)
+integer    rmc_fetches = 0;
+always @(posedge clk) if (as_asserted && !as_was && !rmc_n && (fc == 3'd2 || fc == 3'd6)) rmc_fetches <= rmc_fetches + 1;
+// another bus master ($F1F8, UM 7.7): BR until BG is asserted with AS
+// negated, then BGACK for four clocks (and BR negated), then the bus back
+integer    bm_reqs = 0, bm_done = 0;
+reg  [2:0] bm_hold = 0;
+reg        bm_own = 0;
+always @(posedge clk) if (cpu_ce) begin
+	br_n <= !((bm_reqs != bm_done) && !bm_own);
+	if (!bm_own && (bm_reqs != bm_done) && !bg_n && as_n) begin bm_own <= 1; bgack_n <= 0; bm_hold <= 4; end
+	else if (bm_own) begin
+		if (bm_hold != 0) bm_hold <= bm_hold - 1;
+		else begin bm_own <= 0; bgack_n <= 1; bm_done <= bm_done + 1; end
+	end
 end
 // Execution in the vector table: the programs start at $400 and never run
 // code below it, so a program fetch there after the start means control
@@ -480,6 +505,7 @@ task reg_write;
 			8'hC1: watch_addr[23:16] = v;
 			8'hC2: watch_addr[15:8] = v;
 			8'hC3: watch_addr[7:0] = v;
+			8'hF9: bm_reqs = bm_reqs + 1;
 			8'h90: $write("%c", v);                       // console
 			8'hA0: bench_runs[31:24] = v;
 			8'hA1: bench_runs[23:16] = v;

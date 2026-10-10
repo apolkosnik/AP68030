@@ -63,7 +63,7 @@ module ap030_bus
 	output reg        fill_stb,     // pulse: a complete cachable longword
 	output reg [31:2] fill_addr,
 	output reg [31:0] fill_data,
-	input             rmc_release,  // negate RMC without another cycle (CAS mismatch)
+	input             rmc_hold,     // level: an RMW operation or a table search is open (RMC held)
 	input             halted,       // double bus fault: never begin a cycle
 	output            bus_idle,     // nothing loaded, nothing in progress
 
@@ -556,7 +556,13 @@ always @(posedge clk) if (ce) begin
 		ecs_p <= 1'b0; ocs_p <= 1'b0;
 		chk_late <= 1'b0; beat_pend <= 1'b0;
 
-		if (rmc_release && !t_valid) rmc_p <= 1'b0;
+		// RMC ends with its sequence (UM 7.1.1): once the memory system no
+		// longer holds it (CAS/CAS2 mismatch, table search over, fault) RMC is
+		// negated at the first clock without a cycle in progress.  A level
+		// rather than a pulse, so the end cannot be lost to a transfer that
+		// happens to be loaded at that moment; a cycle starting this clock
+		// begins with RMC negated unless it is a locked one itself.
+		if (!rmc_hold && !cycle_active) rmc_p <= 1'b0;
 
 		//------------------------------------------------------ terminated cycle
 		if (chk_late) begin

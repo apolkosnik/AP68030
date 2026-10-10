@@ -128,7 +128,11 @@ line or page are split as UM 7.2.2 describes, and the first portion of a
 line-crossing read is not burst.
 
 Table searches wait for the write buffer to drain (a descriptor may just
-have been written) and hold RMC for their duration.
+have been written) and hold RMC for their duration.  A read-modify-write
+operation (TAS, CAS, CAS2) holds RMC from its first transfer until its last
+write, the CAS/CAS2 compare mismatch that ends it without a write, or a
+fault, and no instruction prefetch runs in between (UM 7.3.3), so RMC is
+negated before the next cycle (UM 7.1.1).
 
 **System options** (inputs of `ap030_top`, tied to 0 for a plain MC68030):
 `snoop_we`/`snoop_addr` invalidate the data cache entry for an address

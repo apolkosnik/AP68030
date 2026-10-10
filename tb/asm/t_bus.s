@@ -14,6 +14,10 @@
 ; protocol with the testbench:
 ;   word write to $F00100 = failing test number
 ;   word write to $F00102 = $BAD0 on failure, $600D when all tests passed
+;   long read of $F001F0 = instruction fetches begun with RMC asserted
+;   long read of $F001F4 = RMC asserted (bit 0) during that read
+;   word write to $F001F8 = another bus master requests the bus once;
+;   long read of $F001F8 = bus tenures that master completed
 
 FAILREG	equ	$F00100
 DONEREG	equ	$F00102
@@ -21,6 +25,10 @@ W32	equ	$000000
 W16	equ	$200000
 W8	equ	$300000
 WCI	equ	$400000
+RMCFETCH equ	$F001F0
+RMCNOW	equ	$F001F4
+BUSREQ	equ	$F001F8
+BUSDONE	equ	$F001F8
 
 failt	macro
 	move.w	#\1,d7
@@ -229,8 +237,58 @@ casok2:
 	chkl	d5,$D1D2D3D4,43
 	chkl	d6,$D5D6D7D8,44
 
+;---------------------------------------------------------------- RMC framing (UM 7.1.1, 7.3.3)
+; TAS, CAS2 and CAS run from the 16-bit window with the caches off, so
+; instruction fetches are due on the bus around them: none may run inside
+; the indivisible operation, and RMC must be negated after it, also when a
+; failed compare ends CAS/CAS2 after the read; another bus master then gets
+; the bus (BG is withheld only while RMC is asserted, UM 7.7.2)
+	moveq	#0,d0
+	movec	d0,cacr
+	jsr	W16+rmcops
+	chkl	d0,0,45			; no fetch with RMC asserted
+	chkl	d3,0,46			; RMC negated after TAS
+	chkl	d2,0,47			; ... after a CAS2 mismatch
+	chkl	d1,0,48			; ... after a CAS mismatch
+	move.l	BUSDONE,d5
+	move.w	#1,BUSREQ
+	move.w	#40,d0
+bmwait:	nop
+	dbra	d0,bmwait
+	move.l	BUSDONE,d0
+	sub.l	d5,d0
+	chkl	d0,1,49			; the other master had the bus
+	move.l	#$00003111,d0
+	movec	d0,cacr
+
 	move.w	#$600D,(DONEREG).l
 	stop	#$2700
+
+;---------------------------------------------------------------- read-modify-write operations
+; returns d0 = fetches begun with RMC asserted, d3/d2/d1 = RMC after TAS,
+; after a CAS2 mismatch and after a CAS mismatch
+rmcops:
+	move.l	RMCFETCH,a4
+	clr.b	W16+$5700
+	tas	W16+$5700
+	move.l	RMCNOW,d3
+	lea	W16+$5710,a0
+	lea	W16+$5720,a1
+	move.l	#1,(a0)
+	move.l	#2,(a1)
+	moveq	#1,d4
+	moveq	#3,d5			; the second compare fails
+	moveq	#0,d6
+	moveq	#0,d7
+	cas2.l	d4:d5,d6:d7,(a0):(a1)
+	move.l	RMCNOW,d2
+	move.l	#$11111111,W16+$5730
+	move.l	#$22222222,d4
+	cas.l	d4,d6,W16+$5730		; the compare fails: no write
+	move.l	RMCNOW,d1
+	move.l	RMCFETCH,d0
+	sub.l	a4,d0
+	rts
 
 ;---------------------------------------------------------------- code executed from a narrow window
 narrow:
