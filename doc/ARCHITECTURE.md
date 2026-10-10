@@ -195,7 +195,9 @@ with base/mask, FC base/mask, R/W and RWM, and the table search engine of
 UM 9.5: function code lookup, up to four index levels of any width, page
 sizes 256 bytes to 32 KB, short and long descriptors, upper and lower
 limits (on the root pointer, on long table descriptors and on long early
-termination descriptors), early termination with contiguous mapping,
+termination descriptors, checked on entering the next level after the
+descriptor's U update, UM Figures 9-25 to 9-29), early termination with
+contiguous mapping,
 indirect descriptors, supervisor and write protection (RMC cycles count as
 writes), U and M updates written back under RMC. Limit violations, invalid
 descriptors, supervisor violations and bus errors during the search create

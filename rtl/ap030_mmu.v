@@ -571,10 +571,15 @@ always @(posedge clk) if (ce) begin
 					if (w_berr) begin s_b <= 1'b1; s_i <= 1'b1; wst <= W_DONE; end
 					else begin
 						s_lw0 <= w_rdata;
-						s_n <= s_n + 3'd1;
+						// N and the PTEST An result count the descriptors fetched
+						// completely: a bus error on the second longword of a long
+						// descriptor leaves it out, as one on a short descriptor
+						// does (WinUAE mmu030_table_search; UM Table 9-3 N: "the
+						// actual number of tables accessed")
 						if (s_long) begin
 							wst <= W_FETCH1R;
 						end else begin
+							s_n <= s_n + 3'd1;
 							op_desc_addr <= s_daddr;   // PTEST An: the last descriptor fetched completely
 							wst <= W_EVAL;
 						end
@@ -590,7 +595,7 @@ always @(posedge clk) if (ce) begin
 				if (w_ack) begin
 					w_req <= 1'b0;
 					if (w_berr) begin s_b <= 1'b1; s_i <= 1'b1; wst <= W_DONE; end
-					else begin s_lw1 <= w_rdata; op_desc_addr <= s_daddr; wst <= W_EVAL; end
+					else begin s_lw1 <= w_rdata; s_n <= s_n + 3'd1; op_desc_addr <= s_daddr; wst <= W_EVAL; end
 				end
 			end
 
@@ -613,12 +618,6 @@ always @(posedge clk) if (ce) begin
 					// indirect: no history or protection bits of its own
 					if (s_ptest && s_n == s_maxlvl) wst <= W_DONE;
 					else wst <= W_IND;
-				end else if (s_long && !s_indirect && fld_avail && lim_viol(d_lu, d_lim, idx_now)) begin
-					// the limit of a long descriptor bounds the index into the
-					// table (or the pages of an early termination) below it
-					s_sv <= sv_acc;
-					s_l <= 1'b1; s_i <= 1'b1;
-					wst <= W_DONE;
 				end else begin
 					s_sv <= sv_acc;
 					s_wp <= s_wp | d_wp;
@@ -627,6 +626,13 @@ always @(posedge clk) if (ce) begin
 						s_pa <= pa_sum[31:8];
 						s_ci <= d_ci;
 						s_m  <= d_m;
+						// the limit of a long early termination descriptor bounds
+						// the next index (UM 9.5.1.1 LIMIT); it is checked when the
+						// ATC entry is created (Figure 9-27), after the U and M
+						// update of the descriptor fetch (Figure 9-29)
+						if (s_long && !s_indirect && fld_avail && lim_viol(d_lu, d_lim, idx_now)) begin
+							s_l <= 1'b1; s_i <= 1'b1;
+						end
 						if (!s_ptest && !sv_acc && (!d_u || (s_write && !d_m && !(s_wp | d_wp)))) begin
 							w_wdata <= s_lw0 | 32'h8 | ((s_write && !(s_wp | d_wp)) ? 32'h10 : 32'h0);
 							w_addr  <= s_daddr; w_rw <= 1'b0; w_req <= 1'b1;
@@ -667,6 +673,16 @@ always @(posedge clk) if (ce) begin
 					w_addr <= {d_addr[31:2], 2'd0}; w_rw <= 1'b1; w_req <= 1'b1;
 					s_bitpos <= 6'd63;
 					wst <= W_FETCH0;
+				end else if (s_long && lim_viol(d_lu, d_lim, idx_now)) begin
+					// the limit of a long table descriptor bounds the index into
+					// the table below; it is checked on entering that level
+					// (UM Figures 9-25 and 9-28), after the descriptor's U update
+					// (Figure 9-29; UM 9.5.1.1 U: "a pointer may be fetched, and
+					// its U bit set, for an address to which access is denied at
+					// another level"), and not by a PTEST that ends at this
+					// level (Table 9-3 L)
+					s_l <= 1'b1; s_i <= 1'b1;
+					wst <= W_DONE;
 				end else begin
 					s_dt <= dt_f;
 					s_tbl <= d_addr[31:4];
