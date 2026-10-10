@@ -163,6 +163,7 @@ reg  [1:0] beat_idx;      // line entry of the beat being latched
 reg [31:4] beat_line;     // the line being burst-filled (address pins stay constant)
 // pin-side posedge registers
 reg        rmc_p, ciout_p, cbreq_p, ecs_p, ocs_p, ecs_tog, d_oe_p;
+reg        rmc_first;     // the locked sequence has not completed a cycle yet
 reg        dben_rd_tp;    // read DBEN: toggles at the S2 rising edge (assert)
 reg        dben_rd_tn;    //            toggles at the S5 falling edge (negate)
 reg        dben_wr_tn;    // write DBEN: toggles at the S1 falling edge (assert)
@@ -213,31 +214,46 @@ reg [2:0] arb;
 reg       arb_g, arb_t, tristate;
 wire      arb_r = br_l & ~rmc_p;      // BG is never asserted while RMC is asserted
 wire      arb_a = bgack_l;
+// UM 7.7: bus requests are recognized during RESET assertion too, so the
+// arbiter is not held in reset (its power-up state is state 0); the bus
+// itself stays three-stated while RESET is asserted (UM 7.8)
+initial begin arb = 3'd0; arb_g = 1'b0; arb_t = 1'b0; bg_n_r = 1'b1; end
 always @(posedge clk) if (ce) begin
-	if (rst) begin
-		arb <= 3'd0; arb_g <= 1'b0; arb_t <= 1'b0;
-	end else case (arb)
-		3'd0: if (arb_r) begin arb <= 3'd1; arb_g <= 1'b1; arb_t <= 1'b1; end
-		      else if (arb_a) begin arb <= 3'd4; arb_t <= 1'b1; end
-		3'd1: arb <= 3'd2;
-		3'd2: if (arb_a || !arb_r) begin arb <= 3'd3; arb_g <= 1'b0; end
-		3'd3: arb <= 3'd4;
-		3'd4: if (!arb_a && !arb_r) begin arb <= 3'd0; arb_t <= 1'b0; end
-		      else if (arb_r && arb_a) begin arb <= 3'd5; arb_g <= 1'b1; end
-		      else if (arb_r) begin arb <= 3'd1; arb_g <= 1'b1; end
-		3'd5: if (!arb_r) begin arb <= 3'd3; arb_g <= 1'b0; end
-		      else if (!arb_a) arb <= 3'd6;
-		3'd6: if (arb_a || !arb_r) begin arb <= 3'd3; arb_g <= 1'b0; end
+	case (arb)
+		// the transitions of Figure 7-61 (G in states 1, 2, 5 and 6, T in
+		// all but state 0); BGACK takes state 0 to state 4 even with BR
+		// (XA), BR then gives BG from state 4 (RX)
+		3'd0: if (arb_a) begin arb <= 3'd4; arb_t <= 1'b1; end                      // XA
+		      else if (arb_r) begin arb <= 3'd1; arb_g <= 1'b1; arb_t <= 1'b1; end  // RA'
+		3'd1: arb <= 3'd2;                                                         // XX
+		3'd2: if (arb_a || !arb_r) begin arb <= 3'd3; arb_g <= 1'b0; end            // XA, R'A'
+		3'd3: arb <= 3'd4;                                                         // XX
+		3'd4: if (arb_r) begin arb <= 3'd5; arb_g <= 1'b1; end                      // RX
+		      else if (!arb_a) begin arb <= 3'd0; arb_t <= 1'b0; end                // R'A'
+		3'd5: arb <= 3'd6;                                                         // XX
+		3'd6: if (!arb_r) begin arb <= 3'd3; arb_g <= 1'b0; end                     // R'X
+		      else if (!arb_a) arb <= 3'd2;                                        // RA'
 		default: arb <= 3'd0;
 	endcase
 end
-always @(negedge clk) if (ce_f) bg_n_r <= rst ? 1'b1 : ~arb_g;   // BG moves on the falling edge
+always @(negedge clk) if (ce_f) bg_n_r <= ~arb_g;   // BG moves on the falling edge
 assign bg_n_o = bg_n_r;
-// T takes effect once the current cycle (and RMW operation) is over
+// T takes effect once the current cycle (and RMW operation) is over: the
+// bus floats after the rising edge that follows the negation of AS and RMC
+// (UM 7.7.4; Figure 7-60: at the end of S5).
+// BGACK alone (single-wire arbitration) does not wait for the RMW
+// operation: UM 7.7.4, "An alternate master forces the MC68030 to release
+// the bus by asserting BGACK and waits for AS to negate before taking the
+// bus. It applies to all bus cycles of a read-modify-write sequence" (also
+// UM 7.5.2; Figure 7-61: state 0 to 4 on A with no RMC condition, Figure
+// 7-62).  RMC floats with the bus; the operation is still open, so when
+// BGACK negates the bus is driven again with RMC asserted and the rest of
+// the operation runs (BG is never asserted while RMC is, so T with RMC
+// asserted can only come from BGACK).
 wire cycle_active = (bst == B_S0) || (bst == B_S2) || (bst == B_WAIT) || (bst == B_BURST);
 always @(posedge clk) if (ce) begin
 	if (rst) tristate <= 1'b1;
-	else if (arb_t) begin if (!cycle_active && !rmc_p && !chk_late) tristate <= 1'b1; end
+	else if (arb_t) begin if (!cycle_active && (!rmc_p || arb_a)) tristate <= 1'b1; end
 	else tristate <= 1'b0;
 end
 assign bus_granted = tristate;
@@ -543,6 +559,7 @@ always @(posedge clk) if (ce) begin
 		beat_pend <= 1'b0; beat_ciin <= 1'b0; beat_last <= 1'b0; beat_cnt <= 2'd0; beat_idx <= 2'd0;
 		beat_line <= 28'd0;
 		rmc_p <= 1'b0; ciout_p <= 1'b0; cbreq_p <= 1'b0; ecs_p <= 1'b0; ocs_p <= 1'b0;
+		rmc_first <= 1'b0;
 		ecs_tog <= 1'b0; d_oe_p <= 1'b0; dben_rd_tp <= 1'b0; dben_wr_tp <= 1'b0;
 		c_as_set <= 1'b0; c_as_clr <= 1'b0; c_ds_wr <= 1'b0; c_cbreq_clr <= 1'b0; c_latch <= 1'b0;
 		done <= 1'b0; rd_data <= 32'd0; res_berr <= 1'b0; res_avec <= 1'b0; res_ciin <= 1'b0;
@@ -563,10 +580,18 @@ always @(posedge clk) if (ce) begin
 		// happens to be loaded at that moment; a cycle starting this clock
 		// begins with RMC negated unless it is a locked one itself.
 		if (!rmc_hold && !cycle_active) rmc_p <= 1'b0;
+		// UM 7.5.2, 7.7.4: the bus may be taken away during the first read of
+		// a read-modify-write operation (a table search alike) by a relinquish
+		// and retry, BERR, HALT and BR together: BR while that cycle waits to
+		// be rerun negates RMC so that BG is asserted and the bus released;
+		// the rerun read asserts RMC again and the operation starts over.
+		// After the first read BR is not answered until RMC is negated.
+		if (bst == B_RETRY && rmc_first && br_l) rmc_p <= 1'b0;
 
 		//------------------------------------------------------ terminated cycle
 		if (chk_late) begin
 			d_oe_p <= 1'b0;                        // end of S5: data bus released
+			if (!late_retry) rmc_first <= 1'b0;    // a cycle of the sequence is over
 			if (!t_rw) dben_wr_tp <= ~dben_wr_tp;  // write DBEN held through S5
 			if (late_retry) begin
 				bst <= B_RETRY;
@@ -658,6 +683,7 @@ always @(posedge clk) if (ce) begin
 			rw_o  <= n_rw;
 			ciout_p <= n_ciout;
 			if (n_rmc) rmc_p <= 1'b1;
+			if (n_rmc && (!rmc_p || !rmc_hold)) rmc_first <= 1'b1;   // a locked sequence begins
 			cbreq_p <= n_cbreq;
 			c_as_set <= 1'b1;
 			t_ocs <= 1'b0;

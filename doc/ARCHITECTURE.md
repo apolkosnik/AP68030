@@ -226,8 +226,11 @@ The controller runs S0-S5 with the timing of UM Figures 7-7 to 7-61:
   DSACK are handled as UM 7.5; retry restarts the cycle from S0 after both
   negate;
 - BR/BG/BGACK arbitration follows the state machine of Figure 7-61: the
-  bus is granted between cycles (never inside an RMC sequence) and the
-  outputs are released;
+  bus is granted between cycles (inside an RMC sequence only by a
+  relinquish and retry of its first read, UM 7.5.2/7.7.4) and the
+  outputs are released; BGACK alone (single-wire arbitration) also takes
+  the bus between the cycles of an RMC sequence, which resumes with RMC
+  asserted when BGACK negates (UM 7.7.4, 7.5.2, Figure 7-62);
 - CPU space cycles (FC=7) serve the interrupt acknowledge (vector on the
   low byte, AVEC, spurious on BERR), breakpoint acknowledge (BERR: illegal
   instruction; DSACK: the opcode replaces the BKPT) and coprocessor CIR
