@@ -13,7 +13,7 @@ mkdir -p "$WORK"
 SRC="$RTL/ap030_top.v $RTL/ap030_core.v $RTL/ap030_memsys.v $RTL/ap030_mmu.v $RTL/ap030_cache.v \
      $RTL/ap030_bus.v $RTL/ap030_alu.v $RTL/ap030_muldiv.v $RTL/ap030_regfile.v"
 
-PROGS="t_integer t_exceptions t_bus t_cache t_mmu t_cp t_stack"
+PROGS="t_integer t_exceptions t_bus t_cache t_mmu t_cp t_stack t_snoop"
 HALTPROGS="t_dblfault"
 LAZYPROGS="t_lazy"     # run with +lazy only: they drive the pipeline-model inputs
 

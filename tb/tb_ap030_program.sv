@@ -28,6 +28,11 @@
 //   $F1BC word  coprocessor model: raise this interrupt level at the next  //
 //               command or condition write, and answer the next $0010     //
 //               with busy again                                           //
+//   $F1D0 long  DMA trigger: $F1D5 (byte) processor clocks after the       //
+//               processor's read of this longword ends on the bus (or      //
+//               the native port reads it), the DMA model writes $F1B4      //
+//               to $F1B0 and holds the snoop until the next processor      //
+//               clock                                                      //
 // Memory map (24-bit decode):                                               //
 //   $000000-$0FFFFF  RAM, 32-bit synchronous, burst                          //
 //   $200000-$2FFFFF  RAM alias, 16-bit asynchronous                          //
@@ -122,7 +127,7 @@ ap030_top #(.FAST_PORT(FAST_PORT), .USE_CE(1)) dut (
 	.cdis_n(cdis_n), .mmudis_n(mmudis_n), .refill_n(refill_n), .status_n(status_n),
 	.dbg_pc(dbg_pc), .dbg_sr(dbg_sr), .dbg_state(dbg_state), .dbg_halted(dbg_halted), .dbg_inst(dbg_inst), .fetch_stop_v(fm_stop_v), .fetch_stop(fm_stop), .fetch_scan_v(fm_scan_v), .fetch_scan_to(fm_scan_to),
 	.dbg_vbr(), .dbg_cacr(), .dbg_cache_clear(),
-	.snoop_we(snoop_we), .snoop_addr(snoop_addr), .nmi_vec_nocache(nmi_nc), .fetch_lazy(fetch_lazy)
+	.snoop_we(snoop_we | trig_snoop), .snoop_addr(snoop_addr), .nmi_vec_nocache(nmi_nc), .fetch_lazy(fetch_lazy)
 );
 
 //---------------------------------------------------------------------------
@@ -377,6 +382,15 @@ reg        snoop_we = 0;
 reg [31:0] snoop_addr = 0;
 reg        nmi_nc = 0;
 reg  [1:0] dma_go = 0;
+// the trigger ($F1D0, $F1D5) counts processor clocks, so a run with the
+// clock enable has the write and the snoop at the same processor clocks
+reg [31:0] trig_addr = 0;
+reg  [7:0] trig_delay = 0;
+integer    trig_cnt = -1;
+reg        trig_snoop = 0;
+wire       trig_go = (trig_addr != 0) &&
+                     ((as_asserted && rw && a[31:2] == trig_addr[31:2] && (!sterm_n || !dsack0_n || !dsack1_n)) ||
+                      (n_pending && n_delay == 0 && {12'd0, n_line, n_pos} == trig_addr[31:2]));
 always @(posedge clk) begin
 	snoop_we <= 0;
 	if (dma_go != 0) begin
@@ -386,6 +400,18 @@ always @(posedge clk) begin
 		mem[{dma_addr[19:2], 2'b00} + 3] = dma_data[7:0];
 		if (dma_go == 2'd1) begin snoop_we <= 1; snoop_addr <= dma_addr; end
 		dma_go <= 0;
+	end
+	if (cpu_ce) begin
+		trig_snoop <= 0;
+		if (trig_cnt == 0) begin
+			mem[{dma_addr[19:2], 2'b00}]     = dma_data[31:24];
+			mem[{dma_addr[19:2], 2'b00} + 1] = dma_data[23:16];
+			mem[{dma_addr[19:2], 2'b00} + 2] = dma_data[15:8];
+			mem[{dma_addr[19:2], 2'b00} + 3] = dma_data[7:0];
+			trig_snoop <= 1; snoop_addr <= dma_addr;
+		end
+		if (trig_cnt >= 0) trig_cnt <= trig_cnt - 1;
+		if (trig_go) begin trig_cnt <= trig_delay; trig_addr <= 0; end
 	end
 end
 task bench_report;
@@ -435,6 +461,11 @@ task reg_write;
 			8'hB7: dma_data[7:0] = v;
 			8'hB9: dma_go = v[1:0];
 			8'hBB: nmi_nc = v[0];
+			8'hD0: trig_addr[31:24] = v;
+			8'hD1: trig_addr[23:16] = v;
+			8'hD2: trig_addr[15:8] = v;
+			8'hD3: trig_addr[7:0] = v;
+			8'hD5: trig_delay = v;
 			8'hBD: begin cp_irq_arm = v[2:0]; cp_busy_done = 0; end
 			8'hE0: fm_stop[31:24] = v;
 			8'hE1: fm_stop[23:16] = v;

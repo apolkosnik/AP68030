@@ -197,7 +197,7 @@ ap030_cache #(.FC_BITS(1)) icache (
 	.fi_we(ic_fi_we), .fi_addr(ic_fi_addr), .fi_fc(ic_fi_fc), .fi_data(ic_fi_data),
 	.wr_we(1'b0), .wr_la(32'd0), .wr_fc(3'd0), .wr_be(4'd0), .wr_data(32'd0), .wr_wa(1'b0), .wr_allow_fill(1'b0),
 	.inv_we(1'b0), .inv_la(32'd0),
-	.snp_we(1'b0), .snp_la(32'd0),
+	.snp_we(1'b0), .snp_la(32'd0), .fw_start(1'b0), .fw_line(4'd0),
 	.clr_all(cacr_ci), .clr_entry(cacr_cei), .clr_index(caar_idx)
 );
 
@@ -216,6 +216,8 @@ reg   [3:0] dc_wr_be;
 reg  [31:0] dc_wr_data;
 reg         dc_inv_we;
 reg  [31:0] dc_inv_la;
+wire        dc_fw_start;     // a data read is accepted by the bus (its fills follow)
+wire  [7:4] dc_fw_line;
 
 ap030_cache #(.FC_BITS(3)) dcache (
 	.clk(clk), .ce(ce), .rst(rst),
@@ -225,7 +227,7 @@ ap030_cache #(.FC_BITS(3)) dcache (
 	.wr_we(dc_wr_we), .wr_la(dc_wr_la), .wr_fc(dc_wr_fc), .wr_be(dc_wr_be), .wr_data(dc_wr_data),
 	.wr_wa(cacr[`CACR_WA]), .wr_allow_fill(dc_fill_ok),
 	.inv_we(dc_inv_we), .inv_la(dc_inv_la),
-	.snp_we(snoop_we), .snp_la(snoop_addr),
+	.snp_we(snoop_we), .snp_la(snoop_addr), .fw_start(dc_fw_start), .fw_line(dc_fw_line),
 	.clr_all(cacr_cd), .clr_entry(cacr_ced), .clr_index(caar_idx)
 );
 
@@ -333,6 +335,9 @@ reg  [2:0] r_got;        // read bytes obtained so far
 reg        r_ocs;        // OCS still to be asserted for this operand
 reg        r_first;
 reg        r_cross_line;
+// the data read accepted by the bus now: its fills are for d_fill_line
+assign     dc_fw_start = b_req && b_ack && (owner == OWN_DU) && !own_ifetch && b_rw;
+assign     dc_fw_line  = r_addr[7:4];
 // write buffer
 reg        wb_valid;
 reg        wb_stage;     // 0: portion 1 pending, 1: portion 2 pending
