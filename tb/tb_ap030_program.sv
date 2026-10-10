@@ -36,6 +36,9 @@
 //   $FF0000-$FFFFFF  bus error                                               //
 // Loaded with +prog=<hex>; +waits=<n> sets the initial wait states;         //
 // +expect_halt passes when the processor halts (double bus fault test).     //
+// +lazy selects fetch_lazy; its pipeline-model inputs are 0 unless the     //
+// program sets them: $F1E0 long fetch_stop, $F1E4 long fetch_scan_to,      //
+// $F1E8 word bit 0 fetch_stop_v, bit 1 fetch_scan_v.                       //
 //--------------------------------------------------------------------------//
 
 `timescale 1ns/1ps
@@ -72,6 +75,9 @@ end
 // edges -- so a run with the enable takes the same number of processor
 // clocks as one without
 reg cpu_ce_f = 1'b1;
+// +lazy: the processor's Hatari-style instruction prefetch (fetch_lazy)
+reg fetch_lazy;
+initial fetch_lazy = $test$plusargs("lazy");
 always @(posedge clk) cpu_ce_f <= cpu_ce;
 
 wire [31:0] a, d_o;
@@ -97,6 +103,9 @@ reg n_valid = 0, n_last = 0;
 reg [1:0] n_word = 0;
 reg [31:0] n_rdata = 0;
 wire n_take = n_req && n_ready;
+// fetch_lazy's pipeline-model inputs, set by the program ($F1E0-$F1E9)
+reg        fm_stop_v = 0, fm_scan_v = 0;
+reg [31:0] fm_stop = 0, fm_scan_to = 0;
 ap030_top #(.FAST_PORT(FAST_PORT), .USE_CE(1)) dut (
 	.clk(clk), .ce(cpu_ce),
     .fast_req(n_req), .fast_ready(n_ready), .fast_match(n_match),
@@ -110,9 +119,9 @@ ap030_top #(.FAST_PORT(FAST_PORT), .USE_CE(1)) dut (
 	.avec_n(avec_n), .ciin_n(ciin_n), .cback_n(cback_n), .br_n(br_n), .bg_n(bg_n), .bgack_n(bgack_n),
 	.ipl_n(ipl_n), .ipend_n(ipend_n), .reset_n_i(reset_n), .reset_n_oe(reset_n_oe),
 	.cdis_n(cdis_n), .mmudis_n(mmudis_n), .refill_n(refill_n), .status_n(status_n),
-	.dbg_pc(dbg_pc), .dbg_sr(dbg_sr), .dbg_state(dbg_state), .dbg_halted(dbg_halted), .dbg_inst(dbg_inst),
+	.dbg_pc(dbg_pc), .dbg_sr(dbg_sr), .dbg_state(dbg_state), .dbg_halted(dbg_halted), .dbg_inst(dbg_inst), .fetch_stop_v(fm_stop_v), .fetch_stop(fm_stop), .fetch_scan_v(fm_scan_v), .fetch_scan_to(fm_scan_to),
 	.dbg_vbr(), .dbg_cacr(), .dbg_cache_clear(),
-	.snoop_we(snoop_we), .snoop_addr(snoop_addr), .nmi_vec_nocache(nmi_nc)
+	.snoop_we(snoop_we), .snoop_addr(snoop_addr), .nmi_vec_nocache(nmi_nc), .fetch_lazy(fetch_lazy)
 );
 
 //---------------------------------------------------------------------------
@@ -426,6 +435,15 @@ task reg_write;
 			8'hB9: dma_go = v[1:0];
 			8'hBB: nmi_nc = v[0];
 			8'hBD: begin cp_irq_arm = v[2:0]; cp_busy_done = 0; end
+			8'hE0: fm_stop[31:24] = v;
+			8'hE1: fm_stop[23:16] = v;
+			8'hE2: fm_stop[15:8] = v;
+			8'hE3: fm_stop[7:0] = v;
+			8'hE4: fm_scan_to[31:24] = v;
+			8'hE5: fm_scan_to[23:16] = v;
+			8'hE6: fm_scan_to[15:8] = v;
+			8'hE7: fm_scan_to[7:0] = v;
+			8'hE9: begin fm_stop_v = v[0]; fm_scan_v = v[1]; end
 			8'hC0: watch_addr[31:24] = v;
 			8'hC1: watch_addr[23:16] = v;
 			8'hC2: watch_addr[15:8] = v;
