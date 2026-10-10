@@ -186,7 +186,11 @@ an entry with B set, so the access faults until the entry is flushed.
 PTEST levels 0-7 set the MMUSR of Table 9-3 and return the address of the
 last descriptor fetched completely; PLOAD, PFLUSHA, PFLUSH by FC and by
 FC and address, PMOVE and PMOVEFD, and the configuration exception (vector
-56, format $2, PC after the PMOVE) are implemented. MMUDIS disables
+56, format $2, PC after the PMOVE) are implemented. A CpID 0 encoding the
+MC68030 does not support (the 68851-only types and registers, reserved
+bits of the UM 3.3.3 formats, a PC relative or immediate EA field) takes
+the F-line exception in supervisor mode and a privilege violation in user
+mode (UM 9.8). MMUDIS disables
 translation; RESET clears the E bits and leaves the ATC alone.
 
 ## Bus controller (ap030_bus.v, UM 7)

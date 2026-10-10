@@ -507,30 +507,39 @@ S_CPRS_WR: begin cp_pos <= cp_pos + 8'd4; cir_wr(5'h10, `SZ_L, tmp, S_CPRS_BODY)
 
 //-------------------------------------------------------------- MMU instructions (UM 9.8, PRM)
 S_PMMU0: begin
-	// F-line with CpID 0: the second word selects the operation
+	// F-line with CpID 0: the second word selects the operation.  An
+	// encoding the MC68030 does not support takes the F-line exception here,
+	// in supervisor mode (UM 9.8; in user mode the dispatch took the
+	// privilege violation).  The supported patterns are the formats of the UM
+	// 3.3.3 descriptions (PFLUSH, PLOAD, PMOVE, PTEST: their zero bits, the
+	// register and mode fields, control alterable EAs); which reserved bits
+	// make an encoding unsupported where the UM does not say follows WinUAE
+	// (cpummu030.c mmu_op30_pmove/_pload/_pflush/_ptest: PMOVE R/W=1 with FD;
+	// table68k MMUOP030: no PC relative or immediate EA field even for the
+	// forms without an operand)
 	if (ir[8:6] != 3'b000) exc_pre(`VEC_FLINE);
 	else case (ext[15:13])
 		3'b000: begin
 			// PMOVE TT0/TT1
-			if (ext[12:11] != 2'b01 || !ea_ctrlalt) exc_pre(`VEC_FLINE);
+			if (ext[12:11] != 2'b01 || ext[7:0] != 8'd0 || (ext[9] && ext[8]) || !ea_ctrlalt) exc_pre(`VEC_FLINE);
 			else begin ea_ret <= ext[9] ? S_PMOVE_WR : S_PMOVE_RD; state <= S_EA; end
 		end
 		3'b001: begin
 			case (ext[12:10])
 				3'b000: begin   // PLOAD
-					if (!mmu_fc_ok(ext[4:0]) || !ea_ctrlalt) exc_pre(`VEC_FLINE);
+					if (ext[8:5] != 4'd0 || !mmu_fc_ok(ext[4:0]) || !ea_ctrlalt) exc_pre(`VEC_FLINE);
 					else begin ea_ret <= S_PLOAD; state <= S_EA; end
 				end
 				3'b001: begin   // PFLUSHA
-					if (ext[9:0] != 10'd0) exc_pre(`VEC_FLINE);
+					if (ext[9:0] != 10'd0 || ea_pcd || ea_pci || ea_imm || ea_bad) exc_pre(`VEC_FLINE);
 					else begin op_req <= 1'b1; op_kind <= 3'd4; state <= S_PFLUSH; end
 				end
 				3'b100: begin   // PFLUSH by function code
-					if (!mmu_fc_ok(ext[4:0])) exc_pre(`VEC_FLINE);
+					if (ext[9:8] != 2'd0 || !mmu_fc_ok(ext[4:0]) || ea_pcd || ea_pci || ea_imm || ea_bad) exc_pre(`VEC_FLINE);
 					else begin op_req <= 1'b1; op_kind <= 3'd5; op_fc <= mmu_fc(ext[4:0], rf_a[2:0]); op_fcmask <= ext[7:5]; state <= S_PFLUSH; end
 				end
 				3'b110: begin   // PFLUSH by function code and EA
-					if (!mmu_fc_ok(ext[4:0]) || !ea_ctrlalt) exc_pre(`VEC_FLINE);
+					if (ext[9:8] != 2'd0 || !mmu_fc_ok(ext[4:0]) || !ea_ctrlalt) exc_pre(`VEC_FLINE);
 					else begin ea_ret <= S_PFLUSH2; state <= S_EA; end
 				end
 				default: exc_pre(`VEC_FLINE);
@@ -538,12 +547,13 @@ S_PMMU0: begin
 		end
 		3'b010: begin
 			// PMOVE TC / SRP / CRP
-			if (!(ext[12:10] == 3'b000 || ext[12:10] == 3'b010 || ext[12:10] == 3'b011) || !ea_ctrlalt) exc_pre(`VEC_FLINE);
+			if (!(ext[12:10] == 3'b000 || ext[12:10] == 3'b010 || ext[12:10] == 3'b011) || ext[7:0] != 8'd0 || (ext[9] && ext[8]) || !ea_ctrlalt)
+				exc_pre(`VEC_FLINE);
 			else begin ea_ret <= ext[9] ? S_PMOVE_WR : S_PMOVE_RD; state <= S_EA; end
 		end
 		3'b011: begin
-			// PMOVE MMUSR
-			if (ext[12:10] != 3'b000 || !ea_ctrlalt) exc_pre(`VEC_FLINE);
+			// PMOVE MMUSR (no FD bit)
+			if (ext[12:10] != 3'b000 || ext[8:0] != 9'd0 || !ea_ctrlalt) exc_pre(`VEC_FLINE);
 			else begin ea_ret <= ext[9] ? S_PMOVE_WR : S_PMOVE_RD; state <= S_EA; end
 		end
 		3'b100: begin
