@@ -344,6 +344,7 @@ reg  [2:0] r_got;        // read bytes obtained so far
 reg        r_ocs;        // OCS still to be asserted for this operand
 reg        r_first;
 reg        r_cross_line;
+reg        r_nocbreq;    // CIIN ended this operand's burst request: the rest without CBREQ
 // the data read accepted by the bus now: its fills are for d_fill_line
 assign     dc_fw_start = b_req && b_ack && (owner == OWN_DU) && !own_ifetch && b_rw;
 assign     dc_fw_line  = r_addr[7:4];
@@ -510,6 +511,7 @@ always @(posedge clk) if (ce) begin
 		d_fill_line <= 28'd0;
 		r_addr <= 32'd0; r_rem <= 3'd0; r_pn <= 3'd0; r_data <= 32'd0; r_got <= 3'd0;
 		r_ocs <= 1'b0; r_first <= 1'b1; r_cross_line <= 1'b0; d_pend <= 1'b0; i_pend <= 1'b0;
+		r_nocbreq <= 1'b0;
 		ip_addr <= 32'd0; ip_fc <= 3'd0;
 		ir_addr <= 32'd0; ir_fc <= 3'd0; ir_pa <= 32'd0; ir_ci <= 1'b0; ir_tag_hit <= 1'b0; ir_line_empty <= 1'b0;
 		f_addr <= 32'd0; f_fc <= 3'd0; f_size <= 2'd0; f_rw <= 1'b1; f_rm <= 1'b0; f_dob <= 32'd0;
@@ -589,6 +591,7 @@ always @(posedge clk) if (ce) begin
 				if (lk_act) begin
 					r_addr <= c_addr; r_rem <= c_rem; r_pn <= c_pn; r_cross_line <= c_cross;
 					if (lk_first) begin r_data <= d_wdata; r_got <= 3'd0; r_ocs <= 1'b1; r_first <= 1'b1; end
+					if (lk_first) r_nocbreq <= 1'b0;
 					if (d_iack) begin
 						// CPU space: untranslated, never cached (UM 9.2.1)
 						if (slot_free && !w_req && !walker_busy && !wb_valid) begin
@@ -677,7 +680,8 @@ always @(posedge clk) if (ce) begin
 								// bus cycle, and a stale entry must not outlive it
 								b_cache <= dc_fill_ok && !tr_ci && cachable_space && !d_nocache;
 								b_cbreq <= dc_fill_ok && cacr[`CACR_DBE] && !tr_ci && cachable_space && !d_rmc && !d_nocache &&
-								           (!dc_tag_hit || dc_line_empty) && !((lk_first || r_first) && c_cross);
+								           (!dc_tag_hit || dc_line_empty) && !((lk_first || r_first) && c_cross) &&
+								           (lk_first || !r_nocbreq);
 								b_wdata <= 32'd0;
 								r_ocs <= 1'b0;
 								owner <= OWN_DU; own_ifetch <= 1'b0;
@@ -720,7 +724,7 @@ always @(posedge clk) if (ce) begin
 					b_ciout <= r_ci_hold && !d_iack; b_ocs <= r_ocs;
 					b_cache <= dc_fill_ok && !r_ci_hold && cachable_space && !d_iack && !d_nocache;   // RMW reads fill, as above
 					b_cbreq <= dc_fill_ok && cacr[`CACR_DBE] && !r_ci_hold && cachable_space && !d_rmc && !d_iack && !d_nocache &&
-					           (!r_tag_hit || r_line_empty) && !(r_first && r_cross_line);
+					           (!r_tag_hit || r_line_empty) && !(r_first && r_cross_line) && !r_nocbreq;
 					b_wdata <= 32'd0;
 					r_ocs <= 1'b0;
 					owner <= OWN_DU; own_ifetch <= 1'b0;
@@ -750,6 +754,10 @@ always @(posedge clk) if (ce) begin
 						r_rem  <= r_rem - r_pn;
 						r_pn   <= r_rem - r_pn;
 						r_first <= 1'b0;
+						// UM 6.1.3.2: CIIN on the first cycle of a burst aborts it,
+						// and the rest of a misaligned operand is read with CBREQ
+						// negated
+						r_nocbreq <= b_cbreq && b_ciin;
 						ds <= DS_LOOKUP;
 					end else begin
 						d_ack_r <= 1'b1; 
