@@ -70,9 +70,11 @@ S_CP2: begin : cp2
 				end
 			end
 			5'b00101: begin
-				// take address and transfer data
+				// take address and transfer data: the address goes to tmp2, ea
+				// keeps the evaluated EA for a write to previously evaluated EA
+				// and the mid-instruction frame (UM 10.4.10)
 				if (cp_cond && !r[15]) exc_go(`VEC_CPPROTO, `FMT_CPMID, scan_pc, pc_i);
-				else begin cp_len <= r[7:0]; cp_pos <= 8'd0; cir_rd(5'h1C, `SZ_L, DW_EA, S_CPXFER); end
+				else begin cp_len <= r[7:0]; cp_pos <= 8'd0; cir_rd(5'h1C, `SZ_L, DW_TMP2, S_CPXFER); end
 			end
 			5'b00110: begin
 				// transfer multiple main processor registers
@@ -273,14 +275,19 @@ S_CPXEA: begin : cpxea
 	end
 end
 S_CPXFER: begin : cpxfer
-	// memory <-> operand CIR in longword parts, ascending (UM 10.3.8)
+	// memory <-> operand CIR in longword parts, ascending (UM 10.3.8).  The
+	// take address and transfer data primitive's address is in tmp2 and its
+	// operand in data space (UM 10.4.11); the evaluated EA's reads are
+	// program references when the EA is PC-relative
 	reg [7:0] rem;
 	reg [2:0] chunk;
 	rem = cp_len - cp_pos;
 	chunk = (rem >= 8'd4) ? 3'd4 : rem[2:0];
 	if (rem == 8'd0) state <= S_CPWAIT;
-	else if (!cp_dr) rd(ea + {24'd0, cp_pos}, sz_of_bytes(chunk), DW_TMP, S_CPXFER2);
-	else cir_rd(5'h10, sz_of_bytes(chunk), DW_TMP, S_CPXFER3);
+	else if (cp_dr) cir_rd(5'h10, sz_of_bytes(chunk), DW_TMP, S_CPXFER3);
+	else if (cp_resp[12:8] == 5'b00101)
+		dreq(tmp2 + {24'd0, cp_pos}, sz_of_bytes(chunk), 1'b1, 32'd0, fc_data, 1'b0, 1'b0, DW_TMP, S_CPXFER2);
+	else rd(ea + {24'd0, cp_pos}, sz_of_bytes(chunk), DW_TMP, S_CPXFER2);
 end
 S_CPXFER2: begin : cpxfer2
 	reg [7:0] rem; reg [2:0] chunk;
@@ -292,21 +299,23 @@ S_CPXFER3: begin : cpxfer3
 	reg [7:0] rem; reg [2:0] chunk;
 	rem = cp_len - cp_pos; chunk = (rem >= 8'd4) ? 3'd4 : rem[2:0];
 	cp_pos <= cp_pos + {5'd0, chunk};
-	wr(ea + {24'd0, cp_pos}, sz_of_bytes(chunk), tmp, S_CPXFER);
+	wr(((cp_resp[12:8] == 5'b00101) ? tmp2 : ea) + {24'd0, cp_pos}, sz_of_bytes(chunk), tmp, S_CPXFER);
 end
 S_CPTOS: begin
-	// transfer to/from top of stack: (A7)+ to the coprocessor, or -(A7) from it
+	// transfer to/from top of stack: (A7)+ to the coprocessor, or -(A7) from
+	// it (UM 10.4.12), in data space; the -(A7) address goes to tmp2, ea
+	// keeps the evaluated EA (UM 10.4.10)
 	if (!cp_dr) begin
 		wreg(4'd15, rf_c + ((cp_len == 8'd1) ? 32'd2 : {24'd0, cp_len}));
-		rd(rf_c, sz_of_bytes(cp_len[2:0]), DW_TMP, S_CPTOS2);
+		dreq(rf_c, sz_of_bytes(cp_len[2:0]), 1'b1, 32'd0, fc_data, 1'b0, 1'b0, DW_TMP, S_CPTOS2);
 	end else begin
-		ea <= rf_c - ((cp_len == 8'd1) ? 32'd2 : {24'd0, cp_len});
+		tmp2 <= rf_c - ((cp_len == 8'd1) ? 32'd2 : {24'd0, cp_len});
 		wreg(4'd15, rf_c - ((cp_len == 8'd1) ? 32'd2 : {24'd0, cp_len}));
 		cir_rd(5'h10, sz_of_bytes(cp_len[2:0]), DW_TMP, S_CPSR3);
 	end
 end
 S_CPTOS2: cir_wr(5'h10, sz_of_bytes(cp_len[2:0]), tmp, S_CPWAIT);
-S_CPSR3: begin wr(ea, sz_of_bytes(cp_len[2:0]), tmp, S_CPWAIT); end
+S_CPSR3: begin wr(tmp2, sz_of_bytes(cp_len[2:0]), tmp, S_CPWAIT); end
 S_CPREG: begin
 	// transfer single main processor register
 	dw_reg <= {cp_resp[3], cp_resp[2:0]};
