@@ -106,6 +106,9 @@ end
 integer as_cnt = 0;
 always @(posedge clk) as_cnt <= as_asserted ? as_cnt + 1 : 0;
 
+// relinquish and retry: rr_on answers the cycles with BERR and HALT (no
+// DSACK), rr_halt holds HALT afterwards (the test drives BR and BGACK)
+reg  rr_on = 0, rr_halt = 0;
 // retry bookkeeping: region 7 signals retry on the first attempt of each cycle
 reg  retry_armed = 1;
 reg  halt_hold = 0;
@@ -160,6 +163,8 @@ always @* begin
 	end
 	if (is_sync && region == 4'h9 && as_asserted && (as_cnt >= 1)) berr_n = 0;   // late BERR after STERM
 	if (is_sync && region == 4'hC && as_asserted) berr_n = 0;                    // BERR in lieu of STERM
+	if (rr_on && as_asserted) begin {dsack1_n, dsack0_n} = 2'b11; berr_n = 0; halt_n = 0; end
+	if (rr_halt) halt_n = 0;
 end
 
 // retry: BERR+HALT on the first attempt; HALT released two clocks after AS negates
@@ -353,6 +358,15 @@ initial begin
 		gold[i] = mem[i];
 	end
 	repeat (3) @(posedge clk);
+	// UM 7.7: bus requests are recognized during RESET assertion: BG answers
+	// BR while the processor is held in reset (the bus stays three-stated)
+	br_n = 0;
+	k = 0;
+	while (k < 8 && bg_n) begin @(posedge clk); k = k + 1; end
+	if (bg_n) begin errors = errors + 1; $display("FAIL: BR during reset not answered with BG"); end
+	if (bus_oe) begin errors = errors + 1; $display("FAIL: bus driven during reset"); end
+	br_n = 1;
+	repeat (6) @(posedge clk);
 	rst <= 0;
 	repeat (2) @(posedge clk);
 	mon_on = 1;
@@ -628,6 +642,43 @@ initial begin
 	br_n = 1;
 	repeat (6) @(posedge clk);
 	if (!bus_oe) begin errors = errors + 1; $display("FAIL: bus not reclaimed after BR withdrawn"); end
+	// BR during a cycle: the bus is placed in the high-impedance state after
+	// the rising edge that follows the negation of AS, the end of S5 (UM
+	// 7.7.4, Figure 7-60)
+	wait_states = 2;
+	@(posedge clk);
+	req <= 1; req_kind <= `BK_DATA; req_addr <= 32'h00014C10; req_nbytes <= 4; req_total <= 4; req_rw <= 1; req_cache <= 0; req_cbreq <= 0;
+	@(posedge clk); while (!req_ack) @(posedge clk);
+	req <= 0;
+	while (!as_asserted) @(posedge clk);
+	br_n = 0;
+	k = 0;
+	while (k == 0) begin @(negedge clk); #1; if (as_n) k = 1; end
+	@(posedge clk); #1;
+	if (bus_oe || bg_n) begin errors = errors + 1; $display("FAIL: bus not three-stated at the rising edge after AS negated (bus_oe %0d bg_n %0d)", bus_oe, bg_n); end
+	@(posedge clk);
+	bgack_n = 0; br_n = 1;
+	repeat (3) @(posedge clk);
+	bgack_n = 1;
+	wait_idle;
+	wait_states = 0;
+	repeat (4) @(posedge clk);
+	// BR and BGACK together from the idle state (Figure 7-61: state 0 goes
+	// to state 4 on A whatever R is, then to state 5, so BG is asserted
+	// once and stays asserted while both are held; the bus floats)
+	k = 0; fails_here = 0;
+	br_n = 0; bgack_n = 0;
+	for (i = 0; i < 12; i = i + 1) begin
+		@(negedge clk); #1;
+		if (!bg_n) k = 1;
+		else if (k == 1) fails_here = fails_here + 1;     // BG negated after it was asserted
+	end
+	if (k == 0 || fails_here != 0 || bus_oe) begin
+		errors = errors + 1; $display("FAIL: BR with BGACK from the idle state: BG seen %0d, BG negated again %0d, bus_oe %0d", k, fails_here, bus_oe);
+	end
+	br_n = 1; bgack_n = 1;
+	repeat (8) @(posedge clk);
+	if (!bus_oe || !bg_n) begin errors = errors + 1; $display("FAIL: bus not reclaimed after BR and BGACK negated"); end
 	// RMC blocks BG
 	req_rmc = 1; req_rmc_last = 0; rmc_hold = 1;
 	do_transfer(`BK_DATA, 32'h00014D00, 3'd1, 3'd1, 1, 0, 0, 0);
@@ -642,6 +693,91 @@ initial begin
 	if (bg_n) begin errors = errors + 1; $display("FAIL: BG not asserted after RMC ended"); end
 	br_n = 1; req_rmc = 0; req_rmc_last = 0; rmc_hold = 0;
 	repeat (6) @(posedge clk);
+	// relinquish and retry (UM 7.5.2, 7.7.4): BERR, HALT and BR together on
+	// the first read of a read-modify-write operation release the bus (BG,
+	// three-state for the BGACK master); once HALT is negated the read is
+	// rerun with RMC.  The same on a later cycle of the operation is a plain
+	// retry: BG waits until RMC is negated (Figure 7-61 note).
+	req_rmc = 1; req_rmc_last = 0; rmc_hold = 1; rr_on = 1;
+	@(posedge clk);
+	req <= 1; req_kind <= `BK_DATA; req_addr <= 32'h00014D40; req_nbytes <= 4; req_total <= 4; req_rw <= 1; req_cache <= 0; req_cbreq <= 0;
+	@(posedge clk); while (!req_ack) @(posedge clk);
+	req <= 0;
+	while (!as_asserted) @(posedge clk);
+	br_n = 0; rr_halt = 1;
+	while (as_asserted) @(posedge clk);
+	rr_on = 0;
+	k = 0;
+	while (k < 12 && bg_n) begin @(posedge clk); k = k + 1; end
+	if (bg_n) begin errors = errors + 1; $display("FAIL: relinquish and retry on the first RMW read: BG not asserted"); end
+	else begin
+		@(posedge clk); bgack_n = 0; br_n = 1;
+		repeat (3) @(posedge clk);
+		if (bus_oe) begin errors = errors + 1; $display("FAIL: relinquish and retry: bus not released"); end
+		repeat (3) @(posedge clk);
+		bgack_n = 1;
+	end
+	br_n = 1;
+	repeat (2) @(posedge clk);
+	rr_halt = 0;
+	while (!done) @(posedge clk);
+	if (res_berr || rd_data != gold_op(32'h00014D40, 3'd4) || rmc_n) begin
+		errors = errors + 1; $display("FAIL: relinquish and retry: rerun read berr %0d data %08x rmc_n %0d", res_berr, rd_data, rmc_n);
+	end
+	rr_on = 1; req_rmc_last = 1;
+	@(posedge clk);
+	req <= 1; req_addr <= 32'h00014D40; req_rw <= 0; req_wdata <= 32'h5A5AA5A5;
+	@(posedge clk); while (!req_ack) @(posedge clk);
+	req <= 0;
+	while (!as_asserted) @(posedge clk);
+	br_n = 0; rr_halt = 1;
+	while (as_asserted) @(posedge clk);
+	rr_on = 0;
+	repeat (10) @(posedge clk);
+	if (!bg_n || !bus_oe) begin errors = errors + 1; $display("FAIL: BG during the retry of a later RMW cycle"); end
+	rr_halt = 0;
+	while (!done) @(posedge clk);
+	wait_idle;
+	for (i = 0; i < 4; i = i + 1) gold[32'h00014D40 + i] = mem[32'h00014D40 + i];
+	if (res_berr || {mem[32'h00014D40], mem[32'h00014D41], mem[32'h00014D42], mem[32'h00014D43]} != 32'h5A5AA5A5) begin
+		errors = errors + 1; $display("FAIL: relinquish and retry: retried RMW write");
+	end
+	k = 0;
+	while (k < 6 && bg_n) begin @(posedge clk); k = k + 1; end
+	if (bg_n) begin errors = errors + 1; $display("FAIL: BG not asserted after the RMW operation"); end
+	br_n = 1; req_rmc = 0; req_rmc_last = 0; rmc_hold = 0;
+	repeat (6) @(posedge clk);
+
+	// single-wire arbitration inside an RMW operation (UM 7.7.4: BGACK alone
+	// releases the bus; it "applies to all bus cycles of a read-modify-write
+	// sequence"; Figure 7-62): after the read the bus floats, no cycle runs
+	// while BGACK is asserted, then the write runs with RMC asserted
+	req_rmc = 1; req_rmc_last = 0; rmc_hold = 1;
+	do_transfer(`BK_DATA, 32'h00014D60, 3'd4, 3'd4, 1, 0, 0, 0);
+	bgack_n = 0;
+	repeat (4) @(posedge clk);
+	if (bus_oe) begin errors = errors + 1; $display("FAIL: BGACK alone inside an RMW operation: bus not three-stated"); end
+	if (!bg_n) begin errors = errors + 1; $display("FAIL: BG asserted for BGACK alone during RMC"); end
+	cycles_before = cycles_seen;
+	req_rmc_last = 1;
+	@(posedge clk);
+	req <= 1; req_kind <= `BK_DATA; req_addr <= 32'h00014D60; req_nbytes <= 4; req_total <= 4; req_rw <= 0; req_wdata <= 32'hC3C3A5A5; req_cache <= 0; req_cbreq <= 0;
+	repeat (6) @(posedge clk);
+	if (cycles_seen != cycles_before || !as_n) begin errors = errors + 1; $display("FAIL: cycle run while BGACK is asserted"); end
+	bgack_n = 1;
+	fails_here = 0;
+	while (!req_ack) @(posedge clk);
+	req <= 0;
+	while (!done) begin @(posedge clk); if (as_asserted && rmc_n) fails_here = fails_here + 1; end
+	if (fails_here != 0) begin errors = errors + 1; $display("FAIL: RMW write after BGACK ran without RMC"); end
+	wait_idle;
+	if (!rmc_n) begin errors = errors + 1; $display("FAIL: RMC not negated after the RMW write"); end
+	for (i = 0; i < 4; i = i + 1) gold[32'h00014D60 + i] = mem[32'h00014D60 + i];
+	if ({mem[32'h00014D60], mem[32'h00014D61], mem[32'h00014D62], mem[32'h00014D63]} != 32'hC3C3A5A5) begin
+		errors = errors + 1; $display("FAIL: RMW write after BGACK");
+	end
+	req_rmc = 0; req_rmc_last = 0; rmc_hold = 0;
+	repeat (4) @(posedge clk);
 
 	//-------------------------------------------------------------- back-to-back
 	// consecutive requests: an async cycle every three clocks (UM Figure 7-25)

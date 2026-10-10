@@ -49,6 +49,10 @@ module ap030_cache
 	// invalidate the entry addressed by wr_la (write aborted by the MMU)
 	input             inv_we,
 	input      [31:0] inv_la,
+	// invalidate the whole line inv_line_idx (UM 6.1.3.2: a bus error on the
+	// first cycle of a burst marks the entire line invalid)
+	input             inv_line,
+	input       [7:4] inv_line_idx,
 	// invalidate the entry at an externally written address (bus snoop; the
 	// index alone selects it, whatever its tag)
 	input             snp_we,
@@ -157,6 +161,7 @@ always @(posedge clk) begin
 		end
 		if (ce && wr_kill) valid[wr_idx][wr_ent] <= 1'b0;
 		if (ce && inv_we) valid[inv_la[7:4]][inv_la[3:2]] <= 1'b0;
+		if (ce && inv_line) valid[inv_line_idx] <= 4'd0;
 		if (ce && snp_late) valid[snp_late_la[7:4]][snp_late_la[3:2]] <= 1'b0;
 		if (snp_we) valid[snp_la[7:4]][snp_la[3:2]] <= 1'b0;
 	end

@@ -600,20 +600,14 @@ bk1:	bkpt	#2
 	chkl	d1,$DEADBEEF,96		; entry the write allocated)
 
 ;---------------------------------------------------------------- two posted writes fault: no double bus fault
-; A posted write faults while the next write is already waiting for the
-; write buffer.  The second write's fault belongs to its instruction, not to
-; the bus error frame being stacked, so it is no double bus fault (UM 7.5.4,
-; 8.1.2).  The second write goes to the bus error region, so it faults on the
-; MC68030 as well: exactly two bus errors, the first write's handled first
-; (program order).  The handler repairs the trigger (RTE reruns that write)
-; and completes the fault in the bus error region in software (DF cleared).
-; KNOWN DEVIATION (not tested here): had the second write gone to the
-; repaired longword, the MC68030 would report one bus error - it begins
-; exception processing immediately after the faulted data cycle (UM 8.1.2),
-; suspending the next instruction before its write reaches the bus (UM
-; Table 8-6: the format $B PC "may not be the instruction that generated the
-; faulted bus cycle").  This core has already handed that write to the bus;
-; it faults too and is reported as a second bus error, in program order.
+; A posted write fails while the next write waits for the write buffer.
+; That write never reaches the bus before the fault is taken (t_held);
+; the bus error suspends its instruction, RTE reruns the failed write and
+; then issues the waiting one.  Here the second write goes to the bus error
+; region and fails on its own: exactly two bus errors, in program order,
+; and neither is a double bus fault (UM 7.5.4, 8.1.2).  The handler repairs
+; the trigger (RTE reruns that write) and completes the fault in the bus
+; error region in software (DF cleared).
 	move.w	#M_BERRDROP,mode
 	clr.w	exccnt
 	move.l	#WCI+$3AB0,BERRREG

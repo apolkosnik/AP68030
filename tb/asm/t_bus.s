@@ -18,6 +18,9 @@
 ;   long read of $F001F4 = RMC asserted (bit 0) during that read
 ;   word write to $F001F8 = another bus master requests the bus once;
 ;   long read of $F001F8 = bus tenures that master completed
+;   long read of $F001C8 = bus cycles run with CBREQ asserted
+;   long write to $F001CC = a line of the 32-bit synchronous window that
+;   asserts CIIN (0 = none)
 
 FAILREG	equ	$F00100
 DONEREG	equ	$F00102
@@ -29,6 +32,8 @@ RMCFETCH equ	$F001F0
 RMCNOW	equ	$F001F4
 BUSREQ	equ	$F001F8
 BUSDONE	equ	$F001F8
+CBRCNT	equ	$F001C8
+CIINLN	equ	$F001CC
 
 failt	macro
 	move.w	#\1,d7
@@ -258,6 +263,44 @@ bmwait:	nop
 	move.l	BUSDONE,d0
 	sub.l	d5,d0
 	chkl	d0,1,49			; the other master had the bus
+
+;---------------------------------------------------------------- CBREQ after CIIN
+; UM 6.1.3.2 (p. 6-19): CIIN on the first cycle of a burst aborts the burst;
+; "If a portion of the requested operand remains to be read (due to
+; misalignment), a second read cycle is initiated at the appropriate address
+; with CBREQ negated."  A long at $5716 spans two entries of one line; the
+; bursts are enabled only around the read, so no other cycle asks for one.
+; A line-crossing long never asks for a burst for its first portion (UM
+; 6.1.3.2), and CIIN there does not stop the request for the second line.
+	move.l	#$11223344,W32+$5714
+	move.l	#$55667788,W32+$5718
+	move.l	#$AABBCCDD,W32+$572C
+	move.l	#$EEFF0011,W32+$5730
+	move.l	#$0101+$800,d0		; data cache on and empty, no bursts
+	movec	d0,cacr
+	move.l	#$5710,CIINLN		; this line asserts CIIN with STERM
+	move.l	CBRCNT,d4
+	move.l	#$1101,d0		; data bursts
+	movec	d0,cacr
+	move.l	W32+$5716,d1		; CBREQ and CIIN, then the rest without CBREQ
+	move.l	#$0101,d0
+	movec	d0,cacr
+	move.l	CBRCNT,d5
+	chkl	d1,$33445566,50
+	sub.l	d4,d5
+	chkl	d5,1,51			; CBREQ on the first cycle only
+	move.l	#$5720,CIINLN
+	move.l	CBRCNT,d4
+	move.l	#$1101,d0
+	movec	d0,cacr
+	move.l	W32+$572E,d1		; first portion: no CBREQ, CIIN; second: CBREQ
+	move.l	#$0101,d0
+	movec	d0,cacr
+	move.l	CBRCNT,d5
+	clr.l	CIINLN
+	chkl	d1,$CCDDEEFF,52
+	sub.l	d4,d5
+	chkl	d5,1,53			; CBREQ for the second line only
 	move.l	#$00003111,d0
 	movec	d0,cacr
 

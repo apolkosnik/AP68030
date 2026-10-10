@@ -22,11 +22,19 @@
 //   $F180 word  coprocessor save CIR format word (read/write)               //
 //   $F184 word  read: last control CIR value; $F188/$F18C: operands 0 and 1  //
 //   $F190 byte  console: the byte is printed                                //
+//   $F194 word  coprocessor model command $0030: append a response to the //
+//               script; read (long): CPU space type 2 bus cycles, any CpID  //
+//   $F196 word  clear the script; $F198 long: operand CIR read value;      //
+//   $F19C long  operand address CIR read value (tb_cp_model.svh)           //
 //   $F1A0/$F1A4 long  benchmark runs and clocks; $F1A8 word: print report   //
 //   $F1B0/$F1B4 long  DMA model address/data; $F1B8 word 1: write + snoop,  //
 //                     2: write without snoop; $F1BA word bit 0: NMI vector  //
 //                     fetched past the data cache (nmi_vec_nocache)         //
 //   $F1C0 long  watched address; $F1C4 word: FC of its last bus read       //
+//   $F1C8 long  read: bus cycles run with CBREQ asserted (native port:     //
+//               burst requests)                                            //
+//   $F1CC long  a 16-byte line of the synchronous RAM that asserts CIIN    //
+//               (with STERM; 0 = none; kept off the native port)           //
 //   $F1BC word  coprocessor model: raise this interrupt level at the next  //
 //               command or condition write, and answer the next $0010     //
 //               with busy again                                           //
@@ -167,6 +175,7 @@ always @(posedge clk) if (!as_asserted) as_cnt <= 0; else if (cpu_ce) as_cnt <= 
 reg  [2:0] irq_level = 0;
 reg  [7:0] irq_vector = 0;      // 0 = AVEC, $FF = BERR (spurious), else the vector
 reg [31:0] berr_addr = 0;
+reg [31:0] ciin_line = 0;       // $F1CC
 reg [15:0] irq_delay = 0;       // clocks until irq_delay_level is applied
 reg  [2:0] irq_delay_level = 0;
 reg [15:0] bkpt_op = 0;         // breakpoint acknowledge: 0 = BERR, else the opcode
@@ -182,6 +191,11 @@ always @(posedge clk) begin
 end
 reg ciout_seen = 0;
 always @(negedge clk) if (as_asserted) ciout_seen <= ~ciout_n; else ciout_seen <= 0;
+// $F1C8: bus cycles during which CBREQ was asserted, and native burst requests
+integer    cbreq_cycles = 0;
+reg        cbreq_seen = 0;
+always @(negedge clk) if (as_asserted) begin if (!cbreq_n) cbreq_seen <= 1; end else cbreq_seen <= 0;
+always @(posedge clk) if ((as_was && !as_asserted && cbreq_seen) || (cpu_ce && n_take && n_burst)) cbreq_cycles <= cbreq_cycles + 1;
 integer    reset_len = 0;       // length of the last RESET instruction pulse
 integer    reset_cnt = 0;
 reg        berr_hit;
@@ -219,7 +233,8 @@ integer n_delay = 0, n_left = 0;
 integer n_reads = 0, n_writes = 0, n_ci_reads = 0;
 integer ni, nb;
 assign n_match = n_addr[23:20] == 0 && n_fc != 7 &&
-                 !(berr_addr != 0 && n_addr[31:2] == berr_addr[31:2]);
+                 !(berr_addr != 0 && n_addr[31:2] == berr_addr[31:2]) &&
+                 !(ciin_line != 0 && n_addr[31:4] == ciin_line[31:4]);
 assign n_ready = reset_n && !n_pending;
 always @(posedge clk) if (cpu_ce) begin
  n_valid <= 0;
@@ -300,6 +315,7 @@ always @* begin
 		if (is_ram32a || is_regs) ciin_n = 0;      // I/O and the CIIN window are not cachable
 	end
 	if (berr_hit && is_sync && as_asserted) begin berr_n = 0; end
+	if (ciin_line != 0 && is_sync && as_asserted && a[31:4] == ciin_line[31:4]) ciin_n = 0;
 end
 
 // read data: the full port width
@@ -323,8 +339,10 @@ always @* begin
 			8'h80: rdata = {cp_save_fmt, 16'd0};
 			8'h84: rdata = {cp_ctrl, 16'd0};
 			8'h88: rdata = cp_operand[0];
+			8'h94: rdata = cp_cnt_cpsp;
 			8'h8C: rdata = cp_operand[1];
 			8'hC4: rdata = {13'd0, watch_fc, 16'd0};
+			8'hC8: rdata = cbreq_cycles[31:0];
 			8'hF0: rdata = rmc_fetches[31:0];
 			8'hF4: rdata = {31'd0, ~rmc_n};
 			8'hF8: rdata = bm_done[31:0];
@@ -520,8 +538,23 @@ task reg_write;
 			8'hC1: watch_addr[23:16] = v;
 			8'hC2: watch_addr[15:8] = v;
 			8'hC3: watch_addr[7:0] = v;
+			8'hCC: ciin_line[31:24] = v;
+			8'hCD: ciin_line[23:16] = v;
+			8'hCE: ciin_line[15:8] = v;
+			8'hCF: ciin_line[7:0] = v;
 			8'hF9: bm_reqs = bm_reqs + 1;
 			8'h90: $write("%c", v);                       // console
+			8'h94: cp_scr_hi[15:8] = v;                   // coprocessor model script
+			8'h95: begin if (cp_scr_n < 16) begin cp_scr[cp_scr_n] = {cp_scr_hi[15:8], v}; cp_scr_n = cp_scr_n + 1; end end
+			8'h97: cp_scr_n = 0;
+			8'h98: cp_scr_op[31:24] = v;
+			8'h99: cp_scr_op[23:16] = v;
+			8'h9A: cp_scr_op[15:8] = v;
+			8'h9B: cp_scr_op[7:0] = v;
+			8'h9C: cp_scr_addr[31:24] = v;
+			8'h9D: cp_scr_addr[23:16] = v;
+			8'h9E: cp_scr_addr[15:8] = v;
+			8'h9F: cp_scr_addr[7:0] = v;
 			8'hA0: bench_runs[31:24] = v;
 			8'hA1: bench_runs[23:16] = v;
 			8'hA2: bench_runs[15:8] = v;

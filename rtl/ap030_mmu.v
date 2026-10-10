@@ -57,6 +57,7 @@ module ap030_mmu
 	input       [2:0] op_fcmask,    // PFLUSH: ones select the FC bits compared
 	output reg        op_done,
 	output reg [31:0] op_desc_addr, // PTEST: address of the last descriptor fetched
+	input             wpend,        // a posted write is still outstanding
 
 	// ---- register port (PMOVE) -----------------------------------------
 	input             reg_we,
@@ -202,6 +203,7 @@ localparam W_FETCH1R = 4'd11; // request the second longword (w_req low for a cl
 
 reg  [3:0] wst;
 reg        op_pend;
+reg        walk_pend;      // a translation's request that came while the engine was busy
 reg [31:0] s_la;
 reg  [2:0] s_fc;
 reg        s_write;        // write access: M must be set
@@ -291,10 +293,14 @@ wire        d_s    = s_long & s_lw0[8];
 wire        d_lu   = s_lw0[31];
 wire [14:0] d_lim  = s_lw0[30:16];
 wire [31:0] d_addr = s_long ? s_lw1 : s_lw0;
+// supervisor violation: this descriptor (S of a long descriptor, FC2 = 0),
+// or one before it in this search (UM 9.5.5.3)
+wire        d_sv   = d_s && !s_fc[2];
+wire        sv_acc = s_sv | d_sv;
 
 reg s_ptest_lvl0;
 assign w_active = (wst != W_IDLE) && (wst != W_ATC0) && (wst != W_DONE) && !s_ptest_lvl0;
-assign busy = (wst != W_IDLE);
+assign busy = (wst != W_IDLE) || walk_pend;
 
 // ATC entry creation
 reg        atc_wr;
@@ -453,17 +459,29 @@ always @(posedge clk) if (ce) begin
 	mmusr_we  <= 1'b0;
 	if (rst) begin
 		wst <= W_IDLE; w_req <= 1'b0; s_ptest_lvl0 <= 1'b0; s_fld_done <= 1'b0; op_pend <= 1'b0;
+		walk_pend <= 1'b0;
 	end else begin
 		if (flush_req) fl_all <= 1'b1;
 		// an instruction's request waits for a search in progress
 		if (op_req) op_pend <= 1'b1;
+		// walk_req is a pulse sent while the engine looked idle; when an
+		// instruction's search starts in that clock it is kept, as op_req
+		// is, or its requester would wait for walk_done forever (walk_la
+		// and the rest hold until walk_done)
+		if (walk_req) walk_pend <= 1'b1;
 		case (wst)
 			W_IDLE: begin
-				if (walk_req) begin
+				if (walk_req || walk_pend) begin
+					walk_pend <= 1'b0;
 					s_la <= walk_la; s_fc <= walk_fc; s_write <= !walk_rw || walk_rmc;
 					s_ptest <= 1'b0; s_pload <= 1'b0; s_maxlvl <= 3'd7; s_walk_norm <= 1'b1;
 					wst <= W_INIT;
-				end else if (op_req || op_pend) begin
+				end else if ((op_req || op_pend) && !(wpend && !op_kind[2])) begin
+					// PLOAD and PTEST search after the write posted before
+					// them, as a translation's search does (ap030_memsys): the
+					// write pending buffer hands its cycle to the bus
+					// controller ahead of the instruction (UM 11.2.5.2), and a
+					// descriptor just stored must be seen
 					op_pend <= 1'b0;
 					s_la <= op_la; s_fc <= op_fc; s_walk_norm <= 1'b0;
 					case (op_kind)
@@ -567,10 +585,15 @@ always @(posedge clk) if (ce) begin
 					if (w_berr) begin s_b <= 1'b1; s_i <= 1'b1; wst <= W_DONE; end
 					else begin
 						s_lw0 <= w_rdata;
-						s_n <= s_n + 3'd1;
+						// N and the PTEST An result count the descriptors fetched
+						// completely: a bus error on the second longword of a long
+						// descriptor leaves it out, as one on a short descriptor
+						// does (WinUAE mmu030_table_search; UM Table 9-3 N: "the
+						// actual number of tables accessed")
 						if (s_long) begin
 							wst <= W_FETCH1R;
 						end else begin
+							s_n <= s_n + 3'd1;
 							op_desc_addr <= s_daddr;   // PTEST An: the last descriptor fetched completely
 							wst <= W_EVAL;
 						end
@@ -586,12 +609,20 @@ always @(posedge clk) if (ce) begin
 				if (w_ack) begin
 					w_req <= 1'b0;
 					if (w_berr) begin s_b <= 1'b1; s_i <= 1'b1; wst <= W_DONE; end
-					else begin s_lw1 <= w_rdata; op_desc_addr <= s_daddr; wst <= W_EVAL; end
+					else begin s_lw1 <= w_rdata; s_n <= s_n + 3'd1; op_desc_addr <= s_daddr; wst <= W_EVAL; end
 				end
 			end
 
 			W_EVAL: begin
-				// UM 9.5.2 / 9.5.5: evaluate the fetched descriptor
+				// UM 9.5.2 / 9.5.5: evaluate the fetched descriptor.  A
+				// supervisor violation does not end the search: only a page
+				// descriptor, an invalid descriptor, a limit violation or a
+				// bus error does (UM 9.5.2; 9.5.5.3 "the table search is
+				// completed"); S is accrued like WP (Figure 9-29), so PTEST
+				// returns the W, M and N of the whole search (Table 9-3), and
+				// no U or M bit is set once a violation is seen (UM 9.5.1.1
+				// U and M; WinUAE mmu030_table_search leaves the violating
+				// descriptor's own U alone too, the UM does not say)
 				if (s_indirect && dt_f != 2'b01) begin
 					// the target of an indirect descriptor must be a page descriptor
 					s_i <= 1'b1; wst <= W_DONE;
@@ -601,22 +632,22 @@ always @(posedge clk) if (ce) begin
 					// indirect: no history or protection bits of its own
 					if (s_ptest && s_n == s_maxlvl) wst <= W_DONE;
 					else wst <= W_IND;
-				end else if (d_s && !s_fc[2]) begin
-					// supervisor violation: search ends, U not updated
-					s_sv <= 1'b1; if (!s_ptest) s_i <= 1'b1; wst <= W_DONE;
-				end else if (s_long && !s_indirect && fld_avail && lim_viol(d_lu, d_lim, idx_now)) begin
-					// the limit of a long descriptor bounds the index into the
-					// table (or the pages of an early termination) below it
-					s_l <= 1'b1; s_i <= 1'b1;
-					wst <= W_DONE;
 				end else begin
+					s_sv <= sv_acc;
 					s_wp <= s_wp | d_wp;
 					if (dt_f == 2'b01) begin
 						// page descriptor (normal, early termination, or indirect target)
 						s_pa <= pa_sum[31:8];
 						s_ci <= d_ci;
 						s_m  <= d_m;
-						if (!s_ptest && (!d_u || (s_write && !d_m && !(s_wp | d_wp)))) begin
+						// the limit of a long early termination descriptor bounds
+						// the next index (UM 9.5.1.1 LIMIT); it is checked when the
+						// ATC entry is created (Figure 9-27), after the U and M
+						// update of the descriptor fetch (Figure 9-29)
+						if (s_long && !s_indirect && fld_avail && lim_viol(d_lu, d_lim, idx_now)) begin
+							s_l <= 1'b1; s_i <= 1'b1;
+						end
+						if (!s_ptest && !sv_acc && (!d_u || (s_write && !d_m && !(s_wp | d_wp)))) begin
 							w_wdata <= s_lw0 | 32'h8 | ((s_write && !(s_wp | d_wp)) ? 32'h10 : 32'h0);
 							w_addr  <= s_daddr; w_rw <= 1'b0; w_req <= 1'b1;
 							if (s_write && !(s_wp | d_wp)) s_m <= 1'b1;
@@ -626,7 +657,7 @@ always @(posedge clk) if (ce) begin
 						// table (or indirect) descriptor
 						if (s_ptest && s_n == s_maxlvl) begin
 							wst <= W_DONE;
-						end else if (!s_ptest && !d_u) begin
+						end else if (!s_ptest && !sv_acc && !d_u) begin
 							w_wdata <= s_lw0 | 32'h8; w_addr <= s_daddr; w_rw <= 1'b0; w_req <= 1'b1;
 							wst <= W_WB;
 						end else wst <= W_IND;
@@ -656,6 +687,16 @@ always @(posedge clk) if (ce) begin
 					w_addr <= {d_addr[31:2], 2'd0}; w_rw <= 1'b1; w_req <= 1'b1;
 					s_bitpos <= 6'd63;
 					wst <= W_FETCH0;
+				end else if (s_long && lim_viol(d_lu, d_lim, idx_now)) begin
+					// the limit of a long table descriptor bounds the index into
+					// the table below; it is checked on entering that level
+					// (UM Figures 9-25 and 9-28), after the descriptor's U update
+					// (Figure 9-29; UM 9.5.1.1 U: "a pointer may be fetched, and
+					// its U bit set, for an address to which access is denied at
+					// another level"), and not by a PTEST that ends at this
+					// level (Table 9-3 L)
+					s_l <= 1'b1; s_i <= 1'b1;
+					wst <= W_DONE;
 				end else begin
 					s_dt <= dt_f;
 					s_tbl <= d_addr[31:4];

@@ -8,7 +8,11 @@
 //   $B    46 words   long bus fault
 // The internal words of the bus fault frames hold this core's resume state
 // (resume kind/state, temporaries); handlers must leave them alone except
-// for the SSW rerun bits and the data input buffer, as UM 8.2.2 says.
+// for the SSW rerun bits and the data input buffer, as UM 8.2.2 says.  An
+// instruction suspended at an access behind a failed posted write (resume
+// kind "held") keeps that access in words 37-38 (address), 45 (size, R/W,
+// FC, ...) and 22-23 (write data: the DIB of a write fault, which UM 8.2.2
+// leaves to read faults).
 
 function [15:0] frame_word;
 	input [5:0] i;
@@ -48,8 +52,9 @@ function [15:0] frame_word;
 						6'd19: frame_word = exc_baddr[15:0];
 						6'd20: frame_word = imm[31:16];
 						6'd21: frame_word = imm[15:0];
-						6'd22: frame_word = 16'd0;                 // data input buffer
-						6'd23: frame_word = 16'd0;
+						// data input buffer; a suspended access keeps its write data there
+						6'd22: frame_word = (exc_rk == RK_HELD) ? exc_dib[31:16] : 16'd0;
+						6'd23: frame_word = (exc_rk == RK_HELD) ? exc_dib[15:0] : 16'd0;
 						6'd24: frame_word = tmp[31:16];
 						6'd25: frame_word = tmp[15:0];
 						6'd26: frame_word = ir;
@@ -71,6 +76,7 @@ function [15:0] frame_word;
 						6'd42: frame_word = cp_base[31:16];
 						6'd43: frame_word = cp_base[15:0];
 						6'd44: frame_word = cp_resp;
+						6'd45: frame_word = {5'd0, exc_held};
 						default: frame_word = 16'd0;
 					endcase
 				end

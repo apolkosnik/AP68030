@@ -45,7 +45,10 @@ unmapped one is harmless.
 **Decoder.** `ap030_decode.vh` decodes `dw` (stage C at dispatch, else the
 latched `ir`) into the first sequencer state, operand size, ALU operation,
 source/destination kinds (register, immediate, EA, quick) and whether the
-second word belongs to the operation (`dc_needs_ext`). At an instruction
+second word belongs to the operation (`dc_needs_ext`); an instruction that
+takes an exception at its dispatch (illegal, A-line, F-line, privilege
+violation) needs only its operation word, so it neither waits for the next
+word nor takes the bus error of its prefetch (UM 8.1.2, 8.1.5). At an instruction
 boundary the dispatcher pops one or two words, latches the decoded controls
 into `g_*` registers and jumps to the immediate, EA or execute state.
 Simple register instructions dispatch out of `S_GEN_EXEC`, overlapping the
@@ -79,14 +82,15 @@ $A/$B frames hold this core's resume state:
 
 | words | content                                                             |
 |-------|---------------------------------------------------------------------|
-| 4     | resume kind (boundary, stream, read, write, RMW) and state          |
+| 4     | resume kind (boundary, stream, read, write, RMW, held) and state    |
 | 6-7   | stage C and B images                                                |
 | 10-11 | `ea`, 14-17 `src`/`dst`, 20-21 `imm`, 24-25 `tmp`, 28-29 `tmp2`     |
-| 22-23 | data input buffer (software completion)                             |
+| 22-23 | data input buffer (software completion); held access: its write data |
 | 26-27 | `ir`, version 0 with `dw_dst`/`dw_ret`                              |
 | 32-36 | loop counters, MOVEM mask, EA/immediate return states               |
-| 37-38 | the bytes already read of a misaligned operand (UM 8.2.1)           |
+| 37-38 | the bytes already read of a misaligned operand (UM 8.2.1); held access: its address |
 | 39-44 | extension word, trace and coprocessor dialogue state                |
+| 45    | held access: size, R/W, FC, RMC, no-cache, BKPT/coprocessor fault flags |
 
 The values are captured when the fault is recognised (not while the frame
 is being pushed, which reuses the counters). RTE reloads them and, with
@@ -102,26 +106,40 @@ part's bus would have done.
 Interrupts: the IPL lines are synchronised, level 7 is edge sensitive
 (a transition to 7, or the mask dropping below 7 with the request held),
 IPEND reflects a pending interrupt, STOP wakes on a request above the
-mask. Trace T1/T0 follow UM 8.1.7: T1 survives the instruction traps
-(DIVZ, CHK, TRAPcc, TRAP), T0 traces changes of flow.
+mask. Trace T1/T0 follow UM 8.1.7: T0 traces changes of flow, instruction
+traps included.  The trace of an instruction trap (TRAP, TRAPcc/TRAPV,
+cpTRAPcc, CHK/CHK2, divide by zero) or a coprocessor post-instruction
+exception is taken after that exception's processing (UM 8.1.12), with
+the trapping instruction's address in its frame (UM Table 8-6); this is
+decided by the instruction, not the vector, so an interrupt or a
+coprocessor exception with any vector gets no extra trace, and a
+mid-instruction coprocessor exception is traced when the instruction
+completes after its RTE.  With a trace pending, a general coprocessor
+instruction's dialog runs until a null CA=0 primitive (UM 10.5.2.5).
 
-Posted writes that fail on the bus are reported at the next instruction
-boundary with a format $A frame (UM 8.1.2), and RTE reruns the write.  A
-bus or address error first waits for the writes posted before it; if one
-of them fails, that fault is taken right after as a bus error of its own,
-its frame on top, so the handler sees the faults and the reruns happen in
-program order.  Only a fault of a bus/address error's own frame write
-halts the processor (double bus fault, UM 7.5.4).
-
-Known difference: a write of the next instruction that was waiting for the
-write buffer goes to the bus once the failed write has left it.  The
-MC68030 instead begins exception processing at once and suspends that
-instruction before its write (a format $B frame, UM 8.1.2 and Table 8-6).
-When both writes fail for the same reason (one page, one address), the
-MC68030 takes one bus error and this core two: a handler that repairs the
-cause is entered a second time, finds nothing to do and its RTE reruns
-the second write; memory ends the same and no write is lost or reordered.
-A handler that counts bus errors sees one more.
+Posted writes that fail on the bus are taken as the MC68030 takes them
+(UM 8.1.2: exception processing begins right after the faulted data
+cycle).  From the failure on, no later data access of the instruction in
+execution reaches the bus: the memory system holds it.  When the
+instruction waits with such an access, the bus error is taken there with a
+format $B frame whose PC is that instruction (UM Table 8-6: "may not be the
+instruction that generated the faulted bus cycle"), whose DF, fault
+address and DOB describe the failed write, and whose resume kind "held"
+keeps the waiting access (words 22-23, 37-38 and 45); RTE reruns the write
+(DF set) or takes it as completed (DF clear) and then issues the held
+access, and the instruction goes on.  Two writes of one instruction, or of
+two instructions in a row, to a faulting location thus give one bus
+error, which reports the first write (UM 8.2.1).  When the instruction
+ends without another data access, the fault is taken at the boundary with
+a format $A frame.  Exception processing, the RTE's frame loads and
+interrupt acknowledge are not suspended: their accesses go on and the
+fault is taken at the next boundary.  A handler must not write the DIB of
+a write fault frame (UM 8.2.2 defines it for read faults): a held write
+keeps its data there.  A bus or address error first waits for the writes
+posted before it; if one of them fails, that fault is taken right after as
+a bus error of its own, its frame on top, so the handler sees the faults
+and the reruns happen in program order.  Only a fault of a bus/address
+error's own frame write halts the processor (double bus fault, UM 7.5.4).
 
 ## Memory subsystem (ap030_memsys.v)
 
@@ -136,13 +154,16 @@ write whose buffer slot and bus are free goes to the bus controller in the
 clock it is posted, and the next one may post in the clock the previous
 completes, so consecutive stores run four clocks apart on a synchronous
 port. Read-modify-write and CPU-space writes are not posted so that their
-bus errors are seen by the instruction. A data cache hit is acknowledged
+bus errors are seen by the instruction. After a posted write fails, the
+data unit starts no further access until the core has taken the fault or
+let the access go (`d_held`, `d_cancel`, `d_unhold`). A data cache hit is acknowledged
 in the clock its data is valid (two-clock read, UM 11.2). Operands crossing a longword, cache
 line or page are split as UM 7.2.2 describes, and the first portion of a
 line-crossing read is not burst.
 
-Table searches wait for the write buffer to drain (a descriptor may just
-have been written) and hold RMC for their duration.  A read-modify-write
+Table searches, those of PLOAD and PTEST included, wait for the write
+buffer to drain (a descriptor may just have been written) and hold RMC for
+their duration.  A read-modify-write
 operation (TAS, CAS, CAS2) holds RMC from its first transfer until its last
 write, the CAS/CAS2 compare mismatch that ends it without a write, or a
 fault, and no instruction prefetch runs in between (UM 7.3.3), so RMC is
@@ -175,15 +196,24 @@ with base/mask, FC base/mask, R/W and RWM, and the table search engine of
 UM 9.5: function code lookup, up to four index levels of any width, page
 sizes 256 bytes to 32 KB, short and long descriptors, upper and lower
 limits (on the root pointer, on long table descriptors and on long early
-termination descriptors), early termination with contiguous mapping,
+termination descriptors, checked on entering the next level after the
+descriptor's U update, UM Figures 9-25 to 9-29), early termination with
+contiguous mapping,
 indirect descriptors, supervisor and write protection (RMC cycles count as
 writes), U and M updates written back under RMC. Limit violations, invalid
 descriptors, supervisor violations and bus errors during the search create
-an entry with B set, so the access faults until the entry is flushed.
+an entry with B set, so the access faults until the entry is flushed. A
+supervisor violation does not end the search (UM 9.5.2, 9.5.5.3): S is
+accrued like WP, so PTEST reports the W, M and N of the whole search, and
+no U or M bit is set after the violation (UM 9.5.1.1).
 PTEST levels 0-7 set the MMUSR of Table 9-3 and return the address of the
 last descriptor fetched completely; PLOAD, PFLUSHA, PFLUSH by FC and by
 FC and address, PMOVE and PMOVEFD, and the configuration exception (vector
-56, format $2, PC after the PMOVE) are implemented. MMUDIS disables
+56, format $2, PC after the PMOVE) are implemented. A CpID 0 encoding the
+MC68030 does not support (the 68851-only types and registers, reserved
+bits of the UM 3.3.3 formats, a PC relative or immediate EA field) takes
+the F-line exception in supervisor mode and a privilege violation in user
+mode (UM 9.8). MMUDIS disables
 translation; RESET clears the E bits and leaves the ATC alone.
 
 ## Bus controller (ap030_bus.v, UM 7)
@@ -202,8 +232,11 @@ The controller runs S0-S5 with the timing of UM Figures 7-7 to 7-61:
   DSACK are handled as UM 7.5; retry restarts the cycle from S0 after both
   negate;
 - BR/BG/BGACK arbitration follows the state machine of Figure 7-61: the
-  bus is granted between cycles (never inside an RMC sequence) and the
-  outputs are released;
+  bus is granted between cycles (inside an RMC sequence only by a
+  relinquish and retry of its first read, UM 7.5.2/7.7.4) and the
+  outputs are released; BGACK alone (single-wire arbitration) also takes
+  the bus between the cycles of an RMC sequence, which resumes with RMC
+  asserted when BGACK negates (UM 7.7.4, 7.5.2, Figure 7-62);
 - CPU space cycles (FC=7) serve the interrupt acknowledge (vector on the
   low byte, AVEC, spurious on BERR), breakpoint acknowledge (BERR: illegal
   instruction; DSACK: the opcode replaces the BKPT) and coprocessor CIR

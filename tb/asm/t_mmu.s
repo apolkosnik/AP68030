@@ -21,6 +21,7 @@ FAILREG	equ	$F00100
 DONEREG	equ	$F00102
 PINREG	equ	$F00170		; bit 0 asserts MMUDIS
 CIOCNT	equ	$F00174		; bus cycles with CIOUT asserted
+BERRADR	equ	$F00130		; bus error on this longword (0 disables)
 
 ; physical layout
 TBLA	equ	$10000		; short A table (16 x 4)
@@ -479,6 +480,17 @@ cpc:	move.l	(a0)+,(a1)+
 	ptestr	#5,($104000).l,#0
 	pmove	mmusr,(scr2).l
 	chkw	scr2,$0400,58
+	; the search of a PLOAD runs after the store posted before it (the
+	; store's own translation needs a table search, so the store is still
+	; pending when the PLOAD starts)
+	lea	(TBLB+40).l,a2
+	lea	($10A000).l,a3
+	pflusha
+	move.l	#$00022001,(a2)		; $10A000 -> $022000
+	ploadr	#5,(a3)
+	ptestr	#5,($10A000).l,#0
+	pmove	mmusr,(scr2).l
+	chkw	scr2,$0000,59		; resident and valid: the new descriptor
 
 ;================================================================ 6. faults repaired by the handler, rerun by RTE
 	move.w	#M_FIX,mode
@@ -759,9 +771,55 @@ pf_back:
 	chkw	exccnt,3,133
 	ptestr	#5,($4000).l,#7
 	pmove	mmusr,(scr2).l
-	chkw	scr2,$4401,134
+	chkw	scr2,$4601,134		; L, I, M of the page descriptor (Table 9-3: M is
+					; undefined with I; the limit is checked after the
+					; descriptor's status, Figures 9-27 and 9-29, and
+					; WinUAE mmu030_table_search reports M as here)
 	setl	TBLAL+0,$7FFF0001
 	newmap
+
+;================================================================ 15a. supervisor violations
+; S does not end a table search (UM 9.5.2, 9.5.5.3): PTEST returns the WP and
+; M bits and the levels of the whole search (Table 9-3: W and M are undefined
+; only when I is set), and no U bit is set after the violation (UM 9.5.1.1)
+	settc	TC_OFF			; the tables are written untranslated:
+	setl	TBLAL+0,$7FFF0001	; region 0 is still limited to pages 0-3 here
+	setl	TBLAL+24,$7FFF0103	; region 3: long table descriptor with S -> long B table
+	setl	TBLAL+28,TBLBL
+	setl	TBLAL+40,$7FFF0041	; region 5: the cache inhibited alias for rdd
+	setl	TBLAL+44,$00500000
+	setl	TBLBL+40,$00000001	; $205000 and $305000 -> $025000, a user page
+	setl	TBLBL+44,$00025000
+	setl	TBLBL+64,$00000115	; $208000: supervisor only, modified, write protected
+	setl	TBLBL+68,$00020000
+	setl	$25000,$5C5C5C5C
+	settc	TC_BASE
+	ptestr	#1,($208000).l,#7,a1	; S on the page descriptor
+	pmove	mmusr,(scr2).l
+	chkw	scr2,$2A02,160		; S, W, M, two levels
+	move.l	a1,d1
+	chkl	d1,TBLBL+64,161
+	ptestr	#5,($208000).l,#7
+	pmove	mmusr,(scr2).l
+	chkw	scr2,$0A02,162		; W, M: supervisor data is allowed
+	ptestr	#1,($305000).l,#7,a1	; S on the table descriptor
+	pmove	mmusr,(scr2).l
+	chkw	scr2,$2002,163		; S, two levels: the search went on to the page
+	move.l	a1,d1
+	chkl	d1,TBLBL+40,164
+	ptestr	#5,($305000).l,#7
+	pmove	mmusr,(scr2).l
+	chkw	scr2,$0002,165
+	clr.w	exccnt
+	lea	($305000).l,a0
+	moves.l	(a0),d1			; user data: bus error from the B entry
+	chkw	exccnt,1,166
+	rdd	TBLBL+40,d1
+	chkl	d1,$00000001,167	; no U after the violation
+	move.l	($305000).l,d1		; supervisor data
+	chkl	d1,$5C5C5C5C,168
+	rdd	TBLBL+40,d1
+	chkl	d1,$00000009,169
 
 ;================================================================ 16. more pages than ATC entries
 	settc	TC_OFF
@@ -857,6 +915,60 @@ atcok:
 	move.l	#$4B5A6978,($5008).l
 	move.l	($5008).l,d1
 	chkl	d1,$4B5A6978,153
+	settc	TC_OFF
+
+;================================================================ 20. limits and history updates in the search order
+; the limit of a long descriptor is checked on entering the next level (an
+; early termination's when its ATC entry is created), after the descriptor
+; was fetched and its U (for a write also M) bit set: UM Figures 9-25 and
+; 9-27 to 9-29, UM 9.5.1.1 U "a pointer may be fetched, and its U bit set,
+; for an address to which access is denied at another level of the tree"
+	move.w	#M_SKIP,mode
+	setl	TBLAL+0,$7FFF0001	; region 0 whole again (limited since test 133)
+	setl	TBLAL+32,$00030002	; region 4: long table descriptor, upper limit 3 -> short B
+	setl	TBLAL+36,TBLB
+	setl	TBLAL+40,$7FFF0041	; region 5: the cache inhibited alias for rdd
+	setl	TBLAL+44,$00500000
+	setl	TBLAL+48,$00030001	; region 6: long early termination, pages 0-3
+	setl	TBLAL+52,$00000000
+	setl	TBLAL+56,$00030001	; region 7: the same, for a write
+	setl	TBLAL+60,$00000000
+	setcrp	$7FFF0003,TBLAL
+	settc	TC_BASE
+	ptestr	#5,($405000).l,#1,a1	; ends at the A level: the B index is not used
+	pmove	mmusr,(scr2).l
+	chkw	scr2,$0001,170		; no L (Table 9-3)
+	move.l	a1,d1
+	chkl	d1,TBLAL+32,171
+	ptestr	#5,($405000).l,#7
+	pmove	mmusr,(scr2).l
+	chkw	scr2,$4401,172		; the whole search: L, I, one level
+	clr.w	exccnt
+	move.l	($405000).l,d1		; limit violation: bus error
+	chkw	exccnt,1,173
+	rdd	TBLAL+32,d1
+	chkl	d1,$0003000A,174	; U set before the limit check
+	move.l	($605000).l,d1
+	chkw	exccnt,2,175
+	rdd	TBLAL+48,d1
+	chkl	d1,$00030009,176	; early termination: U set
+	move.l	#0,($705000).l
+	nop
+	nop
+	chkw	exccnt,3,177
+	rdd	TBLAL+56,d1
+	chkl	d1,$00030019,178	; a write: U and M
+	; N counts the descriptors fetched completely, as the An result does:
+	; a bus error on a long descriptor's second longword leaves it out, as
+	; one on a short descriptor does (test 41; WinUAE mmu030_table_search)
+	move.l	#TBLBL+36,(BERRADR).l	; the page descriptor's address longword
+	nop				; the store is out (UM 7.6)
+	ptestr	#5,($204000).l,#7,a1
+	move.l	#0,(BERRADR).l
+	pmove	mmusr,(scr2).l
+	chkw	scr2,$8401,179		; B, I, one level
+	move.l	a1,d1
+	chkl	d1,TBLAL+16,180
 	settc	TC_OFF
 	move.w	#$600D,(DONEREG).l
 	stop	#$2700

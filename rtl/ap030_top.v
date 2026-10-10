@@ -180,7 +180,7 @@ wire        d_stb, d_rw, d_rmc, d_rmc_last, d_rmc_release, d_iack, d_nocache;
 wire [31:0] d_addr, d_wdata, d_rdata;
 wire  [1:0] d_size;
 wire  [2:0] d_fc;
-wire        d_ack, d_fault, d_avec, d_iack_berr, d_late_fault, d_wpend;
+wire        d_ack, d_fault, d_avec, d_iack_berr, d_late_fault, d_wpend, d_held, d_cancel, d_unhold;
 wire [31:0] f_addr, f_dob, f_partial;
 wire  [2:0] f_fc, f_got;
 wire  [1:0] f_size;
@@ -205,7 +205,7 @@ ap030_core #(.PCREL_PROGRAM_SPACE(PCREL_PROGRAM_SPACE)) core (
 	.d_stb(d_stb), .d_addr(d_addr), .d_size(d_size), .d_rw(d_rw), .d_rmc(d_rmc), .d_rmc_last(d_rmc_last),
 	.d_rmc_release(d_rmc_release), .d_iack(d_iack), .d_nocache(d_nocache), .d_fc(d_fc), .d_wdata(d_wdata),
 	.d_ack(d_ack), .d_rdata(d_rdata), .d_fault(d_fault), .d_avec(d_avec), .d_iack_berr(d_iack_berr),
-	.d_late_fault(d_late_fault), .d_wpend(d_wpend),
+	.d_late_fault(d_late_fault), .d_wpend(d_wpend), .d_held(d_held), .d_cancel(d_cancel), .d_unhold(d_unhold),
 	.f_addr(f_addr), .f_fc(f_fc), .f_size(f_size), .f_rw(f_rw), .f_rm(f_rm), .f_dob(f_dob),
 	.f_got(f_got), .f_partial(f_partial),
 	.i_stb(i_stb), .i_addr(i_addr), .i_fc(i_fc), .i_ready(i_ready), .i_ack(i_ack), .i_data(i_data), .i_fault(i_fault),
@@ -232,7 +232,7 @@ ap030_memsys #(.FAST_PORT(FAST_PORT)) memsys (
 	.d_stb(d_stb), .d_addr(d_addr), .d_size(d_size), .d_rw(d_rw), .d_rmc(d_rmc), .d_rmc_last(d_rmc_last),
 	.d_rmc_release(d_rmc_release), .d_iack(d_iack), .d_nocache(d_nocache), .snoop_we(snoop_we), .snoop_addr(snoop_addr), .d_fc(d_fc), .d_wdata(d_wdata),
 	.d_ack(d_ack), .d_rdata(d_rdata), .d_fault(d_fault), .d_avec(d_avec), .d_iack_berr(d_iack_berr),
-	.d_late_fault(d_late_fault), .d_wpend(d_wpend),
+	.d_late_fault(d_late_fault), .d_wpend(d_wpend), .d_held(d_held), .d_cancel(d_cancel), .d_unhold(d_unhold),
 	.f_addr(f_addr), .f_fc(f_fc), .f_size(f_size), .f_rw(f_rw), .f_rm(f_rm), .f_dob(f_dob),
 	.f_got(f_got), .f_partial(f_partial),
 	.i_stb(i_stb), .i_addr(i_addr), .i_fc(i_fc), .i_ready(i_ready), .i_ack(i_ack), .i_data(i_data), .i_fault(i_fault),
