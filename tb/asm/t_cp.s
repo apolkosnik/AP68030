@@ -280,6 +280,22 @@ cpdb:	dc.w	$F24A,$0000	; cpDBcc D2 while false
 	move.b	buf2,d2
 	and.l	#$FF,d2
 	chkl	d2,$FF,41
+; cpScc Dn changes only the low byte of the current Dn (UM 10.2.2.2): after
+; the coprocessor loaded Dn during the dialog, and after a mid-instruction
+; frame (interrupt during come again) whose handler and RTE ran in between
+	move.l	#$AABBCC00,d2
+	dc.w	$F242,$0021	; selector bit 5: D2 <- $11223344, then true
+	chkl	d2,$112233FF,77
+	move.l	#$AABBCC00,d2
+	move.l	#$12345678,d7	; a different value in the handler's registers
+	clr.w	exccnt
+	move.w	#$2000,sr
+	move.w	#3,$F001BC	; level 3 at the condition write
+	dc.w	$F242,$0011	; selector bit 4: come again (IA) once, then true
+	move.w	#$2700,sr
+	chkw	exccnt,1,78
+	chkw	lastfmt,9,79
+	chkl	d2,$AABBCCFF,80
 
 ;================================================================ 18. cpTRAPcc
 	move.l	#0,skip

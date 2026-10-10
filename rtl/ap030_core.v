@@ -532,7 +532,7 @@ always @* begin
 		S_PACK, S_PACK2, S_PACK3: begin ra_a = {ir[3], ir[2:0]}; ra_b = {ir[3], ir[11:9]}; end
 		S_LINK, S_LINK2, S_LINK3, S_UNLK, S_UNLK2, S_UNLK3, S_MOVE_USP: ra_a = {1'b1, ir[2:0]};
 		S_MOVEP0, S_MOVEP1, S_MOVEP2, S_MOVEP3: begin ra_a = {1'b1, ir[2:0]}; ra_b = {1'b0, ir[11:9]}; end
-		S_DBCC, S_CPDBCC, S_CPDBCC2: ra_a = {1'b0, ir[2:0]};
+		S_DBCC, S_CPDBCC, S_CPDBCC2, S_CPSCC2: ra_a = {1'b0, ir[2:0]};
 		S_CP2, S_CP3, S_CP4, S_CP5, S_CP6, S_CP7, S_CP8, S_CP10, S_CPREG, S_CPCTRL, S_CPCTRL2, S_CPTOS, S_CPEAX,
 		S_CPXFER, S_CPXFER2, S_CPXFER3, S_CPMULT, S_CPMULT2, S_CPMULT3,
 		S_CPSAVE0, S_CPSAVE1, S_CPREST0, S_CPREST1: begin

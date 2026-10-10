@@ -26,7 +26,8 @@
 //                     fetched past the data cache (nmi_vec_nocache)         //
 //   $F1C0 long  watched address; $F1C4 word: FC of its last bus read       //
 //   $F1BC word  coprocessor model: raise this interrupt level at the next  //
-//               command write, and answer the next $0010 with busy again   //
+//               command or condition write, and answer the next $0010     //
+//               with busy again                                           //
 // Memory map (24-bit decode):                                               //
 //   $000000-$0FFFFF  RAM, 32-bit synchronous, burst                          //
 //   $200000-$2FFFFF  RAM alias, 16-bit asynchronous                          //
