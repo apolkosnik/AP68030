@@ -524,10 +524,16 @@ S_STOP: begin
 	state <= S_FETCH;
 end
 S_RESETI: begin
-	// UM 7.8: RESET drives the pin for 512 clocks; the CPU's own state is untouched
-	if (!reset_drive) begin reset_drive <= 1'b1; rst_cnt <= 10'd511; end
-	else if (rst_cnt != 10'd0) rst_cnt <= rst_cnt - 10'd1;
-	else begin reset_drive <= 1'b0; finish; end
+	// UM 7.8: RESET drives the pin for 512 clocks; the CPU's own state is
+	// untouched.  The bus is idle for the whole pulse (Figure 7-65: the
+	// external devices are being reset): prefetching stops at once, and the
+	// pin is driven once the fetches already requested have returned and
+	// the posted writes have completed (bus_quiet); fetching resumes after.
+	fetch_hold <= 1'b1;
+	if (!reset_drive) begin
+		if (fetch_hold && fetch_out == 2'd0 && bus_quiet) begin reset_drive <= 1'b1; rst_cnt <= 10'd511; end
+	end else if (rst_cnt != 10'd0) rst_cnt <= rst_cnt - 10'd1;
+	else begin reset_drive <= 1'b0; fetch_hold <= 1'b0; finish; end
 end
 S_TRAP: exc_go(`VEC_TRAP + {4'd0, ir[3:0]}, `FMT_NORMAL, scan_pc, 32'd0);
 S_BKPT: begin

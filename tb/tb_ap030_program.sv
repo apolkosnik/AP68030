@@ -13,6 +13,8 @@
 //   $F120 byte  write must arrive with FC = 1 (MOVES/DFC check)             //
 //   $F130 long  bus error trigger address (0 disables)                       //
 //   $F140 word  wait states for the memory port                             //
+//   $F160 long  read: clocks of the last RESET instruction pulse; $F1FC    //
+//               long read: bus cycles that overlapped such a pulse         //
 //   $F170 word  bit 0 asserts MMUDIS, bit 1 asserts CDIS                      //
 //   $F174 long  read: bus cycles run with CIOUT asserted                     //
 //   $F178 long  read: bus cycles                                             //
@@ -193,6 +195,18 @@ always @(posedge clk) if (cpu_ce) begin
 	if (reset_n_oe) reset_cnt <= reset_cnt + 1;
 	else if (reset_cnt != 0) begin reset_len <= reset_cnt; reset_cnt <= 0; end
 end
+// $F1FC: bus cycles (pin or native) that overlapped the processor's RESET
+// output; the bus is idle for the whole pulse (UM 7.8, Figure 7-65)
+integer    reset_cycles = 0;
+reg        reset_ovl = 0;
+always @(posedge clk) begin
+	if (as_asserted && reset_n_oe) reset_ovl <= 1;
+	if (as_was && !as_asserted) begin
+		if (reset_ovl || reset_n_oe) reset_cycles <= reset_cycles + 1;
+		reset_ovl <= 0;
+	end
+	if (cpu_ce && n_take && reset_n_oe) reset_cycles <= reset_cycles + 1;
+end
 
 // Native memory model: the same bytes as the pin bus, with programmable
 // latency and wrapped burst replies. Fault-injected addresses stay on pins.
@@ -302,6 +316,7 @@ always @* begin
 			8'h40: rdata = {wait_states[15:0], 16'd0};
 			8'h50: rdata = clocks[31:0];
 			8'h60: rdata = reset_len[31:0];
+			8'hFC: rdata = reset_cycles[31:0];
 			8'h74: rdata = ciout_cycles[31:0];
 			8'h78: rdata = bus_cycles[31:0];
 			8'h7C: rdata = cp_last_ea;

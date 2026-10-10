@@ -18,6 +18,7 @@
 ;   $F00120 byte  must be written with FC=1
 ;   $F00130 long  bus error trigger address (longword granularity, 0 = off)
 ;   $F00160 long  length of the last RESET instruction pulse
+;   $F001FC long  bus cycles that overlapped a RESET instruction pulse
 
 FAILREG	equ	$F00100
 DONEREG	equ	$F00102
@@ -31,6 +32,7 @@ BERRREG	equ	$F00130
 WCI	equ	$400000		; RAM alias with CIIN: a data read always reaches the bus
 W16	equ	$200000		; RAM alias on the 16-bit port (another logical address)
 RSTLEN	equ	$F00160
+RSTBUS	equ	$F001FC
 
 ; scratch variables
 lastvec	equ	$3800		; word: vector number of the last exception
@@ -832,8 +834,10 @@ irs_done:
 	movec	cacr,d1		; internal state untouched
 	chkl	d1,$3111,106
 
-	move.w	#$600D,(DONEREG).l
-	stop	#$2700
+	jmp	(resetbus).l		; continued at the end: the code below keeps its addresses
+	nop
+	nop
+	nop
 
 ;---------------------------------------------------------------- data
 bounds:	dc.l	10,40
@@ -986,3 +990,28 @@ unexp:
 	move.w	#$BAD0,(DONEREG).l
 halt2:
 	bra.s	halt2
+
+;---------------------------------------------------------------- RESET instruction: the bus is idle for the pulse
+; UM 7.8, Figure 7-65: a posted write still under way and the fetches of a
+; RESET run from the 16-bit window complete before the pin is driven, and no
+; bus cycle starts until the pulse is over
+resetbus:
+	move.l	RSTBUS,d5
+	move.l	#$5A5AA5A5,(W16+$3B00).l	; posted: two cycles on the 16-bit port
+	reset
+	move.l	RSTBUS,d0
+	sub.l	d5,d0
+	chkl	d0,0,140
+	move.l	(WCI+$3B00).l,d0		; the write reached memory
+	chkl	d0,$5A5AA5A5,141
+	jsr	W16+resetsub
+	move.l	RSTBUS,d0
+	sub.l	d5,d0
+	chkl	d0,0,142
+	move.l	RSTLEN,d0
+	chkl	d0,512,143
+	move.w	#$600D,(DONEREG).l
+	stop	#$2700
+resetsub:			; run from the 16-bit window
+	reset
+	rts

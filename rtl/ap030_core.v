@@ -209,7 +209,7 @@ reg [31:0] fetch_pc;       // next longword to request
 reg        fetch_skip;     // discard the first word of the next fetched longword
 reg  [1:0] fetch_out;      // fetches outstanding (they return in order, two at most)
 reg  [1:0] fetch_disc;     // the first of them belong to a flushed stream
-reg        fetch_hold;     // no prefetching (halt, stop, refill of a bad address)
+reg        fetch_hold;     // no prefetching (halt, stop, refill of a bad address, RESET instruction)
 reg        refill_p;       // REFILL pulse (posedge)
 // per-clock pipe commands from the sequencer
 reg  [1:0] pop_n;
