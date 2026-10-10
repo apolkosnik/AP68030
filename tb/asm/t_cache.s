@@ -14,6 +14,8 @@
 ;   - WA: an aligned longword write miss allocates, a byte write does not
 ;   - DBE/IBE: a line miss bursts four longwords (fewer clocks for the
 ;     neighbours)
+;   - a bus error on the first cycle of a burst leaves the whole line
+;     invalid, in either cache
 
 FAILREG	equ	$F00100
 DONEREG	equ	$F00102
@@ -353,6 +355,78 @@ IPLREG	equ	$F00110
 	nop
 	move.l	($4350).l,d1
 	chkl	d1,$33333333,48		; the allocated entry is used
+
+;---------------------------------------------------------------- bus error on the first cycle of a burst
+; UM 6.1.3.2 (p. 6-19) and 7.5.1: "If the bus error occurs during the first
+; cycle of a burst (i.e., before burst mode is entered), the data read from
+; the bus is ignored, and the entire associated cache line is marked
+; invalid."  The line read holds four valid entries of another tag; after
+; the bus error they must miss.  The bus error trigger ($F130) asserts BERR
+; with STERM (and CBACK) on the synchronous port.
+BERRADR	equ	$F00130
+BERRSP	equ	$6080			; data cache line 8: away from the lines used
+	moveq	#0,d0
+	movec	d0,cacr
+	move.l	#$A0A0A0A0,($4560).l
+	move.l	#$A1A1A1A1,($4564).l
+	move.l	#$A2A2A2A2,($4568).l
+	move.l	#$A3A3A3A3,($456C).l
+	move.l	#$0101+$800+$8,d0	; clear both caches
+	movec	d0,cacr
+	move.l	#$1101,d0		; data burst, no write allocation
+	movec	d0,cacr
+	move.l	($4560).l,d1		; line 6: burst, four entries (tag $45)
+	move.l	#$B1B1B1B1,W16+$4564	; memory behind the entries
+	move.l	#$B3B3B3B3,W16+$456C
+	move.l	($4564).l,d1
+	chkl	d1,$A1A1A1A1,49		; the burst cached the neighbour
+	move.l	#berr_h,($8).l		; bus error handler
+	move.l	#$5560,BERRADR		; line 6, other tag
+	move.l	sp,BERRSP
+	lea	berr_c1,a1
+	move.l	($5560).l,d1		; line miss: CBREQ; BERR on the first cycle
+	failt	50			; (no bus error)
+berr_c1:
+	clr.l	BERRADR
+	move.l	($456C).l,d1
+	chkl	d1,$B3B3B3B3,51		; the whole line is invalid: memory
+	bra	berr_blk
+; the instruction cache: a routine's line, cached by a burst, then a jump
+; to the last longword of the same line in another tag, which errs
+; (this block fits in one 256-byte window, so the code around the routine
+; never evicts its line)
+	cnop	0,256
+berr_blk:
+	move.l	#$0101+$800+$8,d0
+	movec	d0,cacr
+	move.l	#$0111,d0		; instruction burst
+	movec	d0,cacr
+	moveq	#0,d3
+	bsr.s	berr_fn			; its line: burst, four entries
+	chkl	d3,1,52
+	move.w	#$7605,berr_fn		; memory: moveq #5,d3
+	moveq	#0,d3
+	bsr.s	berr_fn
+	chkl	d3,1,53			; the cached copy
+	move.l	#berr_fn+$800C,BERRADR
+	move.l	sp,BERRSP
+	lea	berr_c2,a1
+	jmp	berr_fn+$800C		; line miss: CBREQ; BERR on the first cycle
+berr_c2:
+	clr.l	BERRADR
+	moveq	#0,d3
+	bsr.s	berr_fn
+	chkl	d3,5,54			; the whole line is invalid: memory
+	move.l	#unexp,($8).l
+	bra.s	berr_end
+berr_h:	move.l	BERRSP,sp		; drop the bus error frame
+	jmp	(a1)
+	cnop	0,16
+berr_fn:
+	moveq	#1,d3
+	rts
+	cnop	0,16
+berr_end:
 
 	move.w	#$600D,(DONEREG).l
 	stop	#$2700

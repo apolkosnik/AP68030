@@ -189,6 +189,8 @@ reg         ic_fi_we;
 reg  [31:2] ic_fi_addr;
 reg   [2:0] ic_fi_fc;
 reg  [31:0] ic_fi_data;
+reg         ic_inv_line;     // bus error on a burst's first cycle: clear the line
+reg   [7:4] ic_inv_idx;
 
 ap030_cache #(.FC_BITS(1)) icache (
 	.clk(clk), .ce(ce), .rst(rst),
@@ -196,7 +198,7 @@ ap030_cache #(.FC_BITS(1)) icache (
 	.lk_line_empty(ic_line_empty), .lk_data(ic_data),
 	.fi_we(ic_fi_we), .fi_addr(ic_fi_addr), .fi_fc(ic_fi_fc), .fi_data(ic_fi_data),
 	.wr_we(1'b0), .wr_la(32'd0), .wr_fc(3'd0), .wr_be(4'd0), .wr_data(32'd0), .wr_wa(1'b0), .wr_allow_fill(1'b0),
-	.inv_we(1'b0), .inv_la(32'd0),
+	.inv_we(1'b0), .inv_la(32'd0), .inv_line(ic_inv_line), .inv_line_idx(ic_inv_idx),
 	.snp_we(1'b0), .snp_la(32'd0), .fw_start(1'b0), .fw_line(4'd0),
 	.clr_all(cacr_ci), .clr_entry(cacr_cei), .clr_index(caar_idx)
 );
@@ -216,6 +218,8 @@ reg   [3:0] dc_wr_be;
 reg  [31:0] dc_wr_data;
 reg         dc_inv_we;
 reg  [31:0] dc_inv_la;
+reg         dc_inv_line;     // bus error on a burst's first cycle: clear the line
+reg   [7:4] dc_inv_idx;
 wire        dc_fw_start;     // a data read is accepted by the bus (its fills follow)
 wire  [7:4] dc_fw_line;
 
@@ -226,7 +230,7 @@ ap030_cache #(.FC_BITS(3)) dcache (
 	.fi_we(dc_fi_we), .fi_addr(dc_fi_addr), .fi_fc(dc_fi_fc), .fi_data(dc_fi_data),
 	.wr_we(dc_wr_we), .wr_la(dc_wr_la), .wr_fc(dc_wr_fc), .wr_be(dc_wr_be), .wr_data(dc_wr_data),
 	.wr_wa(cacr[`CACR_WA]), .wr_allow_fill(dc_fill_ok),
-	.inv_we(dc_inv_we), .inv_la(dc_inv_la),
+	.inv_we(dc_inv_we), .inv_la(dc_inv_la), .inv_line(dc_inv_line), .inv_line_idx(dc_inv_idx),
 	.snp_we(snoop_we), .snp_la(snoop_addr), .fw_start(dc_fw_start), .fw_line(dc_fw_line),
 	.clr_all(cacr_cd), .clr_entry(cacr_ced), .clr_index(caar_idx)
 );
@@ -493,6 +497,7 @@ always @(posedge clk) if (ce) begin
 	d_ack_r <= 1'b0; d_fault <= 1'b0; d_avec <= 1'b0; d_iack_berr <= 1'b0; d_late_fault <= 1'b0;
 	i_ack_r <= 1'b0; i_fault <= 1'b0;
 	dc_fi_we <= 1'b0; ic_fi_we <= 1'b0; dc_wr_we <= 1'b0; dc_inv_we <= 1'b0;
+	dc_inv_line <= 1'b0; ic_inv_line <= 1'b0;
 	walk_req <= 1'b0; tr_use <= 1'b0;
 	w_ack <= 1'b0;
 
@@ -734,6 +739,9 @@ always @(posedge clk) if (ce) begin
 						f_addr <= r_addr; f_fc <= d_fc; f_size <= siz_of(r_rem); f_rw <= 1'b1; f_rm <= d_rmc;
 						f_dob <= 32'd0; f_got <= r_got; f_partial <= r_data;
 						d_fault <= 1'b1; 
+						// UM 6.1.3.2, 7.5.1: a bus error on the first cycle of a
+						// burst (the read asked for one) leaves the whole line invalid
+						if (b_cbreq) begin dc_inv_line <= 1'b1; dc_inv_idx <= r_addr[7:4]; end
 						ds <= DS_IDLE;
 					end else if (r_pn != r_rem) begin
 						r_data <= (r_data << (8 * r_pn)) | b_rdata;
@@ -841,8 +849,11 @@ always @(posedge clk) if (ce) begin
 			end
 			IS_BUSWAIT: begin
 				if (b_done) begin
-					if (b_berr) i_fault <= 1'b1;
-					else begin i_ack_r <= 1'b1; i_data_r <= b_rdata; end
+					if (b_berr) begin
+						i_fault <= 1'b1;
+						// UM 6.1.3.2, 7.5.1: the whole line invalid, as for data
+						if (b_cbreq) begin ic_inv_line <= 1'b1; ic_inv_idx <= ir_addr[7:4]; end
+					end else begin i_ack_r <= 1'b1; i_data_r <= b_rdata; end
 					
 					is <= IS_IDLE;
 				end
