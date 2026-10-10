@@ -20,6 +20,10 @@
 //   command $0010: busy once, then null
 //   command $0011: come again with IA ($8900) three times, then transfer 4 bytes
 //                  ($11223344) from the coprocessor to EA, then null
+//   command $0030: the program's script: the response CIR returns the words
+//                  written to $F194 in turn (each response read moves on to
+//                  the next, the last one repeats; $F196 clears the script);
+//                  the operand CIR reads $F198, the operand address CIR $F19C
 //   condition word: bit 0 = true/false returned in the null primitive;
 //                   bit 4: first a null CA IA ($8900, come again) once;
 //                   bit 5: first transfer $11223344 to D2 ($AC02)
@@ -44,12 +48,26 @@ reg [31:0] cp_last_ea = 0;
 reg [15:0] cp_regsel = 16'h0803;    // for the control register test: D0,D1,A0 mask / VBR code
 reg        cp_cond_ca = 0;          // condition word bit 4: come again once
 reg        cp_cond_x  = 0;          // condition word bit 5: $11223344 to D2 first
+reg [15:0] cp_scr [0:15];           // command $0030: the response script ...
+integer    cp_scr_n = 0;            // ... its length
+integer    cp_scr_i = 0;            // ... the response being read
+reg [15:0] cp_scr_hi = 0;           // high byte of a word written to $F194
+reg [31:0] cp_scr_op = 0;           // operand CIR read value ($F198)
+reg [31:0] cp_scr_addr = 0;         // operand address CIR read value ($F19C)
+integer    cp_cnt_cpsp = 0;         // CPU space type 2 bus cycles, any CpID ($F194 read)
+reg        cpsp_seen = 0;
+always @(posedge clk) begin
+	if (is_cpsp && as_asserted && !cpsp_seen) begin cpsp_seen <= 1; cp_cnt_cpsp <= cp_cnt_cpsp + 1; end
+	if (!as_asserted) cpsp_seen <= 0;
+end
 always @* begin
 	case (a[4:0])
 		5'h00: cp_rdata = {cp_resp, 16'd0};
 		5'h04: cp_rdata = {cp_save_fmt, 16'd0};
 		5'h06: cp_rdata = {16'd0, cp_restore_resp};   // offset 2 of its longword: D15-D0 (UM 7.2.1)
-		5'h10: cp_rdata = (cp_cmd == 16'h0011 || cp_cond_x) ? 32'h11223344 : cp_operand[0];   // ($0011, condition bit 5: its own data)
+		5'h10: cp_rdata = (cp_cmd == 16'h0030) ? cp_scr_op :
+		                  (cp_cmd == 16'h0011 || cp_cond_x) ? 32'h11223344 : cp_operand[0];   // ($0011, condition bit 5: its own data)
+		5'h1C: cp_rdata = cp_scr_addr;
 		5'h14: cp_rdata = {cp_regsel, 16'd0};
 		default: cp_rdata = 32'd0;
 	endcase
@@ -82,6 +100,7 @@ task cp_start;
 			16'h000F: cp_resp = 16'h8600;                 // CA, transfer multiple main processor registers
 			16'h0010: begin cp_resp = cp_busy_done ? 16'h0902 : 16'hA400; cp_busy_done = 1; end   // busy once (UM Figure 10-23)
 			16'h0011: begin cp_resp = 16'h8900; cp_ca_left = 3; end   // null, CA, IA: come again
+			16'h0030: begin cp_scr_i = 0; cp_resp = cp_scr[0]; end   // the program's script
 			default:  cp_resp = 16'h1C0B;                 // pre-instruction exception, F-line (11)
 		endcase
 	end
@@ -119,7 +138,7 @@ task cp_write;
 			5'h1C: begin
 				cp_last_ea = d;
 				if (cp_cmd == 16'h0009) begin cp_resp = 16'hA004; cp_operand[0] = 32'h0BADF00D; end   // write to previously evaluated EA
-				else cp_resp = 16'h0902;
+				else if (cp_cmd != 16'h0030) cp_resp = 16'h0902;
 			end
 			default: ;
 		endcase
@@ -136,6 +155,11 @@ always @(posedge clk) begin
 	end
 	if (cp_rd_seen && !as_asserted) begin
 		cp_rd_seen <= 0;
+		if (cp_rd_off == 5'h00 && cp_cmd == 16'h0030) begin
+			// the script: the next response (the last one repeats)
+			if (cp_scr_i < cp_scr_n - 1) cp_scr_i = cp_scr_i + 1;
+			cp_resp <= cp_scr[cp_scr_i];
+		end
 		if (cp_rd_off == 5'h10) begin
 			// operand delivered (DR=1 transfers)
 			case (cp_cmd)

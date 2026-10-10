@@ -22,6 +22,10 @@
 //   $F180 word  coprocessor save CIR format word (read/write)               //
 //   $F184 word  read: last control CIR value; $F188/$F18C: operands 0 and 1  //
 //   $F190 byte  console: the byte is printed                                //
+//   $F194 word  coprocessor model command $0030: append a response to the //
+//               script; read (long): CPU space type 2 bus cycles, any CpID  //
+//   $F196 word  clear the script; $F198 long: operand CIR read value;      //
+//   $F19C long  operand address CIR read value (tb_cp_model.svh)           //
 //   $F1A0/$F1A4 long  benchmark runs and clocks; $F1A8 word: print report   //
 //   $F1B0/$F1B4 long  DMA model address/data; $F1B8 word 1: write + snoop,  //
 //                     2: write without snoop; $F1BA word bit 0: NMI vector  //
@@ -335,6 +339,7 @@ always @* begin
 			8'h80: rdata = {cp_save_fmt, 16'd0};
 			8'h84: rdata = {cp_ctrl, 16'd0};
 			8'h88: rdata = cp_operand[0];
+			8'h94: rdata = cp_cnt_cpsp;
 			8'h8C: rdata = cp_operand[1];
 			8'hC4: rdata = {13'd0, watch_fc, 16'd0};
 			8'hC8: rdata = cbreq_cycles[31:0];
@@ -539,6 +544,17 @@ task reg_write;
 			8'hCF: ciin_line[7:0] = v;
 			8'hF9: bm_reqs = bm_reqs + 1;
 			8'h90: $write("%c", v);                       // console
+			8'h94: cp_scr_hi[15:8] = v;                   // coprocessor model script
+			8'h95: begin if (cp_scr_n < 16) begin cp_scr[cp_scr_n] = {cp_scr_hi[15:8], v}; cp_scr_n = cp_scr_n + 1; end end
+			8'h97: cp_scr_n = 0;
+			8'h98: cp_scr_op[31:24] = v;
+			8'h99: cp_scr_op[23:16] = v;
+			8'h9A: cp_scr_op[15:8] = v;
+			8'h9B: cp_scr_op[7:0] = v;
+			8'h9C: cp_scr_addr[31:24] = v;
+			8'h9D: cp_scr_addr[23:16] = v;
+			8'h9E: cp_scr_addr[15:8] = v;
+			8'h9F: cp_scr_addr[7:0] = v;
 			8'hA0: bench_runs[31:24] = v;
 			8'hA1: bench_runs[23:16] = v;
 			8'hA2: bench_runs[15:8] = v;

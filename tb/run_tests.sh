@@ -16,6 +16,8 @@ SRC="$RTL/ap030_top.v $RTL/ap030_core.v $RTL/ap030_memsys.v $RTL/ap030_mmu.v $RT
 PROGS="t_integer t_exceptions t_bus t_cache t_mmu t_cp t_stack t_snoop t_extword t_pmmuenc"
 HALTPROGS="t_dblfault"
 LAZYPROGS="t_lazy"     # run with +lazy only: they drive the pipeline-model inputs
+# programs on the coprocessor model's script (command $0030): asm/t_cpx_*.s
+PROGS="$PROGS $(cd asm && ls t_cpx_*.s 2>/dev/null | sed 's/\.s$//' | tr '\n' ' ')"
 
 echo "== assembling test programs =="
 for t in $PROGS $HALTPROGS $LAZYPROGS; do

@@ -73,6 +73,7 @@ check.
 | `t_mmu`        | MMU registers and configuration exceptions, two- and three-level trees, short and long descriptors, early termination, indirect descriptors, limits, U/M history updates, WP/supervisor faults with RTE rerun, page-crossing operands, instruction fetch faults, harmless prefetches into unmapped pages, PTEST (all levels, An result), PLOAD, PFLUSH variants, PMOVEFD, FCL, SRE, TT0 (FC, R/W, CI), MMUDIS, ATC replacement, cache inhibit |
 | `t_pmmuenc`    | MMU instruction encodings: the supported forms run; reserved bits of the UM 3.3.3 formats, function code 11xxx, a PC relative or immediate EA field and the other CpID 0 types take the F-line exception in supervisor mode and a privilege violation in user mode (UM 9.8) |
 | `t_cp`         | the coprocessor protocol: every response primitive, cpGEN with all EA forms, cpBcc/cpDBcc/cpScc/cpTRAPcc, cpSAVE/cpRESTORE, busy, exceptions requested by the coprocessor |
+| `t_cpx_*`      | programs on the coprocessor model's response script (`tb/asm/t_cpx.i`, found by `run_tests.sh`; each header says what it checks): the script itself, tracing through coprocessor instructions and instruction traps, the take address and top of stack primitives, the encodings the processor rejects |
 | `t_dblfault`   | a bus error while stacking a bus error frame halts the processor |
 | `t_lazy`       | `fetch_lazy` with the pipeline-model inputs set by the program (run with `+lazy` only): wrong stops and a stalled scan must not hang the processor, a correct stop on an RTS must hold |
 
