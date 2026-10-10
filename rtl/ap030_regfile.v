@@ -48,7 +48,7 @@ reg [31:0] r [0:14];
 reg [31:0] usp, isp, msp;
 
 wire [1:0] act = !sr_s ? 2'd0 : (sr_m ? 2'd2 : 2'd1);
-wire [31:0] a7 = (act == 2'd0) ? usp : (act == 2'd1) ? isp : msp;
+wire [31:0] a7 = (act == 2'd0) ? usp : (act == 2'd1) ? isp : msp;   // committed A7 (the benches show it)
 
 // a write is visible to reads in the same clock it is applied, so a value
 // written by one state can be read by the next without a hazard.  A pending
@@ -56,8 +56,18 @@ wire [31:0] a7 = (act == 2'd0) ? usp : (act == 2'd1) ? isp : msp;
 // Plain continuous logic: written as a function (input "i", the name of the
 // reset loop's integer, reading the module signals) Quartus 17 did not build
 // the A7 forwarding, and the board read the old stack pointer.
-wire        fwd_a7 = we && (waddr == 4'd15) && (wact == act);
-wire [31:0] rd_a7  = fwd_a7 ? wdata : a7;
+// Both write paths are forwarded to every read of the stack pointer they
+// write, A7 and the direct outputs alike, sp_we over we as in the block
+// below.  The active ISP/MSP is A7 (UM Section 1, supervisor programming
+// model): an exception frame (UM 8.1) or a MOVEC in the clock after an A7
+// write (a stack adjustment overlapped with the dispatch of an illegal
+// instruction, an RTS popping to an odd address) must see the new value,
+// and so must an A7 read in the clock after a MOVEC to the active stack
+// pointer.
+wire [31:0] usp_f  = (sp_we && sp_sel == 2'd0) ? sp_wdata : (we && waddr == 4'd15 && wact == 2'd0) ? wdata : usp;
+wire [31:0] isp_f  = (sp_we && sp_sel == 2'd1) ? sp_wdata : (we && waddr == 4'd15 && wact == 2'd1) ? wdata : isp;
+wire [31:0] msp_f  = (sp_we && sp_sel[1])      ? sp_wdata : (we && waddr == 4'd15 && wact[1])      ? wdata : msp;
+wire [31:0] rd_a7  = (act == 2'd0) ? usp_f : (act == 2'd1) ? isp_f : msp_f;
 wire        fwd_a  = we && (waddr == raddr_a) && (raddr_a != 4'd15);
 wire        fwd_b  = we && (waddr == raddr_b) && (raddr_b != 4'd15);
 wire        fwd_c  = we && (waddr == raddr_c) && (raddr_c != 4'd15);
@@ -69,9 +79,9 @@ assign rdata_b = (raddr_b == 4'd15) ? rd_a7 : fwd_b ? wdata : r[raddr_b];
 assign rdata_c = (raddr_c == 4'd15) ? rd_a7 : fwd_c ? wdata : r[raddr_c];
 assign rdata_d = (raddr_d == 4'd15) ? rd_a7 : fwd_d ? wdata : r[raddr_d];
 assign rdata_e = (raddr_e == 4'd15) ? rd_a7 : fwd_e ? wdata : r[raddr_e];
-assign usp_q = usp;
-assign isp_q = isp;
-assign msp_q = msp;
+assign usp_q = usp_f;
+assign isp_q = isp_f;
+assign msp_q = msp_f;
 
 integer i;
 always @(posedge clk) if (ce) begin
