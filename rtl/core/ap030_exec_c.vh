@@ -46,8 +46,9 @@ S_CP2: begin : cp2
 		cp_pcbit <= 1'b0;
 		casez (r[12:8])
 			5'b00000: begin
-				// write to previously evaluated EA
-				if (cp_cond) exc_go(`VEC_CPPROTO, `FMT_CPMID, scan_pc, pc_i);
+				// write to previously evaluated EA (DR=1; bits 13:8 = $00 are
+				// undefined, UM 10.6)
+				if (cp_cond || !r[13]) exc_go(`VEC_CPPROTO, `FMT_CPMID, scan_pc, pc_i);
 				else begin cp_len <= r[7:0]; cp_pos <= 8'd0; cp_dr <= 1'b1; state <= S_CPXFER; end
 			end
 			5'b00001: begin
@@ -86,10 +87,14 @@ S_CP2: begin : cp2
 				if (cp_cond && !r[15]) exc_go(`VEC_CPPROTO, `FMT_CPMID, scan_pc, pc_i);
 				else cir_wr(5'h08, `SZ_W, {16'd0, ir}, S_CPWAIT);
 			end
-			5'b0100?: state <= S_CPNULL;
+			5'b0100?: begin
+				// null (DR=0; $28/$29 are undefined, UM 10.6)
+				if (r[13]) exc_go(`VEC_CPPROTO, `FMT_CPMID, scan_pc, pc_i);
+				else state <= S_CPNULL;
+			end
 			5'b01010: begin
-				// evaluate and transfer effective address
-				if (cp_cond) exc_go(`VEC_CPPROTO, `FMT_CPMID, scan_pc, pc_i);
+				// evaluate and transfer effective address (DR=0; $2A is undefined, UM 10.6)
+				if (cp_cond || r[13]) exc_go(`VEC_CPPROTO, `FMT_CPMID, scan_pc, pc_i);
 				else if (!ea_ctrlalt) begin tmp <= {24'd0, `VEC_FLINE}; cir_wr(5'h02, `SZ_W, 32'h0001, S_CP_ABORT); end
 				else begin ea_ret <= S_CPEAX; state <= S_EA; end
 			end
@@ -120,13 +125,19 @@ S_CP2: begin : cp2
 				else state <= S_CPSR;
 			end
 			5'b10???: begin
-				// evaluate effective address and transfer data
+				// evaluate effective address and transfer data: an EA outside
+				// the primitive's category is an F-line (abort); a write to a
+				// non-alterable EA, a register length other than 1, 2 or 4 and
+				// an odd immediate length above 1 are protocol violations even
+				// when the category matches (UM 10.4.9, Table 10-6)
 				if (cp_cond) exc_go(`VEC_CPPROTO, `FMT_CPMID, scan_pc, pc_i);
-				else if (!cp_ea_ok(r[10:8]) || (r[13] && !ea_alt) ||
-				         ((ea_dn || ea_an) && !(r[7:0] == 8'd1 || r[7:0] == 8'd2 || r[7:0] == 8'd4)) ||
-				         (ea_imm && (r[13] || (r[0] && r[7:0] != 8'd1)))) begin
+				else if (!cp_ea_ok(r[10:8])) begin
 					tmp <= {24'd0, `VEC_FLINE}; cir_wr(5'h02, `SZ_W, 32'h0001, S_CP_ABORT);
-				end else begin cp_len <= r[7:0]; cp_pos <= 8'd0; state <= S_CPXEA; end
+				end else if ((r[13] && !ea_alt) ||
+				             ((ea_dn || ea_an) && !(r[7:0] == 8'd1 || r[7:0] == 8'd2 || r[7:0] == 8'd4)) ||
+				             (ea_imm && r[0] && r[7:0] != 8'd1))
+					exc_go(`VEC_CPPROTO, `FMT_CPMID, scan_pc, pc_i);
+				else begin cp_len <= r[7:0]; cp_pos <= 8'd0; state <= S_CPXEA; end
 			end
 			5'b11100: begin tmp <= {24'd0, r[7:0]}; cp_kind[3] <= 1'b0; cir_wr(5'h02, `SZ_W, 32'h0002, S_CP_EXC); sub <= 8'd0; end
 			5'b11101: begin tmp <= {24'd0, r[7:0]}; cir_wr(5'h02, `SZ_W, 32'h0002, S_CP_EXC); sub <= 8'd1; end
