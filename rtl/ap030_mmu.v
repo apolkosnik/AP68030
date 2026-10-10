@@ -57,6 +57,7 @@ module ap030_mmu
 	input       [2:0] op_fcmask,    // PFLUSH: ones select the FC bits compared
 	output reg        op_done,
 	output reg [31:0] op_desc_addr, // PTEST: address of the last descriptor fetched
+	input             wpend,        // a posted write is still outstanding
 
 	// ---- register port (PMOVE) -----------------------------------------
 	input             reg_we,
@@ -202,6 +203,7 @@ localparam W_FETCH1R = 4'd11; // request the second longword (w_req low for a cl
 
 reg  [3:0] wst;
 reg        op_pend;
+reg        walk_pend;      // a translation's request that came while the engine was busy
 reg [31:0] s_la;
 reg  [2:0] s_fc;
 reg        s_write;        // write access: M must be set
@@ -298,7 +300,7 @@ wire        sv_acc = s_sv | d_sv;
 
 reg s_ptest_lvl0;
 assign w_active = (wst != W_IDLE) && (wst != W_ATC0) && (wst != W_DONE) && !s_ptest_lvl0;
-assign busy = (wst != W_IDLE);
+assign busy = (wst != W_IDLE) || walk_pend;
 
 // ATC entry creation
 reg        atc_wr;
@@ -457,17 +459,29 @@ always @(posedge clk) if (ce) begin
 	mmusr_we  <= 1'b0;
 	if (rst) begin
 		wst <= W_IDLE; w_req <= 1'b0; s_ptest_lvl0 <= 1'b0; s_fld_done <= 1'b0; op_pend <= 1'b0;
+		walk_pend <= 1'b0;
 	end else begin
 		if (flush_req) fl_all <= 1'b1;
 		// an instruction's request waits for a search in progress
 		if (op_req) op_pend <= 1'b1;
+		// walk_req is a pulse sent while the engine looked idle; when an
+		// instruction's search starts in that clock it is kept, as op_req
+		// is, or its requester would wait for walk_done forever (walk_la
+		// and the rest hold until walk_done)
+		if (walk_req) walk_pend <= 1'b1;
 		case (wst)
 			W_IDLE: begin
-				if (walk_req) begin
+				if (walk_req || walk_pend) begin
+					walk_pend <= 1'b0;
 					s_la <= walk_la; s_fc <= walk_fc; s_write <= !walk_rw || walk_rmc;
 					s_ptest <= 1'b0; s_pload <= 1'b0; s_maxlvl <= 3'd7; s_walk_norm <= 1'b1;
 					wst <= W_INIT;
-				end else if (op_req || op_pend) begin
+				end else if ((op_req || op_pend) && !(wpend && !op_kind[2])) begin
+					// PLOAD and PTEST search after the write posted before
+					// them, as a translation's search does (ap030_memsys): the
+					// write pending buffer hands its cycle to the bus
+					// controller ahead of the instruction (UM 11.2.5.2), and a
+					// descriptor just stored must be seen
 					op_pend <= 1'b0;
 					s_la <= op_la; s_fc <= op_fc; s_walk_norm <= 1'b0;
 					case (op_kind)

@@ -480,6 +480,17 @@ cpc:	move.l	(a0)+,(a1)+
 	ptestr	#5,($104000).l,#0
 	pmove	mmusr,(scr2).l
 	chkw	scr2,$0400,58
+	; the search of a PLOAD runs after the store posted before it (the
+	; store's own translation needs a table search, so the store is still
+	; pending when the PLOAD starts)
+	lea	(TBLB+40).l,a2
+	lea	($10A000).l,a3
+	pflusha
+	move.l	#$00022001,(a2)		; $10A000 -> $022000
+	ploadr	#5,(a3)
+	ptestr	#5,($10A000).l,#0
+	pmove	mmusr,(scr2).l
+	chkw	scr2,$0000,59		; resident and valid: the new descriptor
 
 ;================================================================ 6. faults repaired by the handler, rerun by RTE
 	move.w	#M_FIX,mode

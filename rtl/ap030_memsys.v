@@ -160,6 +160,7 @@ wire [31:0] tr_pa;
 wire        walk_done;
 wire        w_req, w_rw, w_active, mmu_busy;
 wire walker_busy = mmu_busy;
+wire        mmu_wpend;
 wire [31:0] w_addr, w_wdata;
 reg         w_ack;
 reg  [31:0] w_rdata;
@@ -172,7 +173,7 @@ ap030_mmu mmu (
 	.walk_req(walk_req), .walk_la(walk_la), .walk_fc(walk_fc), .walk_rw(walk_rw), .walk_rmc(walk_rmc),
 	.walk_done(walk_done),
 	.op_req(op_req), .op_kind(op_kind), .op_level(op_level), .op_la(op_la), .op_fc(op_fc),
-	.op_fcmask(op_fcmask), .op_done(op_done), .op_desc_addr(op_desc_addr),
+	.op_fcmask(op_fcmask), .op_done(op_done), .op_desc_addr(op_desc_addr), .wpend(mmu_wpend),
 	.reg_we(reg_we), .reg_sel(reg_sel), .reg_wdata_hi(reg_wdata_hi), .reg_wdata_lo(reg_wdata_lo),
 	.reg_fd(reg_fd), .cfg_err(cfg_err), .tc(tc), .srp_hi(srp_hi), .srp_lo(srp_lo),
 	.crp_hi(crp_hi), .crp_lo(crp_lo), .tt0(tt0), .tt1(tt1), .mmusr(mmusr),
@@ -357,6 +358,7 @@ assign     dc_fw_start = b_req && b_ack && (owner == OWN_DU) && !own_ifetch && b
 assign     dc_fw_line  = r_addr[7:4];
 // write buffer
 reg        wb_valid;
+assign     mmu_wpend = wb_valid;
 reg        wb_stage;     // 0: portion 1 pending, 1: portion 2 pending
 reg [31:0] wb_pa0, wb_pa1, wb_la0, wb_la1;
 reg        wb_ci0, wb_ci1;
