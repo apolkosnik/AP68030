@@ -35,7 +35,7 @@ reg  [31:0] req_wdata = 0;
 wire        req_ack, busy, done, res_berr, res_avec, res_ciin, fill_stb, bus_idle, bus_granted;
 wire [31:0] rd_data, fill_data;
 wire [31:2] fill_addr;
-reg         rmc_release = 0;
+reg         rmc_hold = 0;      // the memory system holds RMC (an RMW operation is open)
 
 // ---- pins ----------------------------------------------------------------
 wire [31:0] a;
@@ -55,7 +55,7 @@ ap030_bus dut (
 	.req_cache(req_cache), .req_wdata(req_wdata), .req_ack(req_ack), .busy(busy), .done(done),
 	.rd_data(rd_data), .res_berr(res_berr), .res_avec(res_avec), .res_ciin(res_ciin),
 	.fill_stb(fill_stb), .fill_addr(fill_addr), .fill_data(fill_data),
-	.rmc_release(rmc_release), .halted(1'b0), .bus_idle(bus_idle),
+	.rmc_hold(rmc_hold), .halted(1'b0), .bus_idle(bus_idle),
 	.a_o(a), .fc_o(fc), .siz_o(siz), .rw_o(rw), .rmc_n_o(rmc_n), .as_n_o(as_n), .ds_n_o(ds_n),
 	.dben_n_o(dben_n), .ecs_n_o(ecs_n), .ocs_n_o(ocs_n), .ciout_n_o(ciout_n), .cbreq_n_o(cbreq_n),
 	.bus_oe(bus_oe), .d_o(d_o), .d_oe(d_oe), .d_i(d_i),
@@ -564,15 +564,45 @@ initial begin
 	if (!res_berr) begin errors = errors + 1; $display("FAIL: spurious IACK not reported"); end
 
 	//-------------------------------------------------------------- RMC
-	req_rmc = 1; req_rmc_last = 0;
+	req_rmc = 1; req_rmc_last = 0; rmc_hold = 1;
 	do_transfer(`BK_DATA, 32'h00014B00, 3'd1, 3'd1, 1, 0, 0, 0);
 	if (rmc_n) begin errors = errors + 1; $display("FAIL: RMC not held after the read"); end
 	req_rmc_last = 1;
 	do_transfer(`BK_DATA, 32'h00014B00, 3'd1, 3'd1, 0, 32'h80, 0, 0);
 	wait_idle;
 	if (!rmc_n) begin errors = errors + 1; $display("FAIL: RMC not released after the write"); end
-	req_rmc = 0; req_rmc_last = 0;
+	req_rmc = 0; req_rmc_last = 0; rmc_hold = 0;
 	gold[32'h00014B00] = 8'h80;
+	// an RMW operation that ends after its read (CAS/CAS2 mismatch): the
+	// memory system stops holding RMC while the next transfer is already
+	// running; RMC is negated once that cycle is over, and a transfer that
+	// starts after the release begins with RMC negated (UM 7.1.1)
+	req_rmc = 1; req_rmc_last = 0; rmc_hold = 1;
+	do_transfer(`BK_DATA, 32'h00014B10, 3'd4, 3'd4, 1, 0, 0, 0);
+	req_rmc = 0;
+	wait_states = 2;
+	@(posedge clk);
+	req <= 1; req_kind <= `BK_DATA; req_addr <= 32'h00014B14; req_nbytes <= 4; req_total <= 4; req_rw <= 1; req_cache <= 0; req_cbreq <= 0;
+	@(posedge clk); while (!req_ack) @(posedge clk);
+	req <= 0;
+	@(posedge clk);
+	rmc_hold = 0;                              // released while that cycle runs
+	while (!done) @(posedge clk);
+	wait_idle;
+	if (!rmc_n) begin errors = errors + 1; $display("FAIL: RMC not negated after a release during a cycle"); end
+	wait_states = 0;
+	req_rmc = 1; req_rmc_last = 0; rmc_hold = 1;
+	do_transfer(`BK_DATA, 32'h00014B18, 3'd4, 3'd4, 1, 0, 0, 0);
+	req_rmc = 0;
+	rmc_hold = 0;                              // released before the next transfer
+	fails_here = 0;
+	@(posedge clk);
+	req <= 1; req_kind <= `BK_DATA; req_addr <= 32'h00014B1C; req_nbytes <= 4; req_total <= 4; req_rw <= 1; req_cache <= 0; req_cbreq <= 0;
+	@(posedge clk); while (!req_ack) @(posedge clk);
+	req <= 0;
+	while (!done) begin @(posedge clk); if (as_asserted && !rmc_n) fails_here = fails_here + 1; end
+	if (fails_here != 0) begin errors = errors + 1; $display("FAIL: RMC asserted on the cycle after the RMW operation"); end
+	wait_idle;
 
 	//-------------------------------------------------------------- arbitration
 	br_n = 0;
@@ -599,7 +629,7 @@ initial begin
 	repeat (6) @(posedge clk);
 	if (!bus_oe) begin errors = errors + 1; $display("FAIL: bus not reclaimed after BR withdrawn"); end
 	// RMC blocks BG
-	req_rmc = 1; req_rmc_last = 0;
+	req_rmc = 1; req_rmc_last = 0; rmc_hold = 1;
 	do_transfer(`BK_DATA, 32'h00014D00, 3'd1, 3'd1, 1, 0, 0, 0);
 	br_n = 0;
 	repeat (4) @(posedge clk);
@@ -610,7 +640,7 @@ initial begin
 	wait_idle;
 	repeat (3) @(posedge clk);
 	if (bg_n) begin errors = errors + 1; $display("FAIL: BG not asserted after RMC ended"); end
-	br_n = 1; req_rmc = 0; req_rmc_last = 0;
+	br_n = 1; req_rmc = 0; req_rmc_last = 0; rmc_hold = 0;
 	repeat (6) @(posedge clk);
 
 	//-------------------------------------------------------------- back-to-back

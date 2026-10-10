@@ -109,7 +109,7 @@ task exc_go;
 		exc_vec <= vec; exc_fmt <= fmt; exc_pc <= pcv; exc_ia <= iav;
 		exc_sr <= sr;
 		exc_cnt <= cnt; exc_dw_dst <= dw_dst; exc_dw_ret <= dw_ret;
-		exc_is_irq <= 1'b0; exc_is_reset <= 1'b0; exc_throw <= 1'b0;
+		exc_is_irq <= 1'b0; exc_is_reset <= 1'b0; exc_throw <= 1'b0; exc_late <= 1'b0;
 		exc_busfault <= (vec == `VEC_BUSERR) || (vec == `VEC_ADDRERR);
 		// T1 tracing survives the instruction traps (UM 8.1.7 / 8.1.12)
 		trace_after_exc <= (tr_t1 | tr_t0) && ((vec == `VEC_DIVZERO) || (vec == `VEC_CHK) ||
@@ -117,7 +117,9 @@ task exc_go;
 		trace_pend <= 1'b0;
 		if (vec == `VEC_BUSERR || vec == `VEC_ADDRERR || vec == `VEC_SPURIOUS || vec == `VEC_FLINE ||
 		    (vec >= `VEC_AUTOVEC && vec < `VEC_TRAP)) status_cnt <= 2'd3;
-		state <= S_EXC0;
+		// a bus/address error stacks its frame after the posted writes
+		// before it (see the posted write faults in ap030_core.v)
+		state <= (((vec == `VEC_BUSERR) || (vec == `VEC_ADDRERR)) && d_wpend) ? S_EXCW : S_EXC0;
 	end
 endtask
 
@@ -157,15 +159,17 @@ task exc_data_fault;
 	end
 endtask
 
-// a posted write that failed, reported at a boundary
+// a posted write that failed, reported at a boundary from its record
 task exc_late_fault;
 	begin
 		late_fault_pend <= 1'b0;
 		capture_pipe;
+		exc_fa <= lf_fa; exc_dob <= lf_dob;
 		exc_got <= 3'd0; exc_partial <= 32'd0;
-		exc_ssw <= {1'b0, 1'b0, ~w0_v | w0_f, ~w1_v | w1_f, 3'b000, exc_ssw[8:0]};
+		exc_ssw <= {1'b0, 1'b0, ~w0_v | w0_f, ~w1_v | w1_f, 3'b000, lf_ssw};
 		exc_rk <= RK_BOUNDARY; exc_rs <= S_FETCH;
 		exc_go(`VEC_BUSERR, `FMT_SHORTBUS, scan_pc, 32'd0);
+		exc_late <= 1'b1;
 	end
 endtask
 

@@ -64,9 +64,11 @@ check.
 | program        | covers                                                                       |
 |----------------|------------------------------------------------------------------------------|
 | `t_integer`    | the integer instruction set, addressing modes, condition codes, bit fields, CAS, MOVEM, MOVEP, BCD |
-| `t_exceptions` | traps and frames ($0/$1/$2/$9/$A/$B), illegal/A-line/F-line, CHK/CHK2, privilege, MOVEC/MOVES, trace T1/T0, interrupts (levels, autovector, vectored, spurious, level 7 edge), STOP, master stack and throwaway frames, RTE format errors, BKPT, bus error rerun and software completion on reads, posted writes and instruction fetches, address errors, RESET |
-| `t_bus`        | dynamic bus sizing through 32/16/8-bit ports, misaligned operands, line and page crossings, cache hits, MOVEP, TAS/CAS RMW cycles, CIIN, code from narrow ports |
+| `t_exceptions` | traps and frames ($0/$1/$2/$9/$A/$B), illegal/A-line/F-line, CHK/CHK2, privilege, MOVEC/MOVES, trace T1/T0, interrupts (levels, autovector, vectored, spurious, level 7 edge), STOP, master stack and throwaway frames, RTE format errors, BKPT, bus error rerun and software completion on reads, posted writes (two failing in a row: two bus errors in program order, no halt) and instruction fetches, address errors, RESET (512 clocks, no bus cycle during the pulse) |
+| `t_stack`      | the active stack pointer right after a write to it: an exception at the next instruction's dispatch, MOVEC ISP/MSP, RTS/RTD/RTR/RTE to an odd address (frame position and A7 afterwards) |
+| `t_bus`        | dynamic bus sizing through 32/16/8-bit ports, misaligned operands, line and page crossings, cache hits, MOVEP, TAS/CAS RMW cycles (RMC, no prefetch inside, release after a CAS/CAS2 mismatch, bus grant after), CIIN, code from narrow ports |
 | `t_cache`      | CACR (enable, freeze, clear all/entry, write allocate, burst enable), write-through, the instruction cache and self-modifying code, hit/miss timing |
+| `t_snoop`      | the snoop port: another master writes a longword 0-15 clocks after the processor read it, while the fill of that read is under way (32-bit synchronous or native port, 16-bit and 8-bit ports, burst) |
 | `t_mmu`        | MMU registers and configuration exceptions, two- and three-level trees, short and long descriptors, early termination, indirect descriptors, limits, U/M history updates, WP/supervisor faults with RTE rerun, page-crossing operands, instruction fetch faults, harmless prefetches into unmapped pages, PTEST (all levels, An result), PLOAD, PFLUSH variants, PMOVEFD, FCL, SRE, TT0 (FC, R/W, CI), MMUDIS, ATC replacement, cache inhibit |
 | `t_cp`         | the coprocessor protocol: every response primitive, cpGEN with all EA forms, cpBcc/cpDBcc/cpScc/cpTRAPcc, cpSAVE/cpRESTORE, busy, exceptions requested by the coprocessor |
 | `t_dblfault`   | a bus error while stacking a bus error frame halts the processor |
@@ -219,8 +221,8 @@ unchanged.  A synchronous one (STERM, CBACK, the native port) must also
 advance on the enabled edges, as a board's memory controller would run on
 the processor clock.  `snoop_we` is the exception: it is taken on every
 clock, since another bus master's write is a single-clock pulse in the
-system's clock, and a snoop between the two enabled edges of a cache fill
-is applied again after that fill.
+system's clock, and a snoop from the clock a read is accepted until its
+cache fill is written is applied again after that fill.
 
 `USE_CE=0` (the default) ignores `ce`; the enables are then constant and
 the logic is the same as without them.

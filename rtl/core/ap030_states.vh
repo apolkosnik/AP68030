@@ -216,3 +216,4 @@ localparam S_CAS1B    = 8'd192;  // CAS: decide on the registered compare
 localparam S_CAS2_4B  = 8'd193;
 localparam S_CAS2_5B  = 8'd194;
 localparam S_PFLUSH2   = 8'd195;  // PFLUSH fc,#mask,<ea>: the EA is ready
+localparam S_EXCW      = 8'd196;  // bus/address error: the posted writes before it complete

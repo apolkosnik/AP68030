@@ -20,7 +20,9 @@
 //   command $0010: busy once, then null
 //   command $0011: come again with IA ($8900) three times, then transfer 4 bytes
 //                  ($11223344) from the coprocessor to EA, then null
-//   condition word: bit 0 = true/false returned in the null primitive
+//   condition word: bit 0 = true/false returned in the null primitive;
+//                   bit 4: first a null CA IA ($8900, come again) once;
+//                   bit 5: first transfer $11223344 to D2 ($AC02)
 //   The save CIR returns cp_save_fmt (test register $F180); a "not ready"
 //   value ($01xx) becomes format $F1 of the same length after one read.
 //   The restore CIR echoes valid format words and answers $0200 to $02xx.
@@ -40,20 +42,22 @@ reg        cp_busy_done = 0;
 integer    cp_ca_left = 0;
 reg [31:0] cp_last_ea = 0;
 reg [15:0] cp_regsel = 16'h0803;    // for the control register test: D0,D1,A0 mask / VBR code
+reg        cp_cond_ca = 0;          // condition word bit 4: come again once
+reg        cp_cond_x  = 0;          // condition word bit 5: $11223344 to D2 first
 always @* begin
 	case (a[4:0])
 		5'h00: cp_rdata = {cp_resp, 16'd0};
 		5'h04: cp_rdata = {cp_save_fmt, 16'd0};
 		5'h06: cp_rdata = {16'd0, cp_restore_resp};   // offset 2 of its longword: D15-D0 (UM 7.2.1)
-		5'h10: cp_rdata = (cp_cmd == 16'h0011) ? 32'h11223344 : cp_operand[0];   // ($0011: its own data)
+		5'h10: cp_rdata = (cp_cmd == 16'h0011 || cp_cond_x) ? 32'h11223344 : cp_operand[0];   // ($0011, condition bit 5: its own data)
 		5'h14: cp_rdata = {cp_regsel, 16'd0};
 		default: cp_rdata = 32'd0;
 	endcase
 end
 // the response after a command
-// $F1BC: arm an interrupt of this level at the next command write (so it is
-// pending while the processor reads the response) and re-arm the busy
-// response of command $0010
+// $F1BC: arm an interrupt of this level at the next command or condition
+// write (so it is pending while the processor reads the response) and re-arm
+// the busy response of command $0010
 reg [2:0] cp_irq_arm = 0;
 task cp_start;
 	input [15:0] cmd;
@@ -95,8 +99,12 @@ task cp_write;
 			end
 			5'h0A: cp_start(d[31:16]);
 			5'h0E: begin
+				if (cp_irq_arm != 0) begin irq_level = cp_irq_arm; cp_irq_arm = 0; end
 				cp_cond = d[31:16];
-				cp_resp = {15'd0, cp_cond[0]} | 16'h0902;   // null CA=0 PF=1 with TF
+				cp_cond_ca = cp_cond[4]; cp_cond_x = cp_cond[5] & ~cp_cond[4];
+				if (cp_cond[4]) cp_resp = 16'h8900;                   // null CA IA: come again
+				else if (cp_cond[5]) cp_resp = 16'hAC02;              // CA DR: operand CIR to D2
+				else cp_resp = {15'd0, cp_cond[0]} | 16'h0902;   // null CA=0 PF=1 with TF
 			end
 			5'h10: begin
 				cp_operand[cp_ops & 15] = d; cp_ops = cp_ops + 1;
@@ -134,6 +142,17 @@ always @(posedge clk) begin
 				16'h0003, 16'h0005, 16'h0009, 16'h000D, 16'h0011: cp_resp <= 16'h0902;
 				default: ;
 			endcase
+		end
+		if (cp_rd_off == 5'h00 && cp_cond_ca && cp_resp == 16'h8900) begin
+			// condition bit 4: came again once, now the true/false answer
+			cp_cond_ca <= 0;
+			cp_resp <= {15'd0, cp_cond[0]} | 16'h0902;
+		end
+		if (cp_rd_off == 5'h10 && cp_cond_x) begin
+			// condition bit 5: D2 transferred, now the true/false answer
+			// (after the operand transitions above, which act on the last command)
+			cp_cond_x <= 0;
+			cp_resp <= {15'd0, cp_cond[0]} | 16'h0902;
 		end
 		if (cp_rd_off == 5'h00 && cp_cmd == 16'h0011 && cp_resp == 16'h8900) begin
 			// come again: after the third read, the data transfer

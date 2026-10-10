@@ -106,8 +106,22 @@ mask. Trace T1/T0 follow UM 8.1.7: T1 survives the instruction traps
 (DIVZ, CHK, TRAPcc, TRAP), T0 traces changes of flow.
 
 Posted writes that fail on the bus are reported at the next instruction
-boundary with a format $A frame (UM 8.1.2); a bus error while stacking a
-fault frame halts the processor (UM 7.5.4).
+boundary with a format $A frame (UM 8.1.2), and RTE reruns the write.  A
+bus or address error first waits for the writes posted before it; if one
+of them fails, that fault is taken right after as a bus error of its own,
+its frame on top, so the handler sees the faults and the reruns happen in
+program order.  Only a fault of a bus/address error's own frame write
+halts the processor (double bus fault, UM 7.5.4).
+
+Known difference: a write of the next instruction that was waiting for the
+write buffer goes to the bus once the failed write has left it.  The
+MC68030 instead begins exception processing at once and suspends that
+instruction before its write (a format $B frame, UM 8.1.2 and Table 8-6).
+When both writes fail for the same reason (one page, one address), the
+MC68030 takes one bus error and this core two: a handler that repairs the
+cause is entered a second time, finds nothing to do and its RTE reruns
+the second write; memory ends the same and no write is lost or reordered.
+A handler that counts bus errors sees one more.
 
 ## Memory subsystem (ap030_memsys.v)
 
@@ -128,7 +142,11 @@ line or page are split as UM 7.2.2 describes, and the first portion of a
 line-crossing read is not burst.
 
 Table searches wait for the write buffer to drain (a descriptor may just
-have been written) and hold RMC for their duration.
+have been written) and hold RMC for their duration.  A read-modify-write
+operation (TAS, CAS, CAS2) holds RMC from its first transfer until its last
+write, the CAS/CAS2 compare mismatch that ends it without a write, or a
+fault, and no instruction prefetch runs in between (UM 7.3.3), so RMC is
+negated before the next cycle (UM 7.1.1).
 
 **System options** (inputs of `ap030_top`, tied to 0 for a plain MC68030):
 `snoop_we`/`snoop_addr` invalidate the data cache entry for an address

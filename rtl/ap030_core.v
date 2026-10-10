@@ -209,7 +209,7 @@ reg [31:0] fetch_pc;       // next longword to request
 reg        fetch_skip;     // discard the first word of the next fetched longword
 reg  [1:0] fetch_out;      // fetches outstanding (they return in order, two at most)
 reg  [1:0] fetch_disc;     // the first of them belong to a flushed stream
-reg        fetch_hold;     // no prefetching (halt, stop, refill of a bad address)
+reg        fetch_hold;     // no prefetching (halt, stop, refill of a bad address, RESET instruction)
 reg        refill_p;       // REFILL pulse (posedge)
 // per-clock pipe commands from the sequencer
 reg  [1:0] pop_n;
@@ -276,6 +276,10 @@ reg        tr_t1, tr_t0;   // trace bits at the start of the instruction
 reg        flow;           // the instruction changed the program flow (T0 trace)
 reg        trace_pend;
 reg        late_fault_pend;
+// the posted write fault waiting to be taken (its own record, so that a
+// fault arriving while another exception is prepared leaves that alone)
+reg [31:0] lf_fa, lf_dob;  // fault address, data output buffer
+reg  [8:0] lf_ssw;         // SSW DF RM RW SIZE 0 FC
 reg        stopped;
 reg        halted_r;
 reg [31:0] fr [0:22];      // RTE frame image (23 longwords)
@@ -301,6 +305,7 @@ reg        exc_is_irq;
 reg        exc_is_reset;
 reg        exc_busfault;   // processing a bus/address error: another fault halts
 reg        exc_throw;      // building the throwaway frame
+reg        exc_late;       // the exception is a posted write fault (exc_late_fault)
 reg [31:0] exc_sp;         // frame base
 reg  [5:0] exc_len;        // frame length in longwords
 reg  [2:0] exc_ilvl;
@@ -532,7 +537,7 @@ always @* begin
 		S_PACK, S_PACK2, S_PACK3: begin ra_a = {ir[3], ir[2:0]}; ra_b = {ir[3], ir[11:9]}; end
 		S_LINK, S_LINK2, S_LINK3, S_UNLK, S_UNLK2, S_UNLK3, S_MOVE_USP: ra_a = {1'b1, ir[2:0]};
 		S_MOVEP0, S_MOVEP1, S_MOVEP2, S_MOVEP3: begin ra_a = {1'b1, ir[2:0]}; ra_b = {1'b0, ir[11:9]}; end
-		S_DBCC, S_CPDBCC, S_CPDBCC2: ra_a = {1'b0, ir[2:0]};
+		S_DBCC, S_CPDBCC, S_CPDBCC2, S_CPSCC2: ra_a = {1'b0, ir[2:0]};
 		S_CP2, S_CP3, S_CP4, S_CP5, S_CP6, S_CP7, S_CP8, S_CP10, S_CPREG, S_CPCTRL, S_CPCTRL2, S_CPTOS, S_CPEAX,
 		S_CPXFER, S_CPXFER2, S_CPXFER3, S_CPMULT, S_CPMULT2, S_CPMULT3,
 		S_CPSAVE0, S_CPSAVE1, S_CPREST0, S_CPREST1: begin
@@ -639,6 +644,7 @@ always @(posedge clk) if (ce) begin
 		scan_pc <= 32'd0; fetch_pc <= 32'd0; fetch_skip <= 1'b0; fetch_out <= 2'd0;
 		fetch_disc <= 2'd0; fetch_hold <= 1'b1; stop_wait <= 6'd0; due_v <= 1'b0;
 		trace_pend <= 1'b0; late_fault_pend <= 1'b0; stream_fault_pend <= 1'b0;
+		lf_fa <= 32'd0; lf_dob <= 32'd0; lf_ssw <= 9'd0; exc_late <= 1'b0;
 		stopped <= 1'b0; halted_r <= 1'b0;
 		reset_drive <= 1'b0; rst_cnt <= 10'd0;
 		ipend_r <= 1'b0;
@@ -675,24 +681,42 @@ always @(posedge clk) if (ce) begin
 		rf_waddr <= 4'd0; rf_wact <= 2'd1; rf_wdata <= 32'd0; sp_sel <= 2'd0; sp_wdata <= 32'd0;
 	end else begin
 		//---------------------------------------------------------- events from the memory system
-		if (d_late_fault) begin
-			// a posted write failed: taken at the next safe point (UM 8.1.2)
-			late_fault_pend <= 1'b1;
-			exc_fa <= f_addr; exc_dob <= f_dob;
-			exc_ssw <= {4'd0, 3'b000, 1'b1, f_rm, f_rw, f_size, 1'b0, f_fc};   // DF RM RW SIZE 0 FC
-		end
+		// (a failed posted write, d_late_fault, is handled after the states)
 		ipend_r <= irq_pend && !exc_is_irq_active;
 
 		//---------------------------------------------------------- the states
 		`include "core/ap030_exec.vh"
 
-		//---------------------------------------------------------- double bus fault
-		// a frame write of a bus/address error exception failed on the bus
-		// (posted writes report late): the processor halts (UM 8.1.2, 7.5.4)
-		if (d_late_fault && exc_active && exc_busfault) begin
-			late_fault_pend <= 1'b0;
-			halted_r <= 1'b1;
-			state <= S_HALT;
+		//---------------------------------------------------------- posted write faults
+		// A posted write that failed is a bus error taken at the next
+		// instruction boundary (UM 8.1.2), with a short bus fault frame
+		// built from its record (exc_late_fault).  Only a frame write of a
+		// bus/address error exception failing is a double bus fault and
+		// halts (UM 7.5.4, 8.1.2): such an exception waits in S_EXCW until
+		// the writes posted before it have completed, so a write fault seen
+		// while it stacks (exc_active) is one of its own frame writes.  A
+		// fault of an earlier write is kept and taken after the exception
+		// in progress, as a bus error of its own; its frame then lies on
+		// top and the handler sees it first, before the later fault.
+		if (d_late_fault) begin
+			if (exc_active && exc_busfault) begin
+				late_fault_pend <= 1'b0;
+				halted_r <= 1'b1;
+				state <= S_HALT;
+			end else if ((state == S_EXCW && exc_late) || (state == S_FETCH && late_fault_pend)) begin
+				// a write fault is being taken and the write behind it
+				// failed too: stack the later one first and keep the earlier
+				// one pending, so that the earlier frame lies on top and the
+				// faulted writes are rerun in program order
+				exc_fa <= f_addr; exc_dob <= f_dob;
+				exc_ssw[8:0] <= {1'b1, f_rm, f_rw, f_size, 1'b0, f_fc};
+				if (state == S_EXCW) begin lf_fa <= exc_fa; lf_dob <= exc_dob; lf_ssw <= exc_ssw[8:0]; end
+				late_fault_pend <= 1'b1;
+			end else begin
+				late_fault_pend <= 1'b1;
+				lf_fa <= f_addr; lf_dob <= f_dob;
+				lf_ssw <= {1'b1, f_rm, f_rw, f_size, 1'b0, f_fc};   // DF RM RW SIZE 0 FC
+			end
 		end
 
 		//---------------------------------------------------------- prefetch and pipe maintenance

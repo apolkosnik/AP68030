@@ -2,6 +2,12 @@
 // CAS/CAS2, bit fields
 
 //-------------------------------------------------------------- exception processing (UM 8.1)
+// a bus/address error waits here for the writes posted before it: their
+// faults belong to earlier accesses (taken afterwards, not a double fault)
+S_EXCW: begin
+	exc_active <= 1'b0;
+	if (!d_wpend) state <= S_EXC0;
+end
 S_EXC0: begin : exc0
 	reg [31:0] base;
 	reg use_msp;

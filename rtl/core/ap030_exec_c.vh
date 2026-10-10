@@ -199,7 +199,11 @@ S_CPDBCC2: begin : cpdbcc2
 	end
 end
 S_CPSCC2: begin
-	if (ir[5:3] == 3'b000) begin wreg({1'b0, ir[2:0]}, {dst[31:8], {8{cp_resp[0]}}}); finish; end
+	// Dn: only its low byte changes (UM 10.2.2.2); the upper bytes are read
+	// now, not taken from dst: the dialog may have loaded Dn (transfer main
+	// processor register), and after a mid-instruction frame's RTE dst
+	// holds whatever the handler left there
+	if (ir[5:3] == 3'b000) begin wreg({1'b0, ir[2:0]}, {rf_a[31:8], {8{cp_resp[0]}}}); finish; end
 	else begin ea_ret <= S_CPSCC_WR; state <= S_EA; end
 end
 S_CPSCC_WR: begin finish; wr(ea, `SZ_B, {24'd0, {8{cp_resp[0]}}}, S_FETCH); end   // cpScc memory destination

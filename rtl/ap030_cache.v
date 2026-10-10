@@ -53,6 +53,10 @@ module ap030_cache
 	// index alone selects it, whatever its tag)
 	input             snp_we,
 	input      [31:0] snp_la,
+	// the bus accepted a read whose fills will be for line fw_line (with ce):
+	// snoops from then on are applied again after those fills
+	input             fw_start,
+	input       [7:4] fw_line,
 
 	// CACR clear controls
 	input             clr_all,
@@ -107,6 +111,23 @@ always @(posedge clk)
 	if (rst || ce) snp_late <= 1'b0;
 	else if (snp_we) begin snp_late <= 1'b1; snp_late_la <= snp_la[7:2]; end
 
+// a fill is written some clocks after the bus read its bytes (they are
+// latched, the entry is reported, the memory subsystem registers it; a
+// narrow port or a burst reads the line over several cycles), so a snoop in
+// between may stand for a write the read did not see: the entries of the
+// line being read that a snoop names, from the clock the read is accepted
+// (that clock included) until its fills are written, are cleared again
+// after their fill, as if the snoop had come after it
+reg [7:4] fw_la = 4'd0;
+reg [3:0] fw_snp = 4'd0;
+wire      fw_new = ce && fw_start;
+always @(posedge clk) begin
+	if (rst || fw_new) fw_snp <= 4'd0;
+	if (fw_new) fw_la <= fw_line;
+	if (snp_we && (snp_la[7:4] == (fw_new ? fw_line : fw_la))) fw_snp[snp_la[3:2]] <= 1'b1;
+end
+wire      fi_snooped = fw_snp[fi_addr[3:2]] && (fi_addr[7:4] == fw_la);
+
 integer i;
 // (every clock: a snoop is a single-clock pulse from another bus master and
 // must not be lost between enabled clocks; everything else advances with ce)
@@ -125,6 +146,7 @@ always @(posedge clk) begin
 				valid[fi_addr[7:4]]  <= 4'b0001 << fi_addr[3:2];
 			end
 		end
+		if (ce && fi_we && fi_snooped) valid[fi_addr[7:4]][fi_addr[3:2]] <= 1'b0;
 		if (ce && wr_alloc) begin
 			if (wr_tag_hit) valid[wr_idx][wr_ent] <= 1'b1;
 			else begin

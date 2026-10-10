@@ -197,7 +197,7 @@ ap030_cache #(.FC_BITS(1)) icache (
 	.fi_we(ic_fi_we), .fi_addr(ic_fi_addr), .fi_fc(ic_fi_fc), .fi_data(ic_fi_data),
 	.wr_we(1'b0), .wr_la(32'd0), .wr_fc(3'd0), .wr_be(4'd0), .wr_data(32'd0), .wr_wa(1'b0), .wr_allow_fill(1'b0),
 	.inv_we(1'b0), .inv_la(32'd0),
-	.snp_we(1'b0), .snp_la(32'd0),
+	.snp_we(1'b0), .snp_la(32'd0), .fw_start(1'b0), .fw_line(4'd0),
 	.clr_all(cacr_ci), .clr_entry(cacr_cei), .clr_index(caar_idx)
 );
 
@@ -216,6 +216,8 @@ reg   [3:0] dc_wr_be;
 reg  [31:0] dc_wr_data;
 reg         dc_inv_we;
 reg  [31:0] dc_inv_la;
+wire        dc_fw_start;     // a data read is accepted by the bus (its fills follow)
+wire  [7:4] dc_fw_line;
 
 ap030_cache #(.FC_BITS(3)) dcache (
 	.clk(clk), .ce(ce), .rst(rst),
@@ -225,7 +227,7 @@ ap030_cache #(.FC_BITS(3)) dcache (
 	.wr_we(dc_wr_we), .wr_la(dc_wr_la), .wr_fc(dc_wr_fc), .wr_be(dc_wr_be), .wr_data(dc_wr_data),
 	.wr_wa(cacr[`CACR_WA]), .wr_allow_fill(dc_fill_ok),
 	.inv_we(dc_inv_we), .inv_la(dc_inv_la),
-	.snp_we(snoop_we), .snp_la(snoop_addr),
+	.snp_we(snoop_we), .snp_la(snoop_addr), .fw_start(dc_fw_start), .fw_line(dc_fw_line),
 	.clr_all(cacr_cd), .clr_entry(cacr_ced), .clr_index(caar_idx)
 );
 
@@ -243,7 +245,12 @@ reg  [31:0] b_wdata;
 wire        b_ack, b_busy, b_done, b_berr, b_avec, b_ciin, b_fill_stb, b_idle;
 wire [31:0] b_rdata, b_fill_data;
 wire [31:2] b_fill_addr;
-reg         b_rmc_release;
+// UM 7.3.3: a read-modify-write operation is open from its first bus
+// transfer to its last write, the CAS/CAS2 mismatch that ends it without a
+// write, or a fault; RMC is held for it (and for a table search) and no
+// instruction prefetch runs in between, so RMC is negated before the first
+// cycle after the operation (UM 7.1.1)
+reg         rmw_open;
 
 // Select the native route only for ordinary translated RAM transfers.
 // Atomic RMW and table walks retain pin-bus locking and fault semantics.
@@ -292,7 +299,7 @@ ap030_bus bus (
 	.req_cbreq(b_cbreq), .req_ocs(b_ocs), .req_cache(b_cache), .req_wdata(b_wdata),
 	.req_ack(pin_ack), .busy(pin_busy), .done(pin_done), .rd_data(pin_rdata), .res_berr(pin_berr),
 	.res_avec(pin_avec), .res_ciin(pin_ciin), .fill_stb(pin_fill), .fill_addr(pin_fill_addr),
-	.fill_data(pin_fill_data), .rmc_release(b_rmc_release), .halted(halted), .bus_idle(pin_idle),
+	.fill_data(pin_fill_data), .rmc_hold(rmw_open || w_active), .halted(halted), .bus_idle(pin_idle),
 	.a_o(a_o), .fc_o(fc_o), .siz_o(siz_o), .rw_o(rw_o), .rmc_n_o(rmc_n_o), .as_n_o(as_n_o),
 	.ds_n_o(ds_n_o), .dben_n_o(dben_n_o), .ecs_n_o(ecs_n_o), .ocs_n_o(ocs_n_o), .ciout_n_o(ciout_n_o),
 	.cbreq_n_o(cbreq_n_o), .bus_oe(bus_oe), .d_o(d_o), .d_oe(d_oe), .d_i(d_i),
@@ -333,6 +340,9 @@ reg  [2:0] r_got;        // read bytes obtained so far
 reg        r_ocs;        // OCS still to be asserted for this operand
 reg        r_first;
 reg        r_cross_line;
+// the data read accepted by the bus now: its fills are for d_fill_line
+assign     dc_fw_start = b_req && b_ack && (owner == OWN_DU) && !own_ifetch && b_rw;
+assign     dc_fw_line  = r_addr[7:4];
 // write buffer
 reg        wb_valid;
 reg        wb_stage;     // 0: portion 1 pending, 1: portion 2 pending
@@ -476,7 +486,7 @@ wire rd_hit_ok = d_rw && !d_rmc && !d_iack && !d_nocache && dc_en && dc_hit && c
 
 reg [31:0] r_pa_hold;
 reg        r_ci_hold, r_tag_hit, r_line_empty;
-reg w_ack_pending, w_active_d;
+reg w_ack_pending;
 
 always @(posedge clk) if (ce) begin
 	// pulses
@@ -484,7 +494,7 @@ always @(posedge clk) if (ce) begin
 	i_ack_r <= 1'b0; i_fault <= 1'b0;
 	dc_fi_we <= 1'b0; ic_fi_we <= 1'b0; dc_wr_we <= 1'b0; dc_inv_we <= 1'b0;
 	walk_req <= 1'b0; tr_use <= 1'b0;
-	w_ack <= 1'b0; b_rmc_release <= 1'b0;
+	w_ack <= 1'b0;
 
 	if (rst) begin
 		ds <= DS_IDLE; is <= IS_IDLE; owner <= OWN_NONE; own_ifetch <= 1'b0;
@@ -501,7 +511,7 @@ always @(posedge clk) if (ce) begin
 		walk_la <= 32'd0; walk_fc <= 3'd0; walk_rw <= 1'b1; walk_rmc <= 1'b0;
 		f_got <= 3'd0; f_partial <= 32'd0;
 		d_rdata_r <= 32'd0; i_data_r <= 32'd0;
-		w_ack_pending <= 1'b0; w_active_d <= 1'b0; w_rdata <= 32'd0; w_berr <= 1'b0;
+		w_ack_pending <= 1'b0; w_rdata <= 32'd0; w_berr <= 1'b0; rmw_open <= 1'b0;
 		wb_pa0 <= 32'd0; wb_pa1 <= 32'd0; wb_la0 <= 32'd0; wb_la1 <= 32'd0; wb_ci0 <= 1'b0; wb_ci1 <= 1'b0;
 		wb_n0 <= 3'd0; wb_n1 <= 3'd0; wb_total <= 3'd0; wb_data <= 32'd0; wb_fc <= 3'd0;
 		wb_rmc <= 1'b0; wb_rmc_last <= 1'b0;
@@ -516,7 +526,8 @@ always @(posedge clk) if (ce) begin
 		// lookup from the idle state consumes the pending one first
 		if (i_stb && !(ilk_act && ilk_first && !i_pend)) begin i_pend <= 1'b1; ip_addr <= i_addr; ip_fc <= i_fc; end
 		else if (ilk_act && ilk_first && i_pend) i_pend <= 1'b0;
-		if (d_rmc_release) b_rmc_release <= 1'b1;
+		if (b_req && b_ack && b_rmc && (b_kind == `BK_DATA)) rmw_open <= 1'b1;
+		if (d_rmc_release || d_fault || ((ds == DS_RMW) && !wb_valid && d_rmc_last)) rmw_open <= 1'b0;
 
 		//------------------------------------------------------------ ownership release
 		// a transfer (including its burst) is over when the controller is idle
@@ -533,8 +544,6 @@ always @(posedge clk) if (ce) begin
 			w_ack <= 1'b1; w_rdata <= b_rdata; w_berr <= b_berr;
 		end
 		if (!w_req) w_ack_pending <= 1'b0;
-		w_active_d <= w_active;
-		if (w_active_d && !w_active) b_rmc_release <= 1'b1;   // search over: RMC negated
 
 		//------------------------------------------------------------ write buffer
 		if (wb_valid && slot_free && !w_req && !walker_busy) begin
@@ -800,7 +809,8 @@ always @(posedge clk) if (ce) begin
 						if (tr_fault) begin
 							i_fault <= 1'b1;  is <= IS_IDLE;
 						end else if (tr_walk) begin
-							if (!walker_busy && !wb_valid) begin
+							// (not inside a read-modify-write operation, UM 7.3.3)
+							if (!walker_busy && !wb_valid && !rmw_open) begin
 								walk_req <= 1'b1; walk_la <= tr_la; walk_fc <= tr_fc; walk_rw <= 1'b1; walk_rmc <= 1'b0;
 								is <= IS_WALK;
 							end else is <= IS_LOOKUP;
@@ -816,8 +826,8 @@ always @(posedge clk) if (ce) begin
 				if (walk_done) is <= IS_LOOKUP;
 			end
 			IS_BUSREQ: begin
-				// lowest priority
-				if (slot_free && !w_req && !walker_busy && !wb_valid && !lk_act && ds != DS_BUSREQ) begin
+				// lowest priority; none inside a read-modify-write operation (UM 7.3.3)
+				if (slot_free && !w_req && !walker_busy && !wb_valid && !lk_act && ds != DS_BUSREQ && !rmw_open) begin
 					b_req <= 1'b1; b_kind <= `BK_DATA;
 					b_addr <= ir_pa; b_nbytes <= 3'd4; b_total <= 3'd4;
 					b_rw <= 1'b1; b_fc <= ir_fc; b_rmc <= 1'b0; b_rmc_last <= 1'b0;
