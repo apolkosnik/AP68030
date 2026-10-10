@@ -106,8 +106,22 @@ mask. Trace T1/T0 follow UM 8.1.7: T1 survives the instruction traps
 (DIVZ, CHK, TRAPcc, TRAP), T0 traces changes of flow.
 
 Posted writes that fail on the bus are reported at the next instruction
-boundary with a format $A frame (UM 8.1.2); a bus error while stacking a
-fault frame halts the processor (UM 7.5.4).
+boundary with a format $A frame (UM 8.1.2), and RTE reruns the write.  A
+bus or address error first waits for the writes posted before it; if one
+of them fails, that fault is taken right after as a bus error of its own,
+its frame on top, so the handler sees the faults and the reruns happen in
+program order.  Only a fault of a bus/address error's own frame write
+halts the processor (double bus fault, UM 7.5.4).
+
+Known difference: a write of the next instruction that was waiting for the
+write buffer goes to the bus once the failed write has left it.  The
+MC68030 instead begins exception processing at once and suspends that
+instruction before its write (a format $B frame, UM 8.1.2 and Table 8-6).
+When both writes fail for the same reason (one page, one address), the
+MC68030 takes one bus error and this core two: a handler that repairs the
+cause is entered a second time, finds nothing to do and its RTE reruns
+the second write; memory ends the same and no write is lost or reordered.
+A handler that counts bus errors sees one more.
 
 ## Memory subsystem (ap030_memsys.v)
 

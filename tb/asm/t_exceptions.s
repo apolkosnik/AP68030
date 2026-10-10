@@ -56,6 +56,8 @@ M_FIXBERR equ	4		; clear the bus error trigger, RTE (rerun)
 M_SWDATA equ	5		; software completion: DIB, clear DF
 M_ADDRFIX equ	6		; address error: PC field += 2 (skip the jump)
 M_FIXPC	equ	7		; set the PC field to fixpc
+M_BERRDROP equ	8		; clear the trigger (rerun); a fault in the bus error
+				; region $FFxxxx is completed in software (DF cleared)
 
 fixpc	equ	$3824		; long
 
@@ -597,6 +599,51 @@ bk1:	bkpt	#2
 	move.l	(W16+$3A20).l,d1	; the rerun completed the write (memory, not the
 	chkl	d1,$DEADBEEF,96		; entry the write allocated)
 
+;---------------------------------------------------------------- two posted writes fault: no double bus fault
+; A posted write faults while the next write is already waiting for the
+; write buffer.  The second write's fault belongs to its instruction, not to
+; the bus error frame being stacked, so it is no double bus fault (UM 7.5.4,
+; 8.1.2).  The second write goes to the bus error region, so it faults on the
+; MC68030 as well: exactly two bus errors, the first write's handled first
+; (program order).  The handler repairs the trigger (RTE reruns that write)
+; and completes the fault in the bus error region in software (DF cleared).
+; KNOWN DEVIATION (not tested here): had the second write gone to the
+; repaired longword, the MC68030 would report one bus error - it begins
+; exception processing immediately after the faulted data cycle (UM 8.1.2),
+; suspending the next instruction before its write reaches the bus (UM
+; Table 8-6: the format $B PC "may not be the instruction that generated the
+; faulted bus cycle").  This core has already handed that write to the bus;
+; it faults too and is reported as a second bus error, in program order.
+	move.w	#M_BERRDROP,mode
+	clr.w	exccnt
+	move.l	#WCI+$3AB0,BERRREG
+	lea	(WCI+$3AB0).l,a0
+	move.l	#$12345678,(a0)
+	move.l	#$9ABCDEF0,($FF0000).l
+	nop
+	nop
+	move.w	exccnt,d1
+	and.l	#$FFFF,d1
+	chkl	d1,2,135
+	move.l	lastfa,d1	; the second write's frame is handled last
+	chkl	d1,$FF0000,136
+	move.w	lastssw,d1
+	and.l	#$01C0,d1	; a data write: DF set, RW clear
+	chkl	d1,$0100,137
+	; the same with both writes in one instruction
+	clr.w	exccnt
+	move.l	#$FEFFFC,BERRREG
+	lea	($FEFFFC).l,a0
+	movem.l	d1-d2,(a0)	; $FEFFFC (trigger), then $FF0000 (bus error region)
+	nop
+	nop
+	move.w	exccnt,d1
+	and.l	#$FFFF,d1
+	chkl	d1,2,138
+	move.l	lastfa,d1
+	chkl	d1,$FF0000,139
+	move.w	#M_FIXBERR,mode
+
 ;---------------------------------------------------------------- bus error on an instruction fetch
 	move.l	#fetchtarget,BERRREG
 	jsr	fetchtarget
@@ -956,6 +1003,12 @@ hb1:
 	move.l	#$CAFEBABE,$2C(a6)	; data input buffer
 	andi.w	#$FEFF,$A(a6)	; DF cleared: the read is not rerun
 hb2:
+	cmp.w	#M_BERRDROP,d6
+	bne.s	hbx
+	move.l	#0,BERRREG
+	cmp.b	#$FF,$11(a6)	; fault address bits 23-16
+	bne.s	hbx
+	andi.w	#$FEFF,$A(a6)	; DF cleared: the write is not rerun
 hbx:
 	movem.l	(sp)+,d6/a6
 	rte
