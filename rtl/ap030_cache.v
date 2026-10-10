@@ -21,6 +21,7 @@ module ap030_cache
 )
 (
 	input             clk,
+	input             ce,        // clock enable: the core advances on enabled rising edges
 	input             rst,       // clears all valid bits (UM 6.2)
 
 	// lookup: combinational hit on the presented address
@@ -78,7 +79,7 @@ reg [7:0] d2 [0:63];
 reg [7:0] d3 [0:63];
 
 wire [5:0] rd_a = lk_la[7:2];
-always @(posedge clk) begin
+always @(posedge clk) if (ce) begin
 	lk_data <= {d0[rd_a], d1[rd_a], d2[rd_a], d3[rd_a]};
 end
 
@@ -97,13 +98,24 @@ wire       wr_kill    = wr_we && !wr_hit && wr_wa && wr_allow_fill && !wr_long; 
 wire [5:0] fi_a = fi_addr[7:2];
 wire [5:0] wr_a = wr_la[7:2];
 
+// a snoop on a clock without ce is applied at once and again at the next
+// enabled clock, after a fill written there that was already under way
+// (another bus master writes at most every third clock: one is enough)
+reg       snp_late = 1'b0;
+reg [7:2] snp_late_la;
+always @(posedge clk)
+	if (rst || ce) snp_late <= 1'b0;
+	else if (snp_we) begin snp_late <= 1'b1; snp_late_la <= snp_la[7:2]; end
+
 integer i;
+// (every clock: a snoop is a single-clock pulse from another bus master and
+// must not be lost between enabled clocks; everything else advances with ce)
 always @(posedge clk) begin
-	if (rst || clr_all) begin
+	if (rst || (ce && clr_all)) begin
 		for (i = 0; i < 16; i = i + 1) valid[i] <= 4'd0;
 	end else begin
-		if (clr_entry) valid[clr_index[7:4]][clr_index[3:2]] <= 1'b0;
-		if (fi_we) begin
+		if (ce && clr_entry) valid[clr_index[7:4]][clr_index[3:2]] <= 1'b0;
+		if (ce && fi_we) begin
 			if ((tag_la[fi_addr[7:4]] == fi_addr[31:8]) && (((tag_fc[fi_addr[7:4]] ^ fi_fc) & fc_mask) == 3'd0)) begin
 				valid[fi_addr[7:4]][fi_addr[3:2]] <= 1'b1;
 			end else begin
@@ -113,7 +125,7 @@ always @(posedge clk) begin
 				valid[fi_addr[7:4]]  <= 4'b0001 << fi_addr[3:2];
 			end
 		end
-		if (wr_alloc) begin
+		if (ce && wr_alloc) begin
 			if (wr_tag_hit) valid[wr_idx][wr_ent] <= 1'b1;
 			else begin
 				tag_la[wr_idx] <= wr_la[31:8];
@@ -121,14 +133,15 @@ always @(posedge clk) begin
 				valid[wr_idx]  <= 4'b0001 << wr_ent;
 			end
 		end
-		if (wr_kill) valid[wr_idx][wr_ent] <= 1'b0;
-		if (inv_we) valid[inv_la[7:4]][inv_la[3:2]] <= 1'b0;
+		if (ce && wr_kill) valid[wr_idx][wr_ent] <= 1'b0;
+		if (ce && inv_we) valid[inv_la[7:4]][inv_la[3:2]] <= 1'b0;
+		if (ce && snp_late) valid[snp_late_la[7:4]][snp_late_la[3:2]] <= 1'b0;
 		if (snp_we) valid[snp_la[7:4]][snp_la[3:2]] <= 1'b0;
 	end
 end
 
 // the data array: fills write whole longwords, updates write byte lanes
-always @(posedge clk) begin
+always @(posedge clk) if (ce) begin
 	if (fi_we) begin
 		d0[fi_a] <= fi_data[31:24];
 		d1[fi_a] <= fi_data[23:16];

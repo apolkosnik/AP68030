@@ -21,10 +21,17 @@ module ap030_top
 	// (a TG68-style busstate, as Minimig's cpu_wrapper) sets this to 0 so
 	// those reads keep the data function code there.
 	parameter PCREL_PROGRAM_SPACE = 1,
-	parameter FAST_PORT = 0
+	parameter FAST_PORT = 0,
+	// USE_CE = 1: the processor clock is clk gated by ce (a clock enable in
+	// the clk domain): the core advances on the rising edges of clk with ce
+	// set and on the falling edge that follows each of them, so ce every
+	// second clk runs it at half the clk rate, every fourth at a quarter.
+	// USE_CE = 0: ce is not used (every edge, as before).
+	parameter USE_CE = 0
 )
 (
 	input             clk,
+	input             ce,
 
 	// bus
 	output     [31:0] a,
@@ -109,11 +116,16 @@ module ap030_top
 // processor ignores it, and an external assertion must outlast that by
 // eight clocks to reset the processor (UM 7.8)
 //---------------------------------------------------------------------------
+// the clock enables: rising edges with ce, the falling edge after each of them
+wire       ce_r = (USE_CE != 0) ? ce : 1'b1;
+reg        ce_f = 1'b1;
+always @(posedge clk) ce_f <= ce_r;
+
 reg  [1:0] rst_sync;
 reg  [3:0] rst_cnt;
 reg        rst;
 wire       reset_drive;
-always @(posedge clk) begin
+always @(posedge clk) if (ce_r) begin
 	rst_sync <= {rst_sync[0], ~reset_n_i};
 	if (reset_drive) begin rst_cnt <= 4'd0; end
 	else if (rst_sync[1]) begin if (rst_cnt != 4'd15) rst_cnt <= rst_cnt + 4'd1; end
@@ -125,7 +137,7 @@ assign reset_n_oe = reset_drive;
 
 // synchronized emulator inputs
 reg cdis_s, mmudis_s;
-always @(posedge clk) begin cdis_s <= ~cdis_n; mmudis_s <= ~mmudis_n; end
+always @(posedge clk) if (ce_r) begin cdis_s <= ~cdis_n; mmudis_s <= ~mmudis_n; end
 
 //---------------------------------------------------------------------------
 // core <-> memory subsystem
@@ -155,7 +167,7 @@ wire  [7:2] caar_idx;
 wire        halted;
 
 ap030_core #(.PCREL_PROGRAM_SPACE(PCREL_PROGRAM_SPACE)) core (
-	.clk(clk), .rst(rst),
+	.clk(clk), .ce(ce_r), .ce_f(ce_f), .rst(rst),
 	.d_stb(d_stb), .d_addr(d_addr), .d_size(d_size), .d_rw(d_rw), .d_rmc(d_rmc), .d_rmc_last(d_rmc_last),
 	.d_rmc_release(d_rmc_release), .d_iack(d_iack), .d_nocache(d_nocache), .d_fc(d_fc), .d_wdata(d_wdata),
 	.d_ack(d_ack), .d_rdata(d_rdata), .d_fault(d_fault), .d_avec(d_avec), .d_iack_berr(d_iack_berr),
@@ -177,7 +189,7 @@ ap030_core #(.PCREL_PROGRAM_SPACE(PCREL_PROGRAM_SPACE)) core (
 );
 
 ap030_memsys #(.FAST_PORT(FAST_PORT)) memsys (
-	.clk(clk), .rst(rst),
+	.clk(clk), .ce(ce_r), .ce_f(ce_f), .rst(rst),
 	.cacr(cacr), .cacr_ci(cacr_ci), .cacr_cei(cacr_cei), .cacr_cd(cacr_cd), .cacr_ced(cacr_ced),
 	.caar_idx(caar_idx), .cdis(cdis_s), .mmudis(mmudis_s), .halted(halted),
 	.d_stb(d_stb), .d_addr(d_addr), .d_size(d_size), .d_rw(d_rw), .d_rmc(d_rmc), .d_rmc_last(d_rmc_last),

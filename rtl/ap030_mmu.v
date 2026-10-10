@@ -24,6 +24,7 @@
 module ap030_mmu
 (
 	input             clk,
+	input             ce,          // clock enable: the core advances on enabled rising edges
 	input             rst,
 
 	// ---- translation port ---------------------------------------------
@@ -329,7 +330,7 @@ end
 
 integer ai;
 reg [N-1:0] tr_m_q;
-always @(posedge clk) begin
+always @(posedge clk) if (ce) begin
 	if (rst) begin
 		tr_m_q <= {N{1'b0}};
 		for (ai = 0; ai < N; ai = ai + 1) begin
@@ -399,7 +400,7 @@ wire tc_bad = reg_wdata_lo[31] && ((c_sum != 7'd32) || !reg_wdata_lo[23]);   // 
 reg        mmusr_we;
 reg [15:0] mmusr_new;
 reg flush_req;
-always @(posedge clk) begin
+always @(posedge clk) if (ce) begin
 	cfg_err <= 1'b0;
 	flush_req <= 1'b0;
 	if (rst) begin
@@ -444,7 +445,7 @@ wire [31:0] root_lo = (s_fc[2] && tc_sre) ? srp_lo : crp_lo;
 wire [31:0] pa_sum = {d_addr[31:8] & pa_field_mask, 8'd0} + (s_la & low_mask(s_bitpos));
 wire [31:0] root_pa_sum = ({s_tbl, 4'd0} & {pmask, 8'd0}) + (s_la & low_mask(s_bitpos));
 
-always @(posedge clk) begin
+always @(posedge clk) if (ce) begin
 	walk_done <= 1'b0;
 	op_done   <= 1'b0;
 	atc_wr    <= 1'b0;

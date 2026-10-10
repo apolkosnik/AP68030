@@ -46,6 +46,33 @@ module tb_ap030_program #(parameter FAST_PORT = 0);
 reg clk = 0;
 always #10 clk = ~clk;
 reg reset_n = 0;
+// the processor clock enable (ap030_top USE_CE): every clock by default,
+// every Nth clock with +ce=N, a random pattern with +ce_rand (on about half
+// the clocks, never more than four clocks off in a row)
+reg cpu_ce = 1'b1;
+integer ce_div = 1, ce_cnt = 0, ce_off = 0;
+reg ce_rand = 1'b0;
+initial begin
+	if (!$value$plusargs("ce=%d", ce_div)) ce_div = 1;
+	ce_rand = $test$plusargs("ce_rand");
+end
+always @(posedge clk) begin
+	if (ce_rand) begin
+		cpu_ce <= ($random & 1) || ce_off >= 4;
+		ce_off <= (($random & 1) || ce_off >= 4) ? 0 : ce_off + 1;
+	end else if (ce_div > 1) begin
+		ce_cnt <= (ce_cnt == ce_div - 1) ? 0 : ce_cnt + 1;
+		cpu_ce <= (ce_cnt == ce_div - 1);
+	end
+end
+// the system around the processor is clocked by the processor clock: its
+// synchronous parts (STERM port, native port, wait-state and clock counters,
+// interrupt delay) advance on the clocks the processor sees -- cpu_ce at
+// rising edges, cpu_ce_f (cpu_ce of the preceding rising edge) at falling
+// edges -- so a run with the enable takes the same number of processor
+// clocks as one without
+reg cpu_ce_f = 1'b1;
+always @(posedge clk) cpu_ce_f <= cpu_ce;
 
 wire [31:0] a, d_o;
 wire  [2:0] fc;
@@ -53,7 +80,7 @@ wire  [1:0] siz;
 wire        rw, rmc_n, as_n, ds_n, dben_n, ecs_n, ocs_n, ciout_n, cbreq_n, bus_oe, d_oe, bg_n, ipend_n;
 wire        reset_n_oe, refill_n, status_n, dbg_halted, dbg_inst;
 integer     insts = 0;
-always @(posedge clk) if (dbg_inst) insts = insts + 1;
+always @(posedge clk) if (cpu_ce && dbg_inst) insts = insts + 1;
 wire [31:0] dbg_pc;
 wire [15:0] dbg_sr;
 wire  [7:0] dbg_state;
@@ -70,8 +97,8 @@ reg n_valid = 0, n_last = 0;
 reg [1:0] n_word = 0;
 reg [31:0] n_rdata = 0;
 wire n_take = n_req && n_ready;
-ap030_top #(.FAST_PORT(FAST_PORT)) dut (
-	.clk(clk),
+ap030_top #(.FAST_PORT(FAST_PORT), .USE_CE(1)) dut (
+	.clk(clk), .ce(cpu_ce),
     .fast_req(n_req), .fast_ready(n_ready), .fast_match(n_match),
     .fast_addr(n_addr), .fast_fc(n_fc), .fast_rw(n_rw), .fast_ci(n_ci),
     .fast_burst(n_burst), .fast_be(n_be), .fast_wdata(n_wdata),
@@ -95,7 +122,7 @@ reg [7:0] mem [0:(1<<20)-1];
 integer wait_states = 0;
 integer errors = 0;
 integer clocks = 0;
-always @(posedge clk) clocks = clocks + 1;
+always @(posedge clk) if (cpu_ce) clocks = clocks + 1;      // processor clocks
 
 wire as_asserted = ~as_n & bus_oe;
 wire ds_asserted = ~ds_n & bus_oe;
@@ -112,7 +139,7 @@ wire is_async   = !is_sync;
 wire [19:0] ma  = a[19:0];
 
 integer as_cnt = 0;
-always @(posedge clk) as_cnt <= as_asserted ? as_cnt + 1 : 0;
+always @(posedge clk) if (!as_asserted) as_cnt <= 0; else if (cpu_ce) as_cnt <= as_cnt + 1;
 
 // test registers
 reg  [2:0] irq_level = 0;
@@ -126,7 +153,7 @@ integer    bus_cycles = 0;      // bus cycles (AS assertions)
 reg        as_was = 0;
 always @(posedge clk) begin
 	as_was <= as_asserted;
-	if ((as_was && !as_asserted) || n_take) begin
+	if ((as_was && !as_asserted) || (cpu_ce && n_take)) begin
 		bus_cycles <= bus_cycles + 1;
 		if (n_take ? n_ci : ciout_seen) ciout_cycles <= ciout_cycles + 1;
 	end
@@ -138,7 +165,7 @@ integer    reset_cnt = 0;
 reg        berr_hit;
 always @* berr_hit = (berr_addr != 0) && as_asserted && ({a[31:2], 2'b00} == {berr_addr[31:2], 2'b00}) && (fc != 3'd7);
 always @* ipl_n = ~irq_level;
-always @(posedge clk) begin
+always @(posedge clk) if (cpu_ce) begin
 	if (irq_delay != 0) begin
 		irq_delay <= irq_delay - 1;
 		if (irq_delay == 1) irq_level <= irq_delay_level;
@@ -160,7 +187,7 @@ integer ni, nb;
 assign n_match = n_addr[23:20] == 0 && n_fc != 7 &&
                  !(berr_addr != 0 && n_addr[31:2] == berr_addr[31:2]);
 assign n_ready = reset_n && !n_pending;
-always @(posedge clk) begin
+always @(posedge clk) if (cpu_ce) begin
  n_valid <= 0;
  if (!reset_n) begin n_pending <= 0; n_left <= 0; end
  else begin
@@ -212,11 +239,11 @@ always @* begin
 		cback_n = 0;
 	end
 end
-always @(posedge clk) sterm_rec <= ~sterm_n & as_asserted & rw & (~cbreq_n | burst_active);
+always @(posedge clk) if (cpu_ce) sterm_rec <= ~sterm_n & as_asserted & rw & (~cbreq_n | burst_active);
 reg burst_active = 0;
 always @(negedge clk) begin
 	if (!as_asserted) begin beat_idx <= a[3:2]; burst_active <= 0; end
-	else if (sterm_rec) begin burst_active <= 1; beat_idx <= beat_idx + 1; end
+	else if (cpu_ce_f && sterm_rec) begin burst_active <= 1; beat_idx <= beat_idx + 1; end
 end
 
 // asynchronous ports
@@ -423,13 +450,13 @@ endtask
 // several clocks; the coprocessor model's operand list must not repeat)
 reg wr_seen = 0;
 always @(posedge clk) begin
-	if (is_async && as_asserted && ds_asserted && !rw && d_oe && !wr_seen) begin capture_write; wr_seen <= 1; end
+	if (cpu_ce && is_async && as_asserted && ds_asserted && !rw && d_oe && !wr_seen) begin capture_write; wr_seen <= 1; end
 	if (!as_asserted) wr_seen <= 0;
 end
 `include "tb_cp_model.svh"
-always @(posedge clk) if ($test$plusargs("bustrace") && as_asserted && rw && (!sterm_n || !dsack0_n || !dsack1_n))
+always @(posedge clk) if (cpu_ce && $test$plusargs("bustrace") && as_asserted && rw && (!sterm_n || !dsack0_n || !dsack1_n))
 	$display("%8d RD a=%08x fc=%0d siz=%b d=%08x burst=%0d", clocks, a, fc, siz, rdata, burst_active);
-always @(negedge clk) if (is_sync && as_asserted && !sterm_n && !rw && d_oe) capture_write;
+always @(negedge clk) if (cpu_ce_f && is_sync && as_asserted && !sterm_n && !rw && d_oe) capture_write;
 
 //---------------------------------------------------------------------------
 // run
@@ -443,7 +470,9 @@ initial begin
 	end
 	$readmemh(progfile, mem);
 	if ($value$plusargs("waits=%d", w)) wait_states = w;
-	repeat (20) @(posedge clk);
+	// 20 processor clocks of reset (cpu_ce here is the value of this edge)
+	i = 0;
+	while (i < 20) begin @(posedge clk); if (cpu_ce) i = i + 1; end
 	reset_n = 1;
 	while (!done && !dbg_halted) @(posedge clk);
 	repeat (10) @(posedge clk);

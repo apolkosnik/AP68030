@@ -21,6 +21,7 @@
 module ap030_alu
 (
 	input             clk,
+	input             ce,          // clock enable: the core advances on enabled rising edges
 	input       [5:0] op,
 	input       [1:0] size,
 	input       [5:0] shcnt,
@@ -103,7 +104,7 @@ reg [31:0] sq_b;
 reg  [5:0] sq_op, sq_cnt;
 reg  [1:0] sq_size;
 reg        sq_x;
-always @(posedge clk) begin
+always @(posedge clk) if (ce) begin
 	sq_b <= b; sq_op <= op; sq_cnt <= shcnt; sq_size <= size; sq_x <= f_x;
 end
 wire [5:0]  sq_nbits  = (sq_size == `SZ_B) ? 6'd8 : (sq_size == `SZ_W) ? 6'd16 : 6'd32;

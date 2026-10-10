@@ -27,6 +27,8 @@ module ap030_memsys
 #(parameter FAST_PORT = 0)
 (
 	input             clk,
+	input             ce,          // clock enable: the core advances on enabled rising edges
+	input             ce_f,        // ... and on the falling edge after an enabled rising edge
 	input             rst,
 
 	// ---- control from the core ------------------------------------------
@@ -157,7 +159,7 @@ reg  [31:0] w_rdata;
 reg         w_berr;
 
 ap030_mmu mmu (
-	.clk(clk), .rst(rst),
+	.clk(clk), .ce(ce), .rst(rst),
 	.tr_la(tr_la), .tr_fc(tr_fc), .tr_rw(tr_rw), .tr_rmc(tr_rmc), .mmudis(mmudis),
 	.tr_ok(tr_ok), .tr_fault(tr_fault), .tr_walk(tr_walk), .tr_pa(tr_pa), .tr_ci(tr_ci), .tr_use(tr_use),
 	.walk_req(walk_req), .walk_la(walk_la), .walk_fc(walk_fc), .walk_rw(walk_rw), .walk_rmc(walk_rmc),
@@ -189,7 +191,7 @@ reg   [2:0] ic_fi_fc;
 reg  [31:0] ic_fi_data;
 
 ap030_cache #(.FC_BITS(1)) icache (
-	.clk(clk), .rst(rst),
+	.clk(clk), .ce(ce), .rst(rst),
 	.lk_la(ic_lk_la), .lk_fc(ic_lk_fc), .lk_tag_hit(ic_tag_hit), .lk_hit(ic_hit),
 	.lk_line_empty(ic_line_empty), .lk_data(ic_data),
 	.fi_we(ic_fi_we), .fi_addr(ic_fi_addr), .fi_fc(ic_fi_fc), .fi_data(ic_fi_data),
@@ -216,7 +218,7 @@ reg         dc_inv_we;
 reg  [31:0] dc_inv_la;
 
 ap030_cache #(.FC_BITS(3)) dcache (
-	.clk(clk), .rst(rst),
+	.clk(clk), .ce(ce), .rst(rst),
 	.lk_la(dc_lk_la), .lk_fc(dc_lk_fc), .lk_tag_hit(dc_tag_hit), .lk_hit(dc_hit),
 	.lk_line_empty(dc_line_empty), .lk_data(dc_data),
 	.fi_we(dc_fi_we), .fi_addr(dc_fi_addr), .fi_fc(dc_fi_fc), .fi_data(dc_fi_data),
@@ -261,7 +263,7 @@ assign fast_be = be_of(b_addr[1:0], b_nbytes);
 assign fast_wdata = (b_wdata << (8 * (3'd4 - b_total))) >> (8 * b_addr[1:0]);
 wire native_take = fast_req && fast_ready;
 wire native_response = native_active && fast_valid;
-always @(posedge clk) begin
+always @(posedge clk) if (ce) begin
 	if (rst) begin native_active <= 1'b0; native_first <= 1'b0; end
 	else begin
 		if (native_take) begin native_active <= 1'b1; native_first <= 1'b1; end
@@ -284,7 +286,7 @@ assign b_fill_addr = native_active ? {b_addr[31:4], fast_word} : pin_fill_addr;
 assign b_fill_data = native_active ? fast_rdata : pin_fill_data;
 
 ap030_bus bus (
-	.clk(clk), .rst(rst),
+	.clk(clk), .ce(ce), .ce_f(ce_f), .rst(rst),
 	.req(b_req && !native_sel && !native_active), .req_kind(b_kind), .req_addr(b_addr), .req_nbytes(b_nbytes), .req_total(b_total),
 	.req_rw(b_rw), .req_fc(b_fc), .req_rmc(b_rmc), .req_rmc_last(b_rmc_last), .req_ciout(b_ciout),
 	.req_cbreq(b_cbreq), .req_ocs(b_ocs), .req_cache(b_cache), .req_wdata(b_wdata),
@@ -476,7 +478,7 @@ reg [31:0] r_pa_hold;
 reg        r_ci_hold, r_tag_hit, r_line_empty;
 reg w_ack_pending, w_active_d;
 
-always @(posedge clk) begin
+always @(posedge clk) if (ce) begin
 	// pulses
 	d_ack_r <= 1'b0; d_fault <= 1'b0; d_avec <= 1'b0; d_iack_berr <= 1'b0; d_late_fault <= 1'b0;
 	i_ack_r <= 1'b0; i_fault <= 1'b0;

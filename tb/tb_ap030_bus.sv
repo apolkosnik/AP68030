@@ -48,7 +48,7 @@ reg         dsack0_n = 1, dsack1_n = 1, sterm_n = 1, berr_n = 1, halt_n = 1, ave
 reg         ciin_n = 1, cback_n = 1, br_n = 1, bgack_n = 1;
 
 ap030_bus dut (
-	.clk(clk), .rst(rst),
+	.clk(clk), .ce(1'b1), .ce_f(1'b1), .rst(rst),
 	.req(req), .req_kind(req_kind), .req_addr(req_addr), .req_nbytes(req_nbytes),
 	.req_total(req_total), .req_rw(req_rw), .req_fc(req_fc), .req_rmc(req_rmc),
 	.req_rmc_last(req_rmc_last), .req_ciout(req_ciout), .req_cbreq(req_cbreq), .req_ocs(req_ocs),
