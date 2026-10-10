@@ -45,7 +45,10 @@ unmapped one is harmless.
 **Decoder.** `ap030_decode.vh` decodes `dw` (stage C at dispatch, else the
 latched `ir`) into the first sequencer state, operand size, ALU operation,
 source/destination kinds (register, immediate, EA, quick) and whether the
-second word belongs to the operation (`dc_needs_ext`). At an instruction
+second word belongs to the operation (`dc_needs_ext`); an instruction that
+takes an exception at its dispatch (illegal, A-line, F-line, privilege
+violation) needs only its operation word, so it neither waits for the next
+word nor takes the bus error of its prefetch (UM 8.1.2, 8.1.5). At an instruction
 boundary the dispatcher pops one or two words, latches the decoded controls
 into `g_*` registers and jumps to the immediate, EA or execute state.
 Simple register instructions dispatch out of `S_GEN_EXEC`, overlapping the

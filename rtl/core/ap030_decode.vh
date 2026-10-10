@@ -513,13 +513,20 @@ always @* begin
 	endcase
 end
 
+// an instruction that takes an exception at its dispatch (illegal, A-line,
+// F-line, privilege violation) is identified from its operation word alone
+// (UM 8.1.5, 8.1.6): it neither waits for its second word nor takes the
+// bus error of a faulted prefetch of it, which only an instruction that
+// uses the word takes (UM 8.1.2)
+wire dc_trap = dc_illegal || (dc_priv && !sr_s);
 // instructions whose second word is part of the operation (popped with the opcode)
-wire dc_needs_ext = (dc_first == S_MULDIV0 && dw[15:12] == 4'h4) || (dc_first == S_CHK2_0) ||
+wire dc_needs_ext = !dc_trap && (
+                    (dc_first == S_MULDIV0 && dw[15:12] == 4'h4) || (dc_first == S_CHK2_0) ||
                     (dc_first == S_CAS0) || (dc_first == S_CAS2_0) || (dc_first == S_BF0) ||
                     (dc_first == S_MOVES0) || (dc_first == S_MOVEC) || (dc_first == S_PMMU0) ||
                     (dc_first == S_CP0) || (dc_first == S_CPSCC) || (dc_first == S_CPDBCC) || (dc_first == S_CPTRAP) ||
                     (dc_first == S_MOVEP0) || (dc_first == S_MOVEM0) || (dc_first == S_LINK) || (dc_first == S_RTD) || (dc_first == S_STOP) ||
-                    (dc_first == S_DBCC) || (dc_first == S_PACK && (dw[8:6] == 3'b101 || dw[8:6] == 3'b110) && dw[15:12] == 4'h8);
+                    (dc_first == S_DBCC) || (dc_first == S_PACK && (dw[8:6] == 3'b101 || dw[8:6] == 3'b110) && dw[15:12] == 4'h8));
 // instructions that evaluate their memory EA (no operand read) before their first state
 wire dc_eaonly = ea_mem && ((dc_first == S_LEA) || (dc_first == S_PEA) || (dc_first == S_JMP) || (dc_first == S_JSR) ||
                             (dc_first == S_TAS) || (dc_first == S_SCC) || (dc_first == S_MOVE_FSR) || (dc_first == S_CAS0) ||
