@@ -70,6 +70,7 @@ check.
 | `t_mmu`        | MMU registers and configuration exceptions, two- and three-level trees, short and long descriptors, early termination, indirect descriptors, limits, U/M history updates, WP/supervisor faults with RTE rerun, page-crossing operands, instruction fetch faults, harmless prefetches into unmapped pages, PTEST (all levels, An result), PLOAD, PFLUSH variants, PMOVEFD, FCL, SRE, TT0 (FC, R/W, CI), MMUDIS, ATC replacement, cache inhibit |
 | `t_cp`         | the coprocessor protocol: every response primitive, cpGEN with all EA forms, cpBcc/cpDBcc/cpScc/cpTRAPcc, cpSAVE/cpRESTORE, busy, exceptions requested by the coprocessor |
 | `t_dblfault`   | a bus error while stacking a bus error frame halts the processor |
+| `t_lazy`       | `fetch_lazy` with the pipeline-model inputs set by the program (run with `+lazy` only): wrong stops and a stalled scan must not hang the processor, a correct stop on an RTS must hold |
 
 ## Timing and performance
 
@@ -248,11 +249,14 @@ address) and `tm_flush` (the queue was flushed or reloaded).  The model
 answers with `fetch_stop_v`/`fetch_stop` (no longword is fetched once the
 next word to take is at `fetch_stop - 2` or beyond) and
 `fetch_scan_v`/`fetch_scan_to` (fetch decisions wait until the model has
-scanned two words past the consumption that made the fetch due).  With
-`fetch_lazy` at 0 the model inputs are ignored and the processor fetches as
-before; `tb/run_tests.sh` runs every program once more with `+lazy`.  The
-Falcon030 core's model is `falcon_pipescan` (Hatari's opcode table in block
-RAM).
+scanned two words past the consumption that made the fetch due).  Should the
+processor wait 63 clocks for an instruction word that is neither queued nor
+on the way, it ignores the stop and the scan wait, so wrong model inputs
+cannot hang it.  With `fetch_lazy` at 0 the model inputs are ignored and the
+processor fetches as before; `tb/run_tests.sh` runs every program once more
+with `+lazy`, and `t_lazy` with model inputs set by the program (wrong ones,
+and a correct stop that must hold).  The Falcon030 core's model is
+`falcon_pipescan` (Hatari's opcode table in block RAM).
 
 ## Licence
 

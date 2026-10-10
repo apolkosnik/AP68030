@@ -198,7 +198,7 @@ reg [15:0] pq [0:5];
 reg  [5:0] pq_v, pq_f;
 reg  [2:0] pq_n;
 reg [31:0] scan_pc;        // address of pq[0] (stage C)
-reg  [5:0] stop_wait;      // clocks with the queue empty under the pipeline model's stop
+reg  [5:0] stop_wait;      // fetch_lazy: clocks the sequencer has been starved of instruction words
 reg        due_v;          // the next longword's fetch is due ...
 reg [31:0] due_scan;       // ... since the consumption reached this word
 wire       stop_starve = (stop_wait == 6'd63);
@@ -352,6 +352,16 @@ reg        cpu_flt_ill;    // a bus error on this CPU-space cycle is an illegal 
 reg        cpu_flt_fline;  // ... is an F-line exception (first coprocessor access)
 reg        iack_pc_i;      // interrupt frame carries the instruction address (Busy primitive)
 reg        iack_cpmid;     // interrupt frame is a coprocessor mid-instruction frame (null, CA, IA)
+
+// The sequencer is in a state that takes words from the instruction queue
+// (the instruction boundary, immediates, extension words, branch
+// displacements, coprocessor operand words).  These states only stay put
+// while a word they need is not queued; with fewer than two words queued
+// and none on the way, the sequencer is starved (the fetch_lazy guard).
+wire pipe_consumer = (state == S_FETCH && !stopped) || state == S_IMM || state == S_EA || state == S_EA_FULL ||
+                     state == S_EA_IND || state == S_BCC || state == S_TRAPCC || state == S_LINK || state == S_CAS2_0 ||
+                     state == S_CPBCC2 || state == S_CPDBCC2 || state == S_CPTRAP2 || state == S_CP_ISTREAM ||
+                     state == S_CPXEA;
 
 // interrupt processing in progress (masks IPEND)
 wire exc_is_irq_active = (state == S_EXC0 || state == S_EXC1 || state == S_EXC2 || state == S_EXC3 || state == S_IACK) && exc_is_irq;
@@ -765,11 +775,15 @@ always @(posedge clk) if (ce) begin
 				fetch_disc <= disc_after;
 				// another longword when the queue has room for everything in flight
 				// and the memory system can take it (two fetches at most); with
-				// fetch_lazy only when two words or fewer are left, and not past the
+				// fetch_lazy only when two words or fewer are left, not past the
 				// pipeline model's stop point (a stop is on a branch whose words are
-				// queued and which flushes the queue; should the queue stay empty
-				// for 63 clocks, the stop is ignored rather than stall)
-				if (fetch_lazy && fetch_stop_v && (nn + {live, 1'b0} == 3'd0)) begin
+				// queued and which flushes the queue) and not before the model has
+				// scanned.  Should the sequencer wait 63 clocks for a word that is
+				// neither queued nor on the way, the stop and the scan wait are
+				// ignored, so no model input can hang the processor; a stop that
+				// holds while the sequencer has its words (a long instruction
+				// before the branch) is kept
+				if (fetch_lazy && pipe_consumer && (pop_n == 2'd0) && (nn + {live, 1'b0} < 3'd2)) begin
 					if (!stop_starve) stop_wait <= stop_wait + 6'd1;
 				end else stop_wait <= 6'd0;
 				// the model decides at the consumption where this fetch became

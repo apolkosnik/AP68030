@@ -110,9 +110,11 @@ module ap030_top
 	// take, at the consumption that made the fetch due, is at fetch_stop - 2
 	// or beyond; fetch_scan_v/fetch_scan_to (the first word not yet
 	// scanned): while the model scans, a fetch waits until it has scanned
-	// the words below that word + 4 (or below the longword it wants).  A
-	// fetch the stop holds back for 63 clocks with nothing queued or on the
-	// way goes ahead anyway, so a wrong stop cannot hang the processor.
+	// the words below that word + 4 (or below the longword it wants).  When
+	// the processor has waited 63 clocks for an instruction word that is
+	// neither queued nor on the way, the stop and the scan wait are ignored,
+	// so wrong model inputs cannot hang it (a stop holding while the
+	// processor still has the words it needs is not affected).
 	output     [95:0] tm_q,
 	output      [2:0] tm_qn,
 	output     [31:0] tm_scan,

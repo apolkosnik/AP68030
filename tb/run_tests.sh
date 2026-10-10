@@ -15,9 +15,10 @@ SRC="$RTL/ap030_top.v $RTL/ap030_core.v $RTL/ap030_memsys.v $RTL/ap030_mmu.v $RT
 
 PROGS="t_integer t_exceptions t_bus t_cache t_mmu t_cp"
 HALTPROGS="t_dblfault"
+LAZYPROGS="t_lazy"     # run with +lazy only: they drive the pipeline-model inputs
 
 echo "== assembling test programs =="
-for t in $PROGS $HALTPROGS; do
+for t in $PROGS $HALTPROGS $LAZYPROGS; do
 	[ -f "asm/$t.s" ] || continue
 	$VASM -Fbin -m68030 -m68851 -no-opt -o "$WORK/$t.bin" "asm/$t.s" >/dev/null
 	python3 bin2hex.py "$WORK/$t.bin" "$WORK/$t.hex"
@@ -95,6 +96,14 @@ for t in $PROGS; do
 	same_clocks "${t}_cerand" "$t"
 	# Hatari-style instruction prefetch (fetch_lazy), at half rate with wait states
 	run "${t}_lazy" "$WORK/obj_prog/tb_prog" "+prog=$WORK/$t.hex" +lazy +ce=2 +waits=2
+done
+for t in $LAZYPROGS; do
+	[ -f "$WORK/$t.hex" ] || continue
+	# a hang (the guard against wrong model inputs failing) ends at maxclk
+	run "$t" "$WORK/obj_prog/tb_prog" "+prog=$WORK/$t.hex" +lazy +maxclk=400000
+	run "${t}_ce2_waits" "$WORK/obj_prog/tb_prog" "+prog=$WORK/$t.hex" +lazy +ce=2 +waits=2 +maxclk=800000
+	run "${t}_cerand" "$WORK/obj_prog/tb_prog" "+prog=$WORK/$t.hex" +lazy +ce_rand +maxclk=1600000
+	same_clocks "${t}_cerand" "$t"
 done
 for t in $CPROGS; do
 	run "$t" "$WORK/obj_prog/tb_prog" "+prog=$WORK/$t.hex" +maxclk=20000000
