@@ -11,8 +11,9 @@
 // Writes update the cache first (write-through, UM 6.1.2) and are posted   //
 // to a one-deep write buffer (the "write pending buffer" of UM Figure 6-1)  //
 // so execution continues; a bus error on a posted write is reported as a    //
-// late fault.  Read-modify-write accesses bypass the cache read, assert     //
-// RMC from the first read to the last write and are never posted.          //
+// late fault, and no later data access starts until the core has taken it. //
+// Read-modify-write accesses bypass the cache read, assert RMC from the    //
+// first read to the last write and are never posted.                       //
 //                                                                          //
 // The instruction port fetches aligned longwords through the instruction   //
 // cache with the same MMU.  Table searches use the bus with RMC asserted.  //
@@ -64,6 +65,12 @@ module ap030_memsys
 	output reg        d_iack_berr,  // pulse: IACK bus error (spurious interrupt)
 	output reg        d_late_fault, // pulse: a posted write faulted (details in f_*)
 	output            d_wpend,      // a posted write is outstanding
+	// after a posted write fault no later data access reaches the bus until
+	// the core either suspends the instruction (d_cancel: the waiting access
+	// is dropped, the core reissues it after RTE) or lets it go (d_unhold)
+	output            d_held,       // an access waits behind a posted write fault
+	input             d_cancel,     // pulse: drop the waiting access, release
+	input             d_unhold,     // pulse: release, the waiting access proceeds
 	// fault record (valid with d_fault / d_late_fault)
 	output reg [31:0] f_addr,
 	output reg  [2:0] f_fc,
@@ -360,6 +367,7 @@ reg        wb_rmc, wb_rmc_last;
 reg        wb_two;
 reg        wb_posted;
 reg        wb_err_seen;
+reg        dh_hold;      // a posted write failed: data accesses wait (UM 8.1.2)
 
 wire [2:0] d_bytes  = (d_size == `SZ_B) ? 3'd1 : (d_size == `SZ_W) ? 3'd2 : (d_size == `SZ_3) ? 3'd3 : 3'd4;
 wire [2:0] d_to_end = 3'd4 - {1'b0, d_addr[1:0]};
@@ -390,7 +398,7 @@ wire        bus_free_now = !b_busy && !b_req && !w_req && !walker_busy;
 wire        wr_stall = (ds == DS_IDLE) && d_go && !d_rw && !wb_free;
 // the portion being looked up this clock
 wire        lk_first = (ds == DS_IDLE);
-wire        lk_act   = (((ds == DS_IDLE) && d_go) || (ds == DS_LOOKUP)) && !dburst_busy && !wr_stall;
+wire        lk_act   = (((ds == DS_IDLE) && d_go) || (ds == DS_LOOKUP)) && !dburst_busy && !wr_stall && !dh_hold;
 wire [31:0] c_addr   = lk_first ? d_addr  : r_addr;
 wire  [2:0] c_rem    = lk_first ? d_bytes : r_rem;
 wire  [2:0] c_pn     = lk_first ? d_p1    : r_pn;
@@ -483,6 +491,8 @@ always @* begin
 end
 
 assign d_wpend   = wb_valid;
+assign d_held    = dh_hold && (((ds == DS_IDLE) && d_go) || (ds == DS_LOOKUP) || (ds == DS_BUSREQ) ||
+                               (ds == DS_WBWAIT) || (ds == DS_FLTWAIT));
 assign bus_quiet = !wb_valid && b_idle && !walker_busy;
 
 // a read cache hit needs no translation unless the ATC entry says the page
@@ -505,6 +515,7 @@ always @(posedge clk) if (ce) begin
 	if (rst) begin
 		ds <= DS_IDLE; is <= IS_IDLE; owner <= OWN_NONE; own_ifetch <= 1'b0;
 		wb_valid <= 1'b0; wb_posted <= 1'b0; wb_err_seen <= 1'b0; wb_stage <= 1'b0; wb_two <= 1'b0;
+		dh_hold <= 1'b0;
 		b_req <= 1'b0; b_kind <= 2'd0; b_addr <= 32'd0; b_nbytes <= 3'd0; b_total <= 3'd0; b_rw <= 1'b1;
 		b_fc <= 3'd0; b_rmc <= 1'b0; b_rmc_last <= 1'b0; b_ciout <= 1'b0; b_cbreq <= 1'b0; b_ocs <= 1'b0;
 		b_cache <= 1'b0; b_wdata <= 32'd0;
@@ -528,7 +539,7 @@ always @(posedge clk) if (ce) begin
 			b_req <= 1'b0;
 			if (owner == OWN_DU && !own_ifetch && b_rw) d_fill_line <= r_addr[31:4];
 		end
-		d_pend <= (ds == DS_IDLE) && d_go && (dburst_busy || wr_stall);
+		d_pend <= (ds == DS_IDLE) && d_go && (dburst_busy || wr_stall || dh_hold);
 		// a fetch that cannot be looked up now waits in the pending slot; a
 		// lookup from the idle state consumes the pending one first
 		if (i_stb && !(ilk_act && ilk_first && !i_pend)) begin i_pend <= 1'b1; ip_addr <= i_addr; ip_fc <= i_fc; end
@@ -575,7 +586,10 @@ always @(posedge clk) if (ce) begin
 				f_rm   <= wb_rmc;
 				f_dob  <= wb_stage ? (wb_data & (32'hFFFF_FFFF >> (8 * (3'd4 - wb_n1)))) : wb_data;
 				f_got  <= 3'd0; f_partial <= 32'd0;
-				if (wb_posted) d_late_fault <= 1'b1;
+				// a posted write: the instruction in execution may already
+				// wait with its next access, which must not reach the bus
+				// before the fault is taken (UM 8.1.2, Table 8-6)
+				if (wb_posted) begin d_late_fault <= 1'b1; dh_hold <= 1'b1; end
 				wb_err_seen <= !wb_posted;
 				wb_valid <= 1'b0;
 			end else if (!wb_stage && wb_two) begin
@@ -717,7 +731,7 @@ always @(posedge clk) if (ce) begin
 			end
 
 			DS_BUSREQ: begin
-				if (slot_free && !w_req && !walker_busy && !wb_valid) begin
+				if (slot_free && !w_req && !walker_busy && !wb_valid && !dh_hold) begin
 					b_req <= 1'b1; b_kind <= d_iack ? `BK_IACK : `BK_DATA;
 					b_addr <= d_iack ? r_addr : r_pa_hold; b_nbytes <= r_pn; b_total <= r_rem;
 					b_rw <= 1'b1; b_fc <= d_fc; b_rmc <= d_rmc && !d_iack; b_rmc_last <= 1'b0;
@@ -768,7 +782,7 @@ always @(posedge clk) if (ce) begin
 			end
 
 			DS_WBWAIT: begin
-				if (wb_free) begin
+				if (wb_free && !dh_hold) begin
 					wb_valid <= 1'b1; wb_stage <= 1'b0; wb_posted <= !d_nopost; wb_err_seen <= 1'b0;
 					if (bus_free_now) begin
 						b_req <= 1'b1; b_kind <= `BK_DATA;
@@ -783,7 +797,7 @@ always @(posedge clk) if (ce) begin
 			end
 
 			DS_FLTWAIT: begin
-				if (wb_free) begin
+				if (wb_free && !dh_hold) begin
 					wb_valid <= 1'b1; wb_stage <= 1'b0; wb_posted <= 1'b1; wb_err_seen <= 1'b0;
 					d_fault <= 1'b1; ds <= DS_IDLE;
 				end
@@ -800,6 +814,12 @@ always @(posedge clk) if (ce) begin
 			end
 			default: ds <= DS_IDLE;
 		endcase
+
+		// the core took the posted write fault (d_cancel: the waiting access
+		// is dropped before any of its cycles ran; it is reissued after the
+		// RTE) or lets the waiting access go (d_unhold)
+		if (d_cancel) begin ds <= DS_IDLE; d_pend <= 1'b0; r_first <= 1'b1; end
+		if (d_cancel || d_unhold) dh_hold <= 1'b0;
 
 		// The operand may finish before a narrow-port or burst fill does:
 		// r_addr can advance to the next portion and d_fc to the next access.

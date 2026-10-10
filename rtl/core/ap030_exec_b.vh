@@ -169,6 +169,8 @@ S_RTE4: begin : rte4
 				{cp_len, cp_pos} <= fr_word(6'd41);
 				cp_base <= fr_long(6'd42);
 				cp_resp <= fr_word(6'd44);
+				exc_held <= frw[6'd45][10:0];
+				exc_dw_dst <= frw[6'd27][11:8]; exc_dw_ret <= frw[6'd27][7:0];
 				state <= S_RTE_PIPE;
 			end
 		endcase
@@ -214,7 +216,12 @@ S_RTE_PIPE: begin : rte_pipe
 				pipe_c = fr_word(6'd6); pipe_c_v = ~exc_ssw[13];
 				pipe_b = fr_word(6'd7); pipe_b_v = ~exc_ssw[12];
 				if (exc_rk == RK_STREAM) state <= exc_rs;
-				else if (exc_ssw[8]) begin
+				else if (exc_rk == RK_HELD) begin
+					// rerun the posted write unless the handler completed it
+					// (DF clear, UM 8.2.2), then issue the held access
+					if (exc_ssw[8]) dreq(exc_fa, sz_of_siz(exc_ssw[5:4]), exc_ssw[6], exc_dob, exc_ssw[2:0], 1'b0, 1'b0, DW_NONE, S_RTE_HELD);
+					else state <= S_RTE_HELD;
+				end else if (exc_ssw[8]) begin
 					// DF: rerun the data cycle described by the frame
 					dreq(exc_fa, sz_of_siz(exc_ssw[5:4]), exc_ssw[6], exc_dob, exc_ssw[2:0], exc_ssw[7], exc_ssw[7] & ~exc_ssw[6], dw_dst, dw_ret);
 					rerun_merge <= exc_ssw[6] && (exc_got != 3'd0);
@@ -228,6 +235,14 @@ S_RTE_PIPE: begin : rte_pipe
 	end
 end
 S_RTE_RERUN: begin flush_req = 1'b1; flush_pc = tmp; state <= S_FETCH; end
+S_RTE_HELD: begin
+	// the access the instruction was suspended at, then its continuation;
+	// an access that ended the instruction had its trace decided already
+	dreq(exc_partial, exc_held[10:9], exc_held[8], exc_dib, exc_held[7:5], exc_held[4], exc_held[3], exc_dw_dst, exc_dw_ret);
+	d_nocache <= exc_held[2];
+	cpu_flt_ill <= exc_held[1]; cpu_flt_fline <= exc_held[0];
+	if (exc_dw_ret == S_FETCH) trace_pend <= tr_t1 | (tr_t0 & flow);
+end
 
 //-------------------------------------------------------------- MOVEM (PRM)
 S_MOVEM0: begin

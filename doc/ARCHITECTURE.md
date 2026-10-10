@@ -82,14 +82,15 @@ $A/$B frames hold this core's resume state:
 
 | words | content                                                             |
 |-------|---------------------------------------------------------------------|
-| 4     | resume kind (boundary, stream, read, write, RMW) and state          |
+| 4     | resume kind (boundary, stream, read, write, RMW, held) and state    |
 | 6-7   | stage C and B images                                                |
 | 10-11 | `ea`, 14-17 `src`/`dst`, 20-21 `imm`, 24-25 `tmp`, 28-29 `tmp2`     |
-| 22-23 | data input buffer (software completion)                             |
+| 22-23 | data input buffer (software completion); held access: its write data |
 | 26-27 | `ir`, version 0 with `dw_dst`/`dw_ret`                              |
 | 32-36 | loop counters, MOVEM mask, EA/immediate return states               |
-| 37-38 | the bytes already read of a misaligned operand (UM 8.2.1)           |
+| 37-38 | the bytes already read of a misaligned operand (UM 8.2.1); held access: its address |
 | 39-44 | extension word, trace and coprocessor dialogue state                |
+| 45    | held access: size, R/W, FC, RMC, no-cache, BKPT/coprocessor fault flags |
 
 The values are captured when the fault is recognised (not while the frame
 is being pushed, which reuses the counters). RTE reloads them and, with
@@ -116,23 +117,29 @@ mid-instruction coprocessor exception is traced when the instruction
 completes after its RTE.  With a trace pending, a general coprocessor
 instruction's dialog runs until a null CA=0 primitive (UM 10.5.2.5).
 
-Posted writes that fail on the bus are reported at the next instruction
-boundary with a format $A frame (UM 8.1.2), and RTE reruns the write.  A
-bus or address error first waits for the writes posted before it; if one
-of them fails, that fault is taken right after as a bus error of its own,
-its frame on top, so the handler sees the faults and the reruns happen in
-program order.  Only a fault of a bus/address error's own frame write
-halts the processor (double bus fault, UM 7.5.4).
-
-Known difference: a write of the next instruction that was waiting for the
-write buffer goes to the bus once the failed write has left it.  The
-MC68030 instead begins exception processing at once and suspends that
-instruction before its write (a format $B frame, UM 8.1.2 and Table 8-6).
-When both writes fail for the same reason (one page, one address), the
-MC68030 takes one bus error and this core two: a handler that repairs the
-cause is entered a second time, finds nothing to do and its RTE reruns
-the second write; memory ends the same and no write is lost or reordered.
-A handler that counts bus errors sees one more.
+Posted writes that fail on the bus are taken as the MC68030 takes them
+(UM 8.1.2: exception processing begins right after the faulted data
+cycle).  From the failure on, no later data access of the instruction in
+execution reaches the bus: the memory system holds it.  When the
+instruction waits with such an access, the bus error is taken there with a
+format $B frame whose PC is that instruction (UM Table 8-6: "may not be the
+instruction that generated the faulted bus cycle"), whose DF, fault
+address and DOB describe the failed write, and whose resume kind "held"
+keeps the waiting access (words 22-23, 37-38 and 45); RTE reruns the write
+(DF set) or takes it as completed (DF clear) and then issues the held
+access, and the instruction goes on.  Two writes of one instruction, or of
+two instructions in a row, to a faulting location thus give one bus
+error, which reports the first write (UM 8.2.1).  When the instruction
+ends without another data access, the fault is taken at the boundary with
+a format $A frame.  Exception processing, the RTE's frame loads and
+interrupt acknowledge are not suspended: their accesses go on and the
+fault is taken at the next boundary.  A handler must not write the DIB of
+a write fault frame (UM 8.2.2 defines it for read faults): a held write
+keeps its data there.  A bus or address error first waits for the writes
+posted before it; if one of them fails, that fault is taken right after as
+a bus error of its own, its frame on top, so the handler sees the faults
+and the reruns happen in program order.  Only a fault of a bus/address
+error's own frame write halts the processor (double bus fault, UM 7.5.4).
 
 ## Memory subsystem (ap030_memsys.v)
 
@@ -147,7 +154,9 @@ write whose buffer slot and bus are free goes to the bus controller in the
 clock it is posted, and the next one may post in the clock the previous
 completes, so consecutive stores run four clocks apart on a synchronous
 port. Read-modify-write and CPU-space writes are not posted so that their
-bus errors are seen by the instruction. A data cache hit is acknowledged
+bus errors are seen by the instruction. After a posted write fails, the
+data unit starts no further access until the core has taken the fault or
+let the access go (`d_held`, `d_cancel`, `d_unhold`). A data cache hit is acknowledged
 in the clock its data is valid (two-clock read, UM 11.2). Operands crossing a longword, cache
 line or page are split as UM 7.2.2 describes, and the first portion of a
 line-crossing read is not burst.

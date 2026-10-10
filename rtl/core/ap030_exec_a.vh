@@ -115,6 +115,13 @@ S_DWAIT: begin
 			// counts as emulated when DF is cleared (UM 8.2.2)
 			exc_data_fault(1'b0, d_rmc ? RK_RMW : d_rw ? RK_READ : RK_WRITE, S_DWAIT);
 		end
+	end else if (d_held && late_fault_pend) begin
+		// a posted write failed and this access waits behind it: suspend the
+		// instruction here (UM 8.1.2); exception processing, the RTE's frame
+		// loads and IACK cannot be suspended, they go on and the fault is
+		// taken at the next boundary
+		if (exc_active || exc_busfault || d_iack) d_unhold <= 1'b1;
+		else exc_held_fault;
 	end
 end
 

@@ -172,6 +172,7 @@ endtask
 task exc_late_fault;
 	begin
 		late_fault_pend <= 1'b0;
+		d_unhold <= 1'b1;               // no access waits at a boundary
 		capture_pipe;
 		exc_fa <= lf_fa; exc_dob <= lf_dob;
 		exc_got <= 3'd0; exc_partial <= 32'd0;
@@ -179,6 +180,30 @@ task exc_late_fault;
 		exc_rk <= RK_BOUNDARY; exc_rs <= S_FETCH;
 		exc_go(`VEC_BUSERR, `FMT_SHORTBUS, scan_pc, 32'd0);
 		exc_late <= 1'b1;
+	end
+endtask
+
+// A posted write failed while the instruction in execution waits with its
+// next data access, which has not reached the bus (the memory system holds
+// it).  The bus error is taken now, mid-instruction: a long frame with the
+// instruction's address as the PC, DF and the record of the failed write
+// (UM 8.1.2, Table 8-6: "may not be the instruction that generated the
+// faulted bus cycle").  The held access is dropped and kept in the frame;
+// RTE reruns the write (DF set) and then issues it (S_RTE_HELD).
+task exc_held_fault;
+	begin
+		late_fault_pend <= 1'b0;
+		d_cancel <= 1'b1;
+		capture_pipe;
+		exc_fa <= lf_fa; exc_dob <= lf_dob;
+		exc_got <= 3'd0;
+		exc_partial <= d_addr;
+		exc_dib <= d_wdata;
+		exc_held <= {d_size, d_rw, d_fc, d_rmc, d_rmc_last, d_nocache, cpu_flt_ill, cpu_flt_fline};
+		cpu_flt_ill <= 1'b0; cpu_flt_fline <= 1'b0;
+		exc_ssw <= {1'b0, 1'b0, ~w0_v | w0_f, ~w1_v | w1_f, 3'b000, lf_ssw};
+		exc_rk <= RK_HELD; exc_rs <= S_DWAIT;
+		exc_go(`VEC_BUSERR, `FMT_LONGBUS, pc_i, 32'd0);
 	end
 endtask
 

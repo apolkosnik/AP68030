@@ -49,6 +49,9 @@ module ap030_core
 	input             d_iack_berr,
 	input             d_late_fault,
 	input             d_wpend,
+	input             d_held,       // the access waits behind a posted write fault
+	output reg        d_cancel,     // pulse: drop it (the instruction is suspended)
+	output reg        d_unhold,     // pulse: let it go
 	input      [31:0] f_addr,
 	input       [2:0] f_fc,
 	input       [1:0] f_size,
@@ -306,6 +309,10 @@ reg        exc_is_reset;
 reg        exc_busfault;   // processing a bus/address error: another fault halts
 reg        exc_throw;      // building the throwaway frame
 reg        exc_late;       // the exception is a posted write fault (exc_late_fault)
+// the access an instruction was suspended at (behind a posted write fault):
+// its size, R/W, FC, RMC, last RMC cycle, no-cache, and the BKPT/coprocessor
+// fault flags, as frame word 45; address and data use exc_partial/exc_dib
+reg [10:0] exc_held;
 reg [31:0] exc_sp;         // frame base
 reg  [5:0] exc_len;        // frame length in longwords
 reg  [2:0] exc_ilvl;
@@ -619,6 +626,8 @@ always @(posedge clk) if (ce) begin
 	sp_we <= 1'b0;
 	d_stb <= 1'b0;
 	d_rmc_release <= 1'b0;
+	d_cancel <= 1'b0;
+	d_unhold <= 1'b0;
 	i_stb <= 1'b0;
 	op_req <= 1'b0;
 	dbg_inst <= 1'b0;
@@ -645,6 +654,7 @@ always @(posedge clk) if (ce) begin
 		fetch_disc <= 2'd0; fetch_hold <= 1'b1; stop_wait <= 6'd0; due_v <= 1'b0;
 		trace_pend <= 1'b0; late_fault_pend <= 1'b0; stream_fault_pend <= 1'b0;
 		lf_fa <= 32'd0; lf_dob <= 32'd0; lf_ssw <= 9'd0; exc_late <= 1'b0;
+		exc_held <= 11'd0; d_cancel <= 1'b0; d_unhold <= 1'b0;
 		stopped <= 1'b0; halted_r <= 1'b0;
 		reset_drive <= 1'b0; rst_cnt <= 10'd0;
 		ipend_r <= 1'b0;
