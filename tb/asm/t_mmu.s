@@ -763,6 +763,49 @@ pf_back:
 	setl	TBLAL+0,$7FFF0001
 	newmap
 
+;================================================================ 15a. supervisor violations
+; S does not end a table search (UM 9.5.2, 9.5.5.3): PTEST returns the WP and
+; M bits and the levels of the whole search (Table 9-3: W and M are undefined
+; only when I is set), and no U bit is set after the violation (UM 9.5.1.1)
+	settc	TC_OFF			; the tables are written untranslated:
+	setl	TBLAL+0,$7FFF0001	; region 0 is still limited to pages 0-3 here
+	setl	TBLAL+24,$7FFF0103	; region 3: long table descriptor with S -> long B table
+	setl	TBLAL+28,TBLBL
+	setl	TBLAL+40,$7FFF0041	; region 5: the cache inhibited alias for rdd
+	setl	TBLAL+44,$00500000
+	setl	TBLBL+40,$00000001	; $205000 and $305000 -> $025000, a user page
+	setl	TBLBL+44,$00025000
+	setl	TBLBL+64,$00000115	; $208000: supervisor only, modified, write protected
+	setl	TBLBL+68,$00020000
+	setl	$25000,$5C5C5C5C
+	settc	TC_BASE
+	ptestr	#1,($208000).l,#7,a1	; S on the page descriptor
+	pmove	mmusr,(scr2).l
+	chkw	scr2,$2A02,160		; S, W, M, two levels
+	move.l	a1,d1
+	chkl	d1,TBLBL+64,161
+	ptestr	#5,($208000).l,#7
+	pmove	mmusr,(scr2).l
+	chkw	scr2,$0A02,162		; W, M: supervisor data is allowed
+	ptestr	#1,($305000).l,#7,a1	; S on the table descriptor
+	pmove	mmusr,(scr2).l
+	chkw	scr2,$2002,163		; S, two levels: the search went on to the page
+	move.l	a1,d1
+	chkl	d1,TBLBL+40,164
+	ptestr	#5,($305000).l,#7
+	pmove	mmusr,(scr2).l
+	chkw	scr2,$0002,165
+	clr.w	exccnt
+	lea	($305000).l,a0
+	moves.l	(a0),d1			; user data: bus error from the B entry
+	chkw	exccnt,1,166
+	rdd	TBLBL+40,d1
+	chkl	d1,$00000001,167	; no U after the violation
+	move.l	($305000).l,d1		; supervisor data
+	chkl	d1,$5C5C5C5C,168
+	rdd	TBLBL+40,d1
+	chkl	d1,$00000009,169
+
 ;================================================================ 16. more pages than ATC entries
 	settc	TC_OFF
 	setcrp	$7FFF0002,TBLA

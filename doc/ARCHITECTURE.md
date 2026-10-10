@@ -199,7 +199,10 @@ termination descriptors), early termination with contiguous mapping,
 indirect descriptors, supervisor and write protection (RMC cycles count as
 writes), U and M updates written back under RMC. Limit violations, invalid
 descriptors, supervisor violations and bus errors during the search create
-an entry with B set, so the access faults until the entry is flushed.
+an entry with B set, so the access faults until the entry is flushed. A
+supervisor violation does not end the search (UM 9.5.2, 9.5.5.3): S is
+accrued like WP, so PTEST reports the W, M and N of the whole search, and
+no U or M bit is set after the violation (UM 9.5.1.1).
 PTEST levels 0-7 set the MMUSR of Table 9-3 and return the address of the
 last descriptor fetched completely; PLOAD, PFLUSHA, PFLUSH by FC and by
 FC and address, PMOVE and PMOVEFD, and the configuration exception (vector

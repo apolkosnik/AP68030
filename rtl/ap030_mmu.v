@@ -291,6 +291,10 @@ wire        d_s    = s_long & s_lw0[8];
 wire        d_lu   = s_lw0[31];
 wire [14:0] d_lim  = s_lw0[30:16];
 wire [31:0] d_addr = s_long ? s_lw1 : s_lw0;
+// supervisor violation: this descriptor (S of a long descriptor, FC2 = 0),
+// or one before it in this search (UM 9.5.5.3)
+wire        d_sv   = d_s && !s_fc[2];
+wire        sv_acc = s_sv | d_sv;
 
 reg s_ptest_lvl0;
 assign w_active = (wst != W_IDLE) && (wst != W_ATC0) && (wst != W_DONE) && !s_ptest_lvl0;
@@ -591,7 +595,15 @@ always @(posedge clk) if (ce) begin
 			end
 
 			W_EVAL: begin
-				// UM 9.5.2 / 9.5.5: evaluate the fetched descriptor
+				// UM 9.5.2 / 9.5.5: evaluate the fetched descriptor.  A
+				// supervisor violation does not end the search: only a page
+				// descriptor, an invalid descriptor, a limit violation or a
+				// bus error does (UM 9.5.2; 9.5.5.3 "the table search is
+				// completed"); S is accrued like WP (Figure 9-29), so PTEST
+				// returns the W, M and N of the whole search (Table 9-3), and
+				// no U or M bit is set once a violation is seen (UM 9.5.1.1
+				// U and M; WinUAE mmu030_table_search leaves the violating
+				// descriptor's own U alone too, the UM does not say)
 				if (s_indirect && dt_f != 2'b01) begin
 					// the target of an indirect descriptor must be a page descriptor
 					s_i <= 1'b1; wst <= W_DONE;
@@ -601,22 +613,21 @@ always @(posedge clk) if (ce) begin
 					// indirect: no history or protection bits of its own
 					if (s_ptest && s_n == s_maxlvl) wst <= W_DONE;
 					else wst <= W_IND;
-				end else if (d_s && !s_fc[2]) begin
-					// supervisor violation: search ends, U not updated
-					s_sv <= 1'b1; if (!s_ptest) s_i <= 1'b1; wst <= W_DONE;
 				end else if (s_long && !s_indirect && fld_avail && lim_viol(d_lu, d_lim, idx_now)) begin
 					// the limit of a long descriptor bounds the index into the
 					// table (or the pages of an early termination) below it
+					s_sv <= sv_acc;
 					s_l <= 1'b1; s_i <= 1'b1;
 					wst <= W_DONE;
 				end else begin
+					s_sv <= sv_acc;
 					s_wp <= s_wp | d_wp;
 					if (dt_f == 2'b01) begin
 						// page descriptor (normal, early termination, or indirect target)
 						s_pa <= pa_sum[31:8];
 						s_ci <= d_ci;
 						s_m  <= d_m;
-						if (!s_ptest && (!d_u || (s_write && !d_m && !(s_wp | d_wp)))) begin
+						if (!s_ptest && !sv_acc && (!d_u || (s_write && !d_m && !(s_wp | d_wp)))) begin
 							w_wdata <= s_lw0 | 32'h8 | ((s_write && !(s_wp | d_wp)) ? 32'h10 : 32'h0);
 							w_addr  <= s_daddr; w_rw <= 1'b0; w_req <= 1'b1;
 							if (s_write && !(s_wp | d_wp)) s_m <= 1'b1;
@@ -626,7 +637,7 @@ always @(posedge clk) if (ce) begin
 						// table (or indirect) descriptor
 						if (s_ptest && s_n == s_maxlvl) begin
 							wst <= W_DONE;
-						end else if (!s_ptest && !d_u) begin
+						end else if (!s_ptest && !sv_acc && !d_u) begin
 							w_wdata <= s_lw0 | 32'h8; w_addr <= s_daddr; w_rw <= 1'b0; w_req <= 1'b1;
 							wst <= W_WB;
 						end else wst <= W_IND;
