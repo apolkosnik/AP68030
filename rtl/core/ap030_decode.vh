@@ -500,8 +500,12 @@ always @* begin
 				3'b000: dc_first = S_CP0;                  // cpGEN
 				3'b001: begin
 					if (ea_an) dc_first = S_CPDBCC;          // cpDBcc
-					else if (em == 3'b111 && (er == 3'b010 || er == 3'b011 || er == 3'b100)) dc_first = S_CPTRAP;   // cpTRAPcc (opmode 010/011/100 in er)
-					else if (em == 3'b111 && er[2:1] != 2'b00) dc_illegal = 1'b1;   // no cpTRAPcc opmode, no cpScc EA: F-line (UM Table 10-1, 10.5.2.2)
+					else if (em == 3'b111 && er[2:1] != 2'b00) begin
+						// cpTRAPcc: opmode 010/011/100 in er; 101-111 are neither a cpTRAPcc
+						// opmode nor a cpScc EA: F-line (UM Table 10-1, 10.5.2.2)
+						dc_first = S_CPTRAP;
+						if (er[2] && er[1:0] != 2'b00) dc_illegal = 1'b1;
+					end
 					else begin dc_first = S_CPSCC; dc_dreg = {1'b0, dw[2:0]}; dc_size = `SZ_B; end   // cpScc: byte operand
 				end
 				3'b010, 3'b011: dc_first = S_CPBCC;        // cpBcc.W / .L

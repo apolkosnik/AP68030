@@ -27,7 +27,7 @@ rtl/ap030_mmu.v        ATC (22 entries), TT0/TT1, table search engine, PTEST/PLO
 rtl/ap030_bus.v        bus controller: S0-S5 states, sizing, bursts, retry, arbitration
 rtl/ap030_alu.v        ALU, barrel shifter, BCD
 rtl/ap030_muldiv.v     32x32 multiply, 64/32 divide
-rtl/ap030_regfile.v    D0-D7, A0-A6, USP/ISP/MSP
+rtl/ap030_regfile.v    D0-D7, A0-A6 (in MLABs, one copy per read port), USP/ISP/MSP
 rtl/ap030_defs.svh     constants
 tb/tb_ap030_bus.sv     pin-level bench of the bus controller with slave models
 tb/tb_ap030_program.sv program bench: 1 MB RAM behind several port types, test registers

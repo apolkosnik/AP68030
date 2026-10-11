@@ -4,9 +4,12 @@
 // ap030_regfile.v - D0-D7, A0-A6 and the three stack pointers              //
 //                                                                          //
 // Index 0..7 = D0..D7, 8..14 = A0..A6, 15 = A7 (USP/ISP/MSP by SR.S/SR.M). //
-// Three combinational read ports, one write port (full 32 bits; the core   //
+// Five combinational read ports, one write port (full 32 bits; the core    //
 // merges byte and word results), direct access to the stack pointers for   //
-// MOVE USP / MOVEC and the exception logic.                                //
+// MOVE USP / MOVEC and the exception logic.  D0-D7 and A0-A6 are kept in   //
+// LUT RAM (Intel MLAB: synchronous write, asynchronous read), one copy per //
+// read port; a flag per register makes it read 0 from reset until it is    //
+// first written, as a reset to 0 would.                                    //
 //--------------------------------------------------------------------------//
 
 module ap030_regfile
@@ -44,8 +47,26 @@ module ap030_regfile
 	output     [31:0] msp_q
 );
 
-reg [31:0] r [0:14];
+// one copy per read port; index 15 (A7) is never written there
+(* ramstyle = "MLAB, no_rw_check" *) reg [31:0] ma [0:15];
+(* ramstyle = "MLAB, no_rw_check" *) reg [31:0] mb [0:15];
+(* ramstyle = "MLAB, no_rw_check" *) reg [31:0] mc [0:15];
+(* ramstyle = "MLAB, no_rw_check" *) reg [31:0] md [0:15];
+(* ramstyle = "MLAB, no_rw_check" *) reg [31:0] me [0:15];
+reg [15:0] zero;           // the register reads 0 (reset, not written since; bit 15 unused)
+// the registers as they read (for benches: rf.r[n]; nothing uses it in synthesis)
+wire [31:0] r [0:14];
+genvar gr;
+generate for (gr = 0; gr < 15; gr = gr + 1) begin : g_r
+	assign r[gr] = zero[gr] ? 32'd0 : ma[gr];
+end endgenerate
 reg [31:0] usp, isp, msp;
+wire       mwe = ce && we && (waddr != 4'd15) && !rst;
+always @(posedge clk) if (mwe) ma[waddr] <= wdata;
+always @(posedge clk) if (mwe) mb[waddr] <= wdata;
+always @(posedge clk) if (mwe) mc[waddr] <= wdata;
+always @(posedge clk) if (mwe) md[waddr] <= wdata;
+always @(posedge clk) if (mwe) me[waddr] <= wdata;
 
 wire [1:0] act = !sr_s ? 2'd0 : (sr_m ? 2'd2 : 2'd1);
 wire [31:0] a7 = (act == 2'd0) ? usp : (act == 2'd1) ? isp : msp;   // committed A7 (the benches show it)
@@ -74,19 +95,18 @@ wire        fwd_c  = we && (waddr == raddr_c) && (raddr_c != 4'd15);
 wire        fwd_d  = we && (waddr == raddr_d) && (raddr_d != 4'd15);
 wire        fwd_e  = we && (waddr == raddr_e) && (raddr_e != 4'd15);
 
-assign rdata_a = (raddr_a == 4'd15) ? rd_a7 : fwd_a ? wdata : r[raddr_a];
-assign rdata_b = (raddr_b == 4'd15) ? rd_a7 : fwd_b ? wdata : r[raddr_b];
-assign rdata_c = (raddr_c == 4'd15) ? rd_a7 : fwd_c ? wdata : r[raddr_c];
-assign rdata_d = (raddr_d == 4'd15) ? rd_a7 : fwd_d ? wdata : r[raddr_d];
-assign rdata_e = (raddr_e == 4'd15) ? rd_a7 : fwd_e ? wdata : r[raddr_e];
+assign rdata_a = (raddr_a == 4'd15) ? rd_a7 : fwd_a ? wdata : zero[raddr_a] ? 32'd0 : ma[raddr_a];
+assign rdata_b = (raddr_b == 4'd15) ? rd_a7 : fwd_b ? wdata : zero[raddr_b] ? 32'd0 : mb[raddr_b];
+assign rdata_c = (raddr_c == 4'd15) ? rd_a7 : fwd_c ? wdata : zero[raddr_c] ? 32'd0 : mc[raddr_c];
+assign rdata_d = (raddr_d == 4'd15) ? rd_a7 : fwd_d ? wdata : zero[raddr_d] ? 32'd0 : md[raddr_d];
+assign rdata_e = (raddr_e == 4'd15) ? rd_a7 : fwd_e ? wdata : zero[raddr_e] ? 32'd0 : me[raddr_e];
 assign usp_q = usp_f;
 assign isp_q = isp_f;
 assign msp_q = msp_f;
 
-integer i;
 always @(posedge clk) if (ce) begin
 	if (rst) begin
-		for (i = 0; i < 15; i = i + 1) r[i] <= 32'd0;
+		zero <= 16'h7FFF;
 		usp <= 32'd0; isp <= 32'd0; msp <= 32'd0;
 	end else begin
 		if (we) begin
@@ -98,7 +118,7 @@ always @(posedge clk) if (ce) begin
 					2'd1: isp <= wdata;
 					default: msp <= wdata;
 				endcase
-			end else r[waddr] <= wdata;
+			end else zero[waddr] <= 1'b0;
 		end
 		if (sp_we) begin
 			case (sp_sel)
