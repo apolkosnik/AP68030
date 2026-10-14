@@ -231,6 +231,21 @@ wire [15:0] w0    = pq[0];
 wire [15:0] w1    = pq[1];
 wire        have2 = pq_v[0] & pq_v[1];
 
+// pop_n is decided late (for example, DBcc can dispatch after reading its
+// counter). Compare each possible post-consumption address in parallel,
+// then select a single bit; do not put a 32-bit adder and comparator after
+// pop_n on the fetch enable path. Entry 4 uses an already pending due_scan.
+(* keep *) wire [4:0] fetch_model_allow;
+genvar fp;
+generate for (fp = 0; fp < 5; fp = fp + 1) begin : g_fetch_model
+	localparam [31:0] POP_BYTES = 2 * fp;
+	wire [31:0] at = (fp == 4) ? due_scan : scan_pc + POP_BYTES;
+	assign fetch_model_allow[fp] =
+		(!fetch_stop_v || ((fetch_stop >= 32'd2) && (at < fetch_stop - 32'd2))) &&
+		(!fetch_scan_v || (fetch_scan_to >= fetch_pc) ||
+		 ((fetch_scan_to >= 32'd4) && (fetch_scan_to - 32'd4 >= at)));
+end endgenerate
+
 //---------------------------------------------------------------------------
 // interrupt synchronizer (UM 8.1.9: two consecutive falling-edge samples)
 //---------------------------------------------------------------------------
@@ -637,6 +652,10 @@ end
 integer k;
 always @(posedge clk) if (ce) begin
 	// per-clock defaults
+	// The memory system samples this address only with i_stb. Prepare the
+	// sequential payload independently of the late fetch/lazy-model decision,
+	// keeping that decision off the address register's enable path.
+	i_addr <= fetch_pc;
 	pop_n = 2'd0;
 	flush_req = 1'b0;
 	flush_pc = 32'd0;
@@ -871,12 +890,9 @@ always @(posedge clk) if (ce) begin
 				if (due_now && !due_v) begin due_v <= 1'b1; due_scan <= due_at; end
 				if (out_after != 2'd2 && i_ready && !halted_r && !fetch_hold && due_now &&
 				    (!fetch_lazy || stop_starve ||
-				     ((!fetch_stop_v || ((fetch_stop >= 32'd2) && (due_at < fetch_stop - 32'd2))) &&
-				      (!fetch_scan_v || (fetch_scan_to >= fetch_pc) ||
-				       ((fetch_scan_to >= 32'd4) && (fetch_scan_to - 32'd4 >= due_at)))))) begin
+				     (due_v ? fetch_model_allow[4] : fetch_model_allow[pop_n]))) begin
 					due_v <= 1'b0;
 					i_stb <= 1'b1;
-					i_addr <= fetch_pc;
 					i_fc <= fc_prog;
 					fetch_pc <= fetch_pc + 32'd4;
 					fetch_out <= out_after + 2'd1;
