@@ -63,7 +63,7 @@ module ap030_core
 
 	// ---- instruction port ------------------------------------------------
 	output reg        i_stb,
-	output reg [31:0] i_addr,
+	(* dont_retime *) output reg [31:0] i_addr,
 	output reg  [2:0] i_fc,
 	input             i_ready,      // the memory system can take another fetch
 	input             i_ack,
@@ -221,6 +221,7 @@ reg [31:0] flush_pc;
 reg        pipe_load;      // RTE: preload stages C/B from the frame
 reg [15:0] pipe_c, pipe_b;
 reg        pipe_c_v, pipe_b_v;
+reg        disp_req, sf_req, sf_need_b, sf_boundary;
 
 wire        w0_v  = pq_v[0];
 wire        w1_v  = pq_v[1];
@@ -263,7 +264,10 @@ reg [15:0] ir;             // operation word
 reg [15:0] ext;            // second word (bitfield, MUL/DIV, CAS, CHK2, MOVES, MOVEC, MMU, coprocessor)
 reg [31:0] pc_i;           // address of the current instruction
 reg [31:0] ea, ea2;        // effective addresses
-reg [31:0] src, dst, imm, tmp, tmp2, tmp3;
+(* dont_retime *) reg [31:0] src, dst;
+reg [31:0] tmp, tmp2;
+reg [16:0] tmp3;
+
 reg  [7:0] cnt;
 reg  [7:0] sub;
 reg [15:0] mm_mask;
@@ -285,18 +289,10 @@ reg [31:0] lf_fa, lf_dob;  // fault address, data output buffer
 reg  [8:0] lf_ssw;         // SSW DF RM RW SIZE 0 FC
 reg        stopped;
 reg        halted_r;
-reg [31:0] fr [0:22];      // RTE frame image (23 longwords)
-// frame words as wires (bit selects of a function result are not Verilog-2001)
-wire [15:0] frw [0:45];
-genvar gi;
-generate for (gi = 0; gi < 46; gi = gi + 1) begin : g_frw
-	assign frw[gi] = (gi % 2) ? fr[gi / 2][15:0] : fr[gi / 2][31:16];
-end endgenerate
 // exception bookkeeping
 reg  [7:0] exc_vec;
 reg  [3:0] exc_fmt;
 reg [31:0] exc_pc;         // PC field
-reg [31:0] exc_ia;         // instruction address field (formats 2, 9) / fault address
 reg [15:0] exc_sr;
 reg [15:0] exc_ssw;
 reg  [3:0] exc_rk;         // resume kind
@@ -305,7 +301,6 @@ reg  [7:0] exc_cnt;        // cnt, dw_dst and dw_ret at the fault: the frame pus
 reg  [3:0] exc_dw_dst;     // loop itself uses them, so the frame takes the copies
 reg  [7:0] exc_dw_ret;
 reg        exc_is_irq;
-reg        exc_is_reset;
 reg        exc_busfault;   // processing a bus/address error: another fault halts
 reg        exc_throw;      // building the throwaway frame
 reg        exc_late;       // the exception is a posted write fault (exc_late_fault)
@@ -314,14 +309,16 @@ reg        exc_late;       // the exception is a posted write fault (exc_late_fa
 // fault flags, as frame word 45; address and data use exc_partial/exc_dib
 reg [10:0] exc_held;
 reg [31:0] exc_sp;         // frame base
-reg  [5:0] exc_len;        // frame length in longwords
 reg  [2:0] exc_ilvl;
 reg [15:0] exc_stage_c, exc_stage_b;
 reg [31:0] exc_baddr;
 reg [31:0] exc_fa, exc_dob, exc_dib;
+`ifdef VERILATOR
+wire [31:0] exc_ia = exc_fa;
+`endif
 reg  [2:0] exc_got;
 reg [31:0] exc_partial;
-reg  [2:0] rte_kind;
+reg        rte_ver_err;
 reg        trace_after_exc;
 // coprocessor
 reg  [2:0] cp_id;
@@ -333,7 +330,7 @@ reg        cp_dr;
 reg        cp_ca;
 reg        cp_pcbit;
 reg        cp_trace_wait;  // trace pending: wait for null CA=0 PF=1
-reg [31:0] cp_base;        // CIR base address
+wire [31:0] cp_base = {14'd0, 1'b1, 1'b0, cp_id, 13'd0};  // CIR base address
 reg  [3:0] cp_kind;        // instruction category for the resume
 // RESET instruction counter
 reg  [9:0] rst_cnt;
@@ -344,20 +341,14 @@ reg        status_p;
 reg        byp_we;
 reg  [3:0] byp_reg;
 reg [31:0] byp_data;
-reg        stream_fault_pend;
-reg [31:0] dbg_pc_r;
 // generic-path controls latched at dispatch
 reg  [5:0] g_alu;
 reg  [1:0] g_size;
 reg  [1:0] g_srck, g_dstk;
 reg  [3:0] g_dreg;
-reg  [3:0] g_sreg;         // source register (the states use the latched fields, not the decoder)
-reg        sh_wait;        // a shift/rotate result needs the registered shifter's extra clock
-wire       g_alu_shift = (g_alu >= `ALU_ASL) && (g_alu <= `ALU_ROXR);
-reg        g_flags, g_wb, g_sext, g_bitop, g_shift, g_move_mem, g_dstrd;
+reg        g_flags, g_wb, g_sext, g_bitop, g_move_mem;
 reg  [7:0] nx;
 reg        rte_fake;       // RTE with DF clear on a read: deliver the DIB as the data
-reg [31:0] rte_fake_data;
 reg        rerun_merge;    // a rerun read completes a partially read operand
 reg        exc_active;     // exception processing in progress
 reg        cpu_flt_ill;    // a bus error on this CPU-space cycle is an illegal instruction (BKPT)
@@ -383,11 +374,35 @@ assign dbg_sr = sr;
 assign dbg_state = state;
 
 //---------------------------------------------------------------------------
-// decoder: from the word about to be dispatched, or from ir afterwards
+// decoder: decodes the next instruction word w0 (pq[0])
 //---------------------------------------------------------------------------
-wire        at_dispatch = (state == S_FETCH) || (state == S_GEN_EXEC);
-wire [15:0] dw = at_dispatch ? w0 : ir;
+wire [15:0] dw = w0;
 `include "core/ap030_decode.vh"
+
+// EA classification of ir[5:0] for post-dispatch states (coprocessor / PMMU)
+wire [2:0] ir_em      = ir[5:3];
+wire [2:0] ir_er      = ir[2:0];
+wire       ir_ea_dn   = (ir_em == 3'b000);
+wire       ir_ea_an   = (ir_em == 3'b001);
+wire       ir_ea_ind  = (ir_em == 3'b010);
+wire       ir_ea_pi   = (ir_em == 3'b011);
+wire       ir_ea_pd   = (ir_em == 3'b100);
+wire       ir_ea_d16  = (ir_em == 3'b101);
+wire       ir_ea_idx  = (ir_em == 3'b110);
+wire       ir_ea_absw = (ir_em == 3'b111) && (ir_er == 3'b000);
+wire       ir_ea_absl = (ir_em == 3'b111) && (ir_er == 3'b001);
+wire       ir_ea_pcd  = (ir_em == 3'b111) && (ir_er == 3'b010);
+wire       ir_ea_pci  = (ir_em == 3'b111) && (ir_er == 3'b011);
+wire       ir_ea_imm  = (ir_em == 3'b111) && (ir_er == 3'b100);
+wire       ir_ea_bad  = (ir_em == 3'b111) && (ir_er[2:0] > 3'b100);
+wire       ir_ea_mem     = ir_ea_ind | ir_ea_pi | ir_ea_pd | ir_ea_d16 | ir_ea_idx | ir_ea_absw | ir_ea_absl | ir_ea_pcd | ir_ea_pci;
+wire       ir_ea_memalt  = ir_ea_ind | ir_ea_pi | ir_ea_pd | ir_ea_d16 | ir_ea_idx | ir_ea_absw | ir_ea_absl;
+wire       ir_ea_ctrl    = ir_ea_ind | ir_ea_d16 | ir_ea_idx | ir_ea_absw | ir_ea_absl | ir_ea_pcd | ir_ea_pci;
+wire       ir_ea_ctrlalt = ir_ea_ind | ir_ea_d16 | ir_ea_idx | ir_ea_absw | ir_ea_absl;
+wire       ir_ea_data    = ir_ea_dn | ir_ea_mem | ir_ea_imm;
+wire       ir_ea_dataalt = ir_ea_dn | ir_ea_memalt;
+wire       ir_ea_alt     = ir_ea_dn | ir_ea_an | ir_ea_memalt;
+wire       ir_ea_any     = !ir_ea_bad;
 
 //---------------------------------------------------------------------------
 // helpers
@@ -452,39 +467,47 @@ endfunction
 function [1:0] chk2_nv;           // {N, V}
 	input [31:0] lower, upper, val;
 	reg n, v;
-	reg ln, un, vn;
-	reg [31:0] lv, uv, vl;
+	reg ln, un, vn, vl31;
+	reg [31:0] lv, uv, lu;
+	reg v_lt_l, v_gt_l, v_lt_u, v_gt_u, l_gt_u;
 	begin
 		n = 1'b0; v = 1'b0;
 		ln = lower[31]; un = upper[31]; vn = val[31];
-		lv = lower - val; uv = upper - val; vl = val - lower;
-		if (val == lower || val == upper) ;
+		lv = lower - val; uv = upper - val; lu = lower - upper;
+		vl31 = (lv == 32'h80000000) ? 1'b1 : !lv[31];
+		v_lt_l = (lv != 32'd0) && ((vn != ln) ? vn : !lv[31]);
+		v_gt_l = !v_lt_l;
+		v_lt_u = (uv != 32'd0) && ((vn != un) ? vn : !uv[31]);
+		v_gt_u = !v_lt_u;
+		l_gt_u = (lu != 32'd0) && ((ln != un) ? !ln : !lu[31]);
+		if (lv == 32'd0 || uv == 32'd0) ;
 		else if (ln && !un) begin
-			if ($signed(val) < $signed(lower)) n = 1'b1;
-			if (!vn && $signed(val) < $signed(upper)) n = 1'b1;
+
+			if (v_lt_l) n = 1'b1;
+			if (!vn && v_lt_u) n = 1'b1;
 			if (!vn && !lv[31]) begin
-				v = 1'b1; n = ($signed(val) > $signed(upper));
+				v = 1'b1; n = v_gt_u;
 			end
 		end else if (!ln && un) begin
 			if (!vn) n = 1'b1;
-			if ($signed(val) > $signed(upper)) n = 1'b1;
-			if ($signed(val) > $signed(lower) && !uv[31]) begin v = 1'b1; n = 1'b0; end
-		end else if (!ln && !un && $signed(lower) > $signed(upper)) begin
-			if ($signed(val) > $signed(upper) && $signed(val) < $signed(lower)) n = 1'b1;
+			if (v_gt_u) n = 1'b1;
+			if (v_gt_l && !uv[31]) begin v = 1'b1; n = 1'b0; end
+		end else if (!ln && !un && l_gt_u) begin
+			if (v_gt_u && v_lt_l) n = 1'b1;
 			if (vn && lv[31]) v = 1'b1;
 			if (vn && !lv[31]) n = 1'b1;
 		end else if (!ln && !un) begin
-			if (!vn && $signed(val) < $signed(lower)) n = 1'b1;
-			if ($signed(val) > $signed(upper)) n = 1'b1;
+			if (!vn && v_lt_l) n = 1'b1;
+			if (v_gt_u) n = 1'b1;
 			if (vn && uv[31]) begin v = 1'b1; n = 1'b1; end
-		end else if ($signed(lower) > $signed(upper)) begin
+		end else if (l_gt_u) begin
 			if (!vn) n = 1'b1;
-			if ($signed(val) > $signed(upper) && $signed(val) < $signed(lower)) n = 1'b1;
-			if (!vn && vl[31]) begin n = 1'b0; v = 1'b1; end
+			if (v_gt_u && v_lt_l) n = 1'b1;
+			if (!vn && vl31) begin n = 1'b0; v = 1'b1; end
 		end else begin
-			if ($signed(val) < $signed(lower)) n = 1'b1;
-			if (vn && $signed(val) > $signed(upper)) n = 1'b1;
-			if (!vn && vl[31]) begin n = 1'b1; v = 1'b1; end
+			if (v_lt_l) n = 1'b1;
+			if (vn && v_gt_u) n = 1'b1;
+			if (!vn && vl31) begin n = 1'b1; v = 1'b1; end
 		end
 		chk2_nv = {n, v};
 	end
@@ -526,26 +549,26 @@ always @* begin
 	ra_c = 4'd15;                 // A7
 	case (state)
 		S_EA, S_EA_FULL: ra_c = {w0[15], w0[14:12]};          // index register
-		S_MOVEM1, S_MOVEM2, S_MOVEM3, S_MOVEM4, S_MOVEM_LAST, S_CPREGS, S_CPREGS2, S_CP9: ra_a = cnt[3:0];
-		S_MOVEC, S_MOVES0, S_MOVES1, S_CHK2_2, S_CHK2_3, S_CHK2_4: ra_a = {ext[15], ext[14:12]};
-		S_CAS0, S_CAS1, S_CAS1B, S_CAS_WR: begin ra_a = {1'b0, ext[2:0]}; ra_b = {1'b0, ext[8:6]}; end
+		S_MOVEM1, S_CPREGS, S_CPREGS2, S_CP9: ra_a = cnt[3:0];
+		S_MOVEC, S_MOVES0, S_MOVES1, S_CHK2_2: ra_a = {ext[15], ext[14:12]};
+		S_CAS0, S_CAS1, S_CAS1B: begin ra_a = {1'b0, ext[2:0]}; ra_b = {1'b0, ext[8:6]}; end
 		S_CAS2_0, S_CAS2_1, S_CAS2_2, S_CAS2_3, S_CAS2_4, S_CAS2_4B, S_CAS2_5, S_CAS2_5B, S_CAS2_6, S_CAS2_7, S_CAS2_8: begin
 			ra_a = tmp3[16] ? {1'b0, tmp3[2:0]} : {1'b0, ext[2:0]};
 			ra_b = tmp3[16] ? {1'b0, tmp3[8:6]} : {1'b0, ext[8:6]};
 			ra_c = tmp3[16] ? {tmp3[15], tmp3[14:12]} : {ext[15], ext[14:12]};
 		end
 		S_BF0: begin ra_a = {1'b0, ext[14:12]}; ra_b = {1'b0, ext[8:6]}; ra_c = {1'b0, ext[2:0]}; end
-		S_BF1, S_BF2, S_BF3, S_BF4, S_BF5, S_BFWR: begin ra_a = {1'b0, ext[14:12]}; ra_b = {1'b0, ir[2:0]}; end
-		S_MULDIV0, S_MULDIV1, S_MULDIV2, S_MULDIVW: begin ra_a = {1'b0, ext[14:12]}; ra_b = {1'b0, ext[2:0]}; end
+		S_BF1, S_BF2, S_BF3, S_BFWR: begin ra_a = {1'b0, ext[14:12]}; ra_b = {1'b0, ir[2:0]}; end
+		S_MULDIV0, S_MULDIV1, S_MULDIV2: begin ra_a = {1'b0, ext[14:12]}; ra_b = {1'b0, ext[2:0]}; end
 		S_EXG, S_EXG2: begin
 			ra_a = {ir[7:3] == 5'b01001, ir[11:9]};
 			ra_b = {ir[7:3] != 5'b01000, ir[2:0]};
 		end
 		S_PACK, S_PACK2, S_PACK3: begin ra_a = {ir[3], ir[2:0]}; ra_b = {ir[3], ir[11:9]}; end
-		S_LINK, S_LINK2, S_LINK3, S_UNLK, S_UNLK2, S_UNLK3, S_MOVE_USP: ra_a = {1'b1, ir[2:0]};
-		S_MOVEP0, S_MOVEP1, S_MOVEP2, S_MOVEP3: begin ra_a = {1'b1, ir[2:0]}; ra_b = {1'b0, ir[11:9]}; end
+		S_LINK, S_LINK2, S_UNLK, S_UNLK2, S_MOVE_USP: ra_a = {1'b1, ir[2:0]};
+		S_MOVEP0, S_MOVEP1, S_MOVEP2: begin ra_a = {1'b1, ir[2:0]}; ra_b = {1'b0, ir[11:9]}; end
 		S_DBCC, S_CPDBCC, S_CPDBCC2, S_CPSCC2: ra_a = {1'b0, ir[2:0]};
-		S_CP2, S_CP3, S_CP4, S_CP5, S_CP6, S_CP7, S_CP8, S_CP10, S_CPREG, S_CPCTRL, S_CPCTRL2, S_CPTOS, S_CPEAX,
+		S_CP2, S_CP10, S_CPREG, S_CPCTRL, S_CPCTRL2, S_CPTOS, S_CPEAX,
 		S_CPXFER, S_CPXFER2, S_CPXFER3, S_CPMULT, S_CPMULT2, S_CPMULT3,
 		S_CPSAVE0, S_CPSAVE1, S_CPREST0, S_CPREST1: begin
 			ra_a = {cp_resp[3], cp_resp[2:0]};   // single register transfer
@@ -567,10 +590,10 @@ end
 //---------------------------------------------------------------------------
 // STATUS / REFILL (asserted from falling edges, UM 12.7.1)
 //---------------------------------------------------------------------------
-reg status_n_r, refill_n_r;
+(* dont_retime *) reg status_n_r, refill_n_r;
 always @(negedge clk) if (ce_f) begin
-	status_n_r <= rst ? 1'b1 : ~(status_p | halted_r);
-	refill_n_r <= rst ? 1'b1 : ~refill_p;
+	status_n_r <= status_p;
+	refill_n_r <= refill_p;
 end
 assign status_n = status_n_r;
 assign refill_n = refill_n_r;
@@ -599,7 +622,6 @@ always @* begin
 	         (g_bitop ? ((g_dstk == DK_REG) ? {27'd0, src[4:0]} : {29'd0, src[2:0]}) : src),
 	         dst, src[5:0])
 	case (state)
-		S_MOVE_WR: `ALU_SET(`ALU_MOVE, g_size, src, dst, 6'd0)
 		S_PACK3:   `ALU_SET(g_alu, g_size, src, dst, 6'd0)
 		S_TAS2:    `ALU_SET(`ALU_TAS, `SZ_B, src, dst, 6'd0)
 		S_CAS1:    `ALU_SET(`ALU_CMP, g_size, rf_a, dst, 6'd0)
@@ -619,6 +641,14 @@ always @(posedge clk) if (ce) begin
 	flush_req = 1'b0;
 	flush_pc = 32'd0;
 	pipe_load = 1'b0;
+	pipe_c = 16'd0;
+	pipe_b = 16'd0;
+	pipe_c_v = 1'b0;
+	pipe_b_v = 1'b0;
+	disp_req = 1'b0;
+	sf_req = 1'b0;
+	sf_need_b = 1'b0;
+	sf_boundary = 1'b0;
 	byp_we = 1'b0;
 	byp_reg = 4'd0;
 	byp_data = 32'd0;
@@ -637,8 +667,8 @@ always @(posedge clk) if (ce) begin
 	cacr_ci <= 1'b0; cacr_cei <= 1'b0; cacr_cd <= 1'b0; cacr_ced <= 1'b0;
 	md_start <= 1'b0;
 	irq_taken7 <= 1'b0;
-	refill_p <= 1'b0;
-	status_p <= (status_cnt != 2'd0);
+	refill_p <= 1'b1;
+	status_p <= ~((status_cnt != 2'd0) | halted_r);
 	if (status_cnt != 2'd0) status_cnt <= status_cnt - 2'd1;
 
 	if (rst) begin
@@ -652,14 +682,13 @@ always @(posedge clk) if (ce) begin
 		pq_v <= 6'd0; pq_f <= 6'd0; pq_n <= 3'd0;
 		scan_pc <= 32'd0; fetch_pc <= 32'd0; fetch_skip <= 1'b0; fetch_out <= 2'd0;
 		fetch_disc <= 2'd0; fetch_hold <= 1'b1; stop_wait <= 6'd0; due_v <= 1'b0;
-		trace_pend <= 1'b0; late_fault_pend <= 1'b0; stream_fault_pend <= 1'b0;
+		trace_pend <= 1'b0; late_fault_pend <= 1'b0;
 		lf_fa <= 32'd0; lf_dob <= 32'd0; lf_ssw <= 9'd0; exc_late <= 1'b0;
 		exc_held <= 11'd0; d_cancel <= 1'b0; d_unhold <= 1'b0;
-		stopped <= 1'b0; halted_r <= 1'b0;
+		stopped <= 1'b0; halted_r <= 1'b0; status_p <= 1'b1;
 		reset_drive <= 1'b0; rst_cnt <= 10'd0;
 		ipend_r <= 1'b0;
 		exc_busfault <= 1'b1;          // faults during the reset sequence halt (UM 8.1.1)
-		exc_is_reset <= 1'b1;
 		exc_is_irq <= 1'b0; exc_throw <= 1'b0;
 		trace_after_exc <= 1'b0;
 		cp_trace_wait <= 1'b0;
@@ -669,22 +698,22 @@ always @(posedge clk) if (ce) begin
 		d_fc <= 3'd0; d_wdata <= 32'd0;
 		i_addr <= 32'd0; i_fc <= 3'd0;
 		ir <= 16'd0; ext <= 16'd0; pc_i <= 32'd0; ea <= 32'd0; ea2 <= 32'd0;
-		src <= 32'd0; dst <= 32'd0; imm <= 32'd0; tmp <= 32'd0; tmp2 <= 32'd0; tmp3 <= 32'd0;
+		src <= 32'd0; dst <= 32'd0; tmp <= 32'd0; tmp2 <= 32'd0; tmp3 <= 17'd0;
+
 		cnt <= 8'd0; sub <= 8'd0; mm_mask <= 16'd0; ea_sel <= 1'b0; ea_pc <= 1'b0; ea_ret <= S_FETCH; imm_ret <= S_FETCH;
 		imm_tgt <= 1'b0; dw_dst <= DW_NONE; dw_ret <= S_FETCH; dw_reg <= 4'd0;
 		tr_t1 <= 1'b0; tr_t0 <= 1'b0; flow <= 1'b0;
-		exc_vec <= 8'd0; exc_fmt <= 4'd0; exc_pc <= 32'd0; exc_ia <= 32'd0; exc_sr <= 16'd0; exc_ssw <= 16'd0;
-		exc_rk <= 4'd0; exc_rs <= 8'd0; exc_sp <= 32'd0; exc_len <= 6'd0; exc_ilvl <= 3'd0;
+		exc_vec <= 8'd0; exc_fmt <= 4'd0; exc_pc <= 32'd0; exc_sr <= 16'd0; exc_ssw <= 16'd0;
+		exc_rk <= 4'd0; exc_rs <= 8'd0; exc_sp <= 32'd0; exc_ilvl <= 3'd0;
 		exc_cnt <= 8'd0; exc_dw_dst <= 4'd0; exc_dw_ret <= 8'd0;
 		exc_stage_c <= 16'd0; exc_stage_b <= 16'd0; exc_baddr <= 32'd0; exc_fa <= 32'd0; exc_dob <= 32'd0;
-		exc_dib <= 32'd0; exc_got <= 3'd0; exc_partial <= 32'd0; rte_kind <= 3'd0;
-		g_alu <= 6'd0; g_size <= 2'd0; g_srck <= 2'd0; g_dstk <= 2'd0; g_dreg <= 4'd0; g_sreg <= 4'd0; g_flags <= 1'b0; g_wb <= 1'b0;
-		sh_wait <= 1'b0;
-		g_sext <= 1'b0; g_bitop <= 1'b0; g_shift <= 1'b0; g_move_mem <= 1'b0; g_dstrd <= 1'b0; nx <= S_FETCH;
-		rte_fake <= 1'b0; rte_fake_data <= 32'd0; rerun_merge <= 1'b0; exc_active <= 1'b0;
+		exc_dib <= 32'd0; exc_got <= 3'd0; exc_partial <= 32'd0; rte_ver_err <= 1'b0;
+		g_alu <= 6'd0; g_size <= 2'd0; g_srck <= 2'd0; g_dstk <= 2'd0; g_dreg <= 4'd0; g_flags <= 1'b0; g_wb <= 1'b0;
+		g_sext <= 1'b0; g_bitop <= 1'b0; g_move_mem <= 1'b0; nx <= S_FETCH;
+		rte_fake <= 1'b0; rerun_merge <= 1'b0; exc_active <= 1'b0;
 		cpu_flt_ill <= 1'b0; cpu_flt_fline <= 1'b0; iack_pc_i <= 1'b0; iack_cpmid <= 1'b0;
 		cp_id <= 3'd0; cp_resp <= 16'd0; cp_cond <= 1'b0; cp_len <= 8'd0; cp_pos <= 8'd0; cp_dr <= 1'b0;
-		cp_ca <= 1'b0; cp_pcbit <= 1'b0; cp_base <= 32'd0; cp_kind <= 4'd0;
+		cp_ca <= 1'b0; cp_pcbit <= 1'b0; cp_kind <= 4'd0;
 		md_div <= 1'b0; md_sign <= 1'b0; md_a <= 32'd0; md_hi <= 32'd0; md_lo <= 32'd0;
 		op_kind <= 3'd0; op_level <= 3'd0; op_la <= 32'd0; op_fc <= 3'd0; op_fcmask <= 3'd0;
 		reg_sel <= 3'd0; reg_wdata_hi <= 32'd0; reg_wdata_lo <= 32'd0; reg_fd <= 1'b0;
@@ -696,6 +725,21 @@ always @(posedge clk) if (ce) begin
 
 		//---------------------------------------------------------- the states
 		`include "core/ap030_exec.vh"
+
+		if (disp_req) begin
+			dispatch;
+			// an exception taken at an overlapped dispatch (illegal, privilege,
+			// A/F-line) stacks the SR the finishing instruction leaves behind
+			if (state == S_GEN_EXEC && g_flags) exc_sr[4:0] <= alu_f;
+		end
+		if (sf_req) begin
+			capture_pipe;
+			exc_fa <= 32'd0; exc_dob <= 32'd0; exc_got <= 3'd0; exc_partial <= 32'd0;
+			exc_ssw <= {w0_f, sf_need_b & w1_f, ~w0_v | w0_f, ~w1_v | w1_f, 3'b000, 1'b0, 1'b0, 1'b1, 2'b00, 1'b0, fc_prog};
+			exc_rk <= sf_boundary ? RK_BOUNDARY : RK_STREAM;
+			exc_rs <= state;
+			exc_go(`VEC_BUSERR, `FMT_LONGBUS, sf_boundary ? scan_pc : pc_i, 32'd0);
+		end
 
 		//---------------------------------------------------------- posted write faults
 		// A posted write that failed is a bus error taken at the next
@@ -740,13 +784,13 @@ always @(posedge clk) if (ce) begin
 			// whatever is still outstanding belongs to the old stream
 			fetch_out <= fetch_out - {1'b0, i_ack | i_fault};
 			fetch_disc <= fetch_out - {1'b0, i_ack | i_fault};
-			refill_p <= 1'b1;
+			refill_p <= 1'b0;
 			// Ordinary branches preserve the program function code. Issue
 			// their target fetch with the redirect, retaining the discard
 			// count for older requests. Exception/RTE/SR changes use the
 			// existing path so their new program space is selected first.
 			if ((state == S_BCC || state == S_JMP || state == S_RTS2 ||
-			     state == S_RTD2 || state == S_DBCC) && i_ready &&
+			     state == S_RTD2 || state == S_DBCC || (state == S_DWAIT && dw_ret == S_JMP)) && i_ready &&
 			    (fetch_out - {1'b0, i_ack | i_fault} != 2'd2) &&
 			    !halted_r && !fetch_hold) begin
 				i_stb <= 1'b1;
@@ -770,7 +814,7 @@ always @(posedge clk) if (ce) begin
 			end
 			fetch_out <= fetch_out - {1'b0, i_ack | i_fault};
 			fetch_disc <= fetch_out - {1'b0, i_ack | i_fault};
-			refill_p <= 1'b1;
+			refill_p <= 1'b0;
 		end else begin
 			// pop, then append the fetched words, then issue the next fetch
 			begin : pipe_update
@@ -827,8 +871,9 @@ always @(posedge clk) if (ce) begin
 				if (due_now && !due_v) begin due_v <= 1'b1; due_scan <= due_at; end
 				if (out_after != 2'd2 && i_ready && !halted_r && !fetch_hold && due_now &&
 				    (!fetch_lazy || stop_starve ||
-				     ((!fetch_stop_v || (due_at + 32'd2 < fetch_stop)) &&
-				      (!fetch_scan_v || (fetch_scan_to >= ((fetch_pc < due_at + 32'd4) ? fetch_pc : due_at + 32'd4)))))) begin
+				     ((!fetch_stop_v || ((fetch_stop >= 32'd2) && (due_at < fetch_stop - 32'd2))) &&
+				      (!fetch_scan_v || (fetch_scan_to >= fetch_pc) ||
+				       ((fetch_scan_to >= 32'd4) && (fetch_scan_to - 32'd4 >= due_at)))))) begin
 					due_v <= 1'b0;
 					i_stb <= 1'b1;
 					i_addr <= fetch_pc;

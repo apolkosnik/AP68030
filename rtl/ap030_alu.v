@@ -35,17 +35,19 @@ module ap030_alu
 wire f_x = flags_in[4];
 wire f_z = flags_in[2];
 
-wire [5:0]  nbits  = (size == `SZ_B) ? 6'd8 : (size == `SZ_W) ? 6'd16 : 6'd32;
-wire [31:0] szmask = (size == `SZ_B) ? 32'h0000_00FF : (size == `SZ_W) ? 32'h0000_FFFF : 32'hFFFF_FFFF;
+wire        addr_op  = (op == `ALU_ADDA) || (op == `ALU_SUBA) || (op == `ALU_CMPA);
+wire [1:0]  eff_size = addr_op ? `SZ_L : size;
+wire [5:0]  nbits    = (eff_size == `SZ_B) ? 6'd8 : (eff_size == `SZ_W) ? 6'd16 : 6'd32;
+wire [31:0] szmask   = (eff_size == `SZ_B) ? 32'h0000_00FF : (eff_size == `SZ_W) ? 32'h0000_FFFF : 32'hFFFF_FFFF;
 wire [31:0] am = a & szmask;
 wire [31:0] bm = b & szmask;
-wire        a_msb = (size == `SZ_B) ? a[7] : (size == `SZ_W) ? a[15] : a[31];
-wire        b_msb = (size == `SZ_B) ? b[7] : (size == `SZ_W) ? b[15] : b[31];
+wire        a_msb = (eff_size == `SZ_B) ? a[7] : (eff_size == `SZ_W) ? a[15] : a[31];
+wire        b_msb = (eff_size == `SZ_B) ? b[7] : (eff_size == `SZ_W) ? b[15] : b[31];
 
 function msb_of;
 	input [31:0] r;
 	begin
-		msb_of = (size == `SZ_B) ? r[7] : (size == `SZ_W) ? r[15] : r[31];
+		msb_of = (eff_size == `SZ_B) ? r[7] : (eff_size == `SZ_W) ? r[15] : r[31];
 	end
 endfunction
 function zero_of;
@@ -56,90 +58,72 @@ function zero_of;
 endfunction
 
 //---------------------------------------------------------------------------
-// shared adder / subtractor (ADD/ADDX share, SUB/SUBX/CMP share)
+// shared adder / subtractor (ADD/ADDX/ADDA share, SUB/SUBX/SUBA/CMP/CMPA/NEG/NEGX share)
 //---------------------------------------------------------------------------
-wire        add_ext = (op == `ALU_ADDX) & f_x;
-wire        sub_ext = (op == `ALU_SUBX) & f_x;
+wire        is_neg   = (op == `ALU_NEG) || (op == `ALU_NEGX);
+wire [31:0] sub_lhs  = is_neg ? 32'd0 : bm;
+wire [31:0] sub_rhs  = is_neg ? bm    : am;
+wire        add_ext  = (op == `ALU_ADDX) & f_x;
+wire        sub_ext  = ((op == `ALU_SUBX) || (op == `ALU_NEGX)) & f_x;
 wire [32:0] add_full = {1'b0, bm} + {1'b0, am} + {32'd0, add_ext};
-wire [32:0] sub_full = {1'b0, bm} - {1'b0, am} - {32'd0, sub_ext};
-wire        add_c = (size == `SZ_B) ? add_full[8] : (size == `SZ_W) ? add_full[16] : add_full[32];
-wire        sub_c = (size == `SZ_B) ? sub_full[8] : (size == `SZ_W) ? sub_full[16] : sub_full[32];
-wire        add_msb = msb_of(add_full[31:0]);
-wire        sub_msb = msb_of(sub_full[31:0]);
-wire        add_v = (a_msb == b_msb) && (add_msb != a_msb);
-wire        sub_v = (a_msb != b_msb) && (sub_msb == a_msb);
-
-// 32-bit address arithmetic and CMPA (operands already sign extended)
-wire [32:0] add32 = {1'b0, b} + {1'b0, a};
-wire [32:0] sub32 = {1'b0, b} - {1'b0, a};
-wire        cmpa_v = (a[31] != b[31]) && (sub32[31] == a[31]);
+wire [32:0] sub_full = {1'b0, sub_lhs} - {1'b0, sub_rhs} - {32'd0, sub_ext};
+wire        add_c    = (eff_size == `SZ_B) ? add_full[8] : (eff_size == `SZ_W) ? add_full[16] : add_full[32];
+wire        sub_c    = (eff_size == `SZ_B) ? sub_full[8] : (eff_size == `SZ_W) ? sub_full[16] : sub_full[32];
+wire        add_msb  = msb_of(add_full[31:0]);
+wire        sub_msb  = msb_of(sub_full[31:0]);
+wire        add_v    = (a_msb == b_msb) && (add_msb != a_msb);
+wire        sub_v    = is_neg ? (b_msb & sub_msb) : ((a_msb != b_msb) && (sub_msb == a_msb));
 
 //---------------------------------------------------------------------------
-// BCD (byte only)
+// BCD (byte only; SBCD and NBCD share the decimal subtractor)
 //---------------------------------------------------------------------------
 // ABCD: b + a + X with decimal correction
 wire [4:0] abcd_lo   = {1'b0, b[3:0]} + {1'b0, a[3:0]} + {4'd0, f_x};
 wire [9:0] abcd_raw  = {2'd0, b[7:0]} + {2'd0, a[7:0]} + {9'd0, f_x} + ((abcd_lo > 5'd9) ? 10'd6 : 10'd0);
 wire       abcd_c    = (abcd_raw[9:4] > 6'd9);
 wire [9:0] abcd_res  = abcd_raw + (abcd_c ? 10'h60 : 10'd0);
-// SBCD: b - a - X
-wire       sbcd_lb   = ({1'b0, b[3:0]} < ({1'b0, a[3:0]} + {4'd0, f_x}));
-wire [9:0] sbcd_raw  = {2'd0, b[7:0]} - {2'd0, a[7:0]} - {9'd0, f_x};
+// SBCD (b - a - X) / NBCD (0 - b - X)
+wire [7:0] sbcd_a    = (op == `ALU_NBCD) ? b[7:0] : a[7:0];
+wire [7:0] sbcd_b    = (op == `ALU_NBCD) ? 8'd0   : b[7:0];
+wire       sbcd_lb   = ({1'b0, sbcd_b[3:0]} < ({1'b0, sbcd_a[3:0]} + {4'd0, f_x}));
+wire [9:0] sbcd_raw  = {2'd0, sbcd_b} - {2'd0, sbcd_a} - {9'd0, f_x};
 wire [9:0] sbcd_cor  = sbcd_raw - (sbcd_lb ? 10'd6 : 10'd0);
 wire [9:0] sbcd_res  = sbcd_cor - (sbcd_raw[9] ? 10'h60 : 10'd0);
 wire       sbcd_c    = sbcd_cor[9];
-// NBCD: 0 - b - X
-wire       nbcd_lb   = (b[3:0] != 4'd0) | f_x;
-wire [9:0] nbcd_raw  = 10'd0 - {2'd0, b[7:0]} - {9'd0, f_x};
-wire [9:0] nbcd_cor  = nbcd_raw - (nbcd_lb ? 10'd6 : 10'd0);
-wire [9:0] nbcd_res  = nbcd_cor - (nbcd_raw[9] ? 10'h60 : 10'd0);
-wire       nbcd_c    = nbcd_cor[9];
 
 //---------------------------------------------------------------------------
-// shifter: closed forms of shcnt single-bit steps.  The shifter works on
-// registered copies of its inputs (it is the deepest logic of the ALU), so
-// a shift or rotate result is valid one clock after the operands are stable;
-// the sequencer waits that clock for these operations.
-reg [31:0] sq_b;
-reg  [5:0] sq_op, sq_cnt;
-reg  [1:0] sq_size;
-reg        sq_x;
-always @(posedge clk) if (ce) begin
-	sq_b <= b; sq_op <= op; sq_cnt <= shcnt; sq_size <= size; sq_x <= f_x;
-end
-wire [5:0]  sq_nbits  = (sq_size == `SZ_B) ? 6'd8 : (sq_size == `SZ_W) ? 6'd16 : 6'd32;
-wire [31:0] sq_szmask = (sq_size == `SZ_B) ? 32'h0000_00FF : (sq_size == `SZ_W) ? 32'h0000_FFFF : 32'hFFFF_FFFF;
-wire [31:0] sq_bm     = sq_b & sq_szmask;
-wire        sq_b_msb  = (sq_size == `SZ_B) ? sq_b[7] : (sq_size == `SZ_W) ? sq_b[15] : sq_b[31];
-function sq_msb_of;
-	input [31:0] r;
-	begin
-		sq_msb_of = (sq_size == `SZ_B) ? r[7] : (sq_size == `SZ_W) ? r[15] : r[31];
-	end
-endfunction
-function sq_zero_of;
-	input [31:0] r;
-	begin
-		sq_zero_of = ((r & sq_szmask) == 32'd0);
-	end
-endfunction
+// shifter: closed forms of shcnt single-bit steps.  Operands in S_GEN_EXEC
+// are already registered in the core (src, dst, g_alu, g_size, sr).
+wire  [5:0] sq_op     = op;
+wire  [5:0] sq_cnt    = shcnt;
+wire  [5:0] sq_nbits  = nbits;
+wire [31:0] sq_szmask = szmask;
+wire [31:0] sq_bm     = bm;
+wire        sq_b_msb  = b_msb;
+wire        sq_x      = f_x;
 //---------------------------------------------------------------------------
-function [31:0] reverse32;
+function [31:0] rev_sz;
 	input [31:0] v;
+	input [1:0]  sz;
 	integer i;
 	begin
-		for (i = 0; i < 32; i = i + 1) reverse32[i] = v[31-i];
+		rev_sz = 32'd0;
+		case (sz)
+			`SZ_B: for (i = 0; i < 8;  i = i + 1) rev_sz[i] = v[7-i];
+			`SZ_W: for (i = 0; i < 16; i = i + 1) rev_sz[i] = v[15-i];
+			default: for (i = 0; i < 32; i = i + 1) rev_sz[i] = v[31-i];
+		endcase
 	end
 endfunction
 
 wire shift_left  = (sq_op == `ALU_ASL) || (sq_op == `ALU_LSL);
 wire shift_arith = (sq_op == `ALU_ASR);
 wire signfill    = shift_arith && sq_b_msb;
-wire [31:0] sh_in = shift_left ? reverse32(sq_bm) : (signfill ? (sq_bm | ~sq_szmask) : sq_bm);
-wire signed [32:0] sh_sin = {signfill, sh_in};
-wire signed [32:0] sh_sr = sh_sin >>> sq_cnt;
-wire [31:0] sh_r = sh_sr[31:0];
-wire [31:0] shift_res = (shift_left ? reverse32(sh_r) : sh_r) & sq_szmask;
+wire [31:0] sh_in = shift_left ? rev_sz(sq_bm, size) : (signfill ? (sq_bm | ~sq_szmask) : sq_bm);
+wire signed [33:0] sh_sin = {signfill, sh_in, 1'b0};
+wire signed [33:0] sh_sr  = sh_sin >>> sq_cnt;
+wire [31:0] sh_r = sh_sr[32:1];
+wire [31:0] shift_res = (shift_left ? rev_sz(sh_r, size) : sh_r) & sq_szmask;
 
 reg  [31:0] sh_result;
 reg   [4:0] sh_flags;
@@ -148,20 +132,22 @@ always @* begin : shifter
 	reg [32:0] cont, rot, cmask, rin, rmask;
 	reg  [5:0] rw;
 	reg        rext, rright;
-	reg [31:0] r, win;
+	reg [31:0] r, win, ovf_mask;
 	reg        c, x2, vf;
 	n = sq_cnt; r = 32'd0; c = 1'b0; x2 = sq_x; vf = 1'b0;
+	win = 32'd0; ovf_mask = 32'd0;
 	nm = n & (sq_nbits - 6'd1);
 	// n mod (size+1) for the extend rotates
-	case (sq_nbits)
-		6'd8:  nx = (n >= 6'd63) ? n - 6'd63 : (n >= 6'd54) ? n - 6'd54 : (n >= 6'd45) ? n - 6'd45 :
+	case (size)
+		`SZ_B: nx = (n >= 6'd63) ? n - 6'd63 : (n >= 6'd54) ? n - 6'd54 : (n >= 6'd45) ? n - 6'd45 :
 		            (n >= 6'd36) ? n - 6'd36 : (n >= 6'd27) ? n - 6'd27 : (n >= 6'd18) ? n - 6'd18 :
 		            (n >= 6'd9) ? n - 6'd9 : n;
-		6'd16: nx = (n >= 6'd51) ? n - 6'd51 : (n >= 6'd34) ? n - 6'd34 : (n >= 6'd17) ? n - 6'd17 : n;
+		`SZ_W: nx = (n >= 6'd51) ? n - 6'd51 : (n >= 6'd34) ? n - 6'd34 : (n >= 6'd17) ? n - 6'd17 : n;
 		default: nx = (n >= 6'd33) ? n - 6'd33 : n;
 	endcase
-	cmask = (33'd2 << sq_nbits) - 33'd1;
-	cont  = ({32'd0, sq_x} << sq_nbits) | {1'b0, sq_bm};
+	cmask  = (size == `SZ_B) ? 33'h0_0000_01FF : (size == `SZ_W) ? 33'h0_0001_FFFF : 33'h1_FFFF_FFFF;
+	cont   = (size == `SZ_B) ? {24'd0, sq_x, sq_bm[7:0]} :
+	         (size == `SZ_W) ? {16'd0, sq_x, sq_bm[15:0]} : {sq_x, sq_bm};
 	rext   = (sq_op == `ALU_ROXL) || (sq_op == `ALU_ROXR);
 	rright = (sq_op == `ALU_ROR) || (sq_op == `ALU_ROXR);
 	rw     = sq_nbits + {5'd0, rext};
@@ -171,27 +157,18 @@ always @* begin : shifter
 	rmask  = rext ? cmask : {1'b0, sq_szmask};
 	rot    = ((rin << w_left) | (rin >> (rw - w_left))) & rmask;
 	case (sq_op)
-		`ALU_ASL, `ALU_LSL: begin
+		`ALU_ASL, `ALU_LSL, `ALU_LSR, `ALU_ASR: begin
 			r = shift_res;
-			c = (n != 0) && (n <= sq_nbits) && (((sq_bm >> (sq_nbits - n)) & 32'd1) != 0);
+			c = sh_sr[0];
 			x2 = (n == 0) ? sq_x : c;
 			if (sq_op == `ALU_ASL) begin
 				if (n >= sq_nbits) vf = (sq_bm != 0);
 				else if (n != 0) begin
-					win = sq_bm >> (sq_nbits - 6'd1 - n);
-					vf = !((win == 0) || (win == ((32'd2 << n) - 32'd1)));
+					ovf_mask = (32'd2 << n[4:0]) - 32'd1;
+					win = sh_in & ovf_mask;
+					vf = (win != 32'd0) && (win != ovf_mask);
 				end
 			end
-		end
-		`ALU_LSR: begin
-			r = shift_res;
-			c = (n != 0) && (n <= sq_nbits) && (((sq_bm >> (n - 6'd1)) & 32'd1) != 0);
-			x2 = (n == 0) ? sq_x : c;
-		end
-		`ALU_ASR: begin
-			r = shift_res;
-			c = (n == 0) ? 1'b0 : (n >= sq_nbits) ? sq_b_msb : (((sq_bm >> (n - 6'd1)) & 32'd1) != 0);
-			x2 = (n == 0) ? sq_x : c;
 		end
 		`ALU_ROL: begin
 			r = rot[31:0] & sq_szmask;
@@ -199,16 +176,16 @@ always @* begin : shifter
 		end
 		`ALU_ROR: begin
 			r = rot[31:0] & sq_szmask;
-			c = (n == 0) ? 1'b0 : (((r >> (sq_nbits - 6'd1)) & 32'd1) != 0);
+			c = (n == 0) ? 1'b0 : msb_of(r);
 		end
 		default: begin  // ROXL / ROXR
-			x2 = ((rot >> sq_nbits) & 33'd1) != 0;
+			x2 = (size == `SZ_B) ? rot[8] : (size == `SZ_W) ? rot[16] : rot[32];
 			r  = rot[31:0] & sq_szmask;
 			c  = x2;                       // count 0: C = X
 		end
 	endcase
 	sh_result = r;
-	sh_flags  = {x2, sq_msb_of(r), sq_zero_of(r), vf, c};
+	sh_flags  = {x2, msb_of(r), zero_of(r), vf, c};
 end
 
 //---------------------------------------------------------------------------
@@ -217,23 +194,20 @@ end
 wire [31:0] bit_mask = 32'd1 << a[4:0];
 wire        bit_set  = |(b & bit_mask);
 
-wire [31:0] negx_res = (32'd0 - bm - {31'd0, f_x}) & szmask;
-wire [31:0] neg_res  = (32'd0 - bm) & szmask;
 wire [31:0] ext_res  = (size == `SZ_W) ? {16'd0, {8{b[7]}}, b[7:0]} : {{16{b[15]}}, b[15:0]};
 
 always @* begin
 	result    = bm;
 	flags_out = flags_in;
 	case (op)
-		`ALU_MOVE, `ALU_TST, `ALU_MOVEB: begin
+		`ALU_MOVE, `ALU_TST: begin
 			result = am;
 			flags_out = {f_x, msb_of(am), zero_of(am), 1'b0, 1'b0};
 		end
 		`ALU_MOVEA: begin
 			result = a;
 		end
-		`ALU_PASSB: result = b;
-		`ALU_ADD: begin
+		`ALU_ADD, `ALU_ADDA: begin
 			result = add_full[31:0] & szmask;
 			flags_out = {add_c, add_msb, zero_of(add_full[31:0]), add_v, add_c};
 		end
@@ -241,23 +215,17 @@ always @* begin
 			result = add_full[31:0] & szmask;
 			flags_out = {add_c, add_msb, f_z & zero_of(add_full[31:0]), add_v, add_c};
 		end
-		`ALU_SUB: begin
+		`ALU_SUB, `ALU_SUBA, `ALU_NEG: begin
 			result = sub_full[31:0] & szmask;
 			flags_out = {sub_c, sub_msb, zero_of(sub_full[31:0]), sub_v, sub_c};
 		end
-		`ALU_SUBX: begin
+		`ALU_SUBX, `ALU_NEGX: begin
 			result = sub_full[31:0] & szmask;
 			flags_out = {sub_c, sub_msb, f_z & zero_of(sub_full[31:0]), sub_v, sub_c};
 		end
-		`ALU_CMP: begin
+		`ALU_CMP, `ALU_CMPA: begin
 			result = bm;
 			flags_out = {f_x, sub_msb, zero_of(sub_full[31:0]), sub_v, sub_c};
-		end
-		`ALU_ADDA: result = add32[31:0];
-		`ALU_SUBA: result = sub32[31:0];
-		`ALU_CMPA: begin
-			result = b;
-			flags_out = {f_x, sub32[31], (sub32[31:0] == 32'd0), cmpa_v, sub32[32]};
 		end
 		`ALU_AND: begin
 			result = bm & am;
@@ -274,14 +242,6 @@ always @* begin
 		`ALU_NOT: begin
 			result = (~bm) & szmask;
 			flags_out = {f_x, msb_of(~bm), zero_of(~bm), 1'b0, 1'b0};
-		end
-		`ALU_NEG: begin
-			result = neg_res;
-			flags_out = {|bm, msb_of(neg_res), zero_of(neg_res), b_msb & msb_of(neg_res), |bm};
-		end
-		`ALU_NEGX: begin
-			result = negx_res;
-			flags_out = {(|bm) | f_x, msb_of(negx_res), f_z & zero_of(negx_res), b_msb & msb_of(negx_res), (|bm) | f_x};
 		end
 		`ALU_CLR: begin
 			result = 32'd0;
@@ -307,13 +267,9 @@ always @* begin
 			result = {24'd0, abcd_res[7:0]};
 			flags_out = {abcd_c, abcd_res[7], f_z & (abcd_res[7:0] == 8'd0), 1'b0, abcd_c};
 		end
-		`ALU_SBCD: begin
+		`ALU_SBCD, `ALU_NBCD: begin
 			result = {24'd0, sbcd_res[7:0]};
 			flags_out = {sbcd_c, sbcd_res[7], f_z & (sbcd_res[7:0] == 8'd0), 1'b0, sbcd_c};
-		end
-		`ALU_NBCD: begin
-			result = {24'd0, nbcd_res[7:0]};
-			flags_out = {nbcd_c, nbcd_res[7], f_z & (nbcd_res[7:0] == 8'd0), 1'b0, nbcd_c};
 		end
 		`ALU_ASL, `ALU_ASR, `ALU_LSL, `ALU_LSR, `ALU_ROL, `ALU_ROR, `ALU_ROXL, `ALU_ROXR: begin
 			result = sh_result;

@@ -37,8 +37,9 @@ reg [96:0] acc;
 
 wire [31:0] abs_a = (sign_op && op_a[31]) ? (32'd0 - op_a) : op_a;
 wire [63:0] dvd   = {op_hi, op_lo};
-wire [63:0] abs_d = (sign_op && op_hi[31]) ? (64'd0 - dvd) : dvd;
-wire [31:0] abs_m = (sign_op && op_lo[31]) ? (32'd0 - op_lo) : op_lo;
+wire        neg_d = sign_op && (is_div ? op_hi[31] : op_lo[31]);
+wire [63:0] abs_d = neg_d ? (64'd0 - dvd) : dvd;
+wire [31:0] abs_m = abs_d[31:0];
 
 function [96:0] div_step;
 	input [96:0] a;
@@ -68,8 +69,10 @@ always @(posedge clk) if (ce) begin
 			div_r <= is_div; running <= 1'b1; ovf <= 1'b0;
 			den <= abs_a;
 			if (is_div) begin
-				acc <= {33'd0, abs_d};
-				count <= 5'd16;
+				acc <= (abs_d[63:16] == 48'd0) ? {33'd0, abs_d[15:0], 48'd0} :
+				       (abs_d[63:32] == 32'd0) ? {33'd0, abs_d[31:0], 32'd0} : {33'd0, abs_d};
+				count <= (abs_d[63:16] == 48'd0) ? 5'd4 :
+				         (abs_d[63:32] == 32'd0) ? 5'd8 : 5'd16;
 				neg_q <= sign_op && (op_hi[31] ^ op_a[31]);
 				neg_r <= sign_op && op_hi[31];
 			end else begin
@@ -86,13 +89,12 @@ always @(posedge clk) if (ce) begin
 			end else begin
 				running <= 1'b0;
 				done <= 1'b1;
+				res_lo <= neg_q ? (32'd0 - q_raw[31:0]) : q_raw[31:0];
 				if (div_r) begin
-					res_lo <= neg_q ? (32'd0 - q_raw[31:0]) : q_raw[31:0];
 					res_hi <= neg_r ? (32'd0 - r_raw) : r_raw;
 					ovf <= (|q_raw[63:32]) |
 					       (sign_op & (neg_q ? (q_raw[31:0] > 32'h8000_0000) : q_raw[31]));
 				end else begin
-					res_lo <= neg_q ? (32'd0 - q_raw[31:0]) : q_raw[31:0];
 					res_hi <= neg_q ? (~q_raw[63:32] + {31'd0, (q_raw[31:0] == 32'd0)}) : q_raw[63:32];
 					ovf <= 1'b0;
 				end

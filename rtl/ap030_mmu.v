@@ -99,19 +99,21 @@ wire [3:0] tc_tid = tc[3:0];
 
 // page mask: which of LA[31:8] take part in the compare (ones) for the page
 // size; PS = 8 compares all 24 bits, PS = 15 compares 17
-reg [23:0] pmask;
+reg [6:0] pmask_lo;
 always @* begin
 	case (tc_ps)
-		4'd8:  pmask = 24'hFFFFFF;
-		4'd9:  pmask = 24'hFFFFFE;
-		4'd10: pmask = 24'hFFFFFC;
-		4'd11: pmask = 24'hFFFFF8;
-		4'd12: pmask = 24'hFFFFF0;
-		4'd13: pmask = 24'hFFFFE0;
-		4'd14: pmask = 24'hFFFFC0;
-		default: pmask = 24'hFFFF80;
+		4'd8:    pmask_lo = 7'b111_1111;
+		4'd9:    pmask_lo = 7'b111_1110;
+		4'd10:   pmask_lo = 7'b111_1100;
+		4'd11:   pmask_lo = 7'b111_1000;
+		4'd12:   pmask_lo = 7'b111_0000;
+		4'd13:   pmask_lo = 7'b110_0000;
+		4'd14:   pmask_lo = 7'b100_0000;
+		default: pmask_lo = 7'b000_0000;
 	endcase
 end
+wire [23:0] pmask = {17'h1FFFF, pmask_lo};
+
 
 //---------------------------------------------------------------------------
 // ATC
@@ -136,7 +138,9 @@ function [N-1:0] atc_match;
 	begin
 		for (k = 0; k < N; k = k + 1)
 			atc_match[k] = atc_v[k] && (atc_fc[k] == fc) &&
-			               ((atc_la[k] & pmask) == (la[31:8] & pmask));
+			               (atc_la[k][23:7] == la[31:15]) &&
+			               (((atc_la[k][6:0] ^ la[14:8]) & pmask_lo) == 7'd0);
+
 	end
 endfunction
 
@@ -182,7 +186,8 @@ wire tr_translate = tc_e && !mmudis && !tr_tt && (tr_fc != `FC_CPU_SPACE);
 assign tr_fault = tr_translate && tr_hit && (e_b || (tr_write && e_wp));
 assign tr_walk  = tr_translate && (!tr_hit || (tr_write && !e_m && !e_wp && !e_b));
 assign tr_ok    = !tr_translate || (tr_hit && !tr_fault && !tr_walk);
-assign tr_pa    = tr_translate ? {(e_pa & pmask) | (tr_la[31:8] & ~pmask), tr_la[7:0]} : tr_la;
+assign tr_pa    = tr_translate ? {e_pa[23:7], (e_pa[6:0] & pmask_lo) | (tr_la[14:8] & ~pmask_lo), tr_la[7:0]} : tr_la;
+
 assign tr_ci    = tr_tt ? tr_tt_ci : (tr_translate ? e_ci : 1'b0);
 
 //---------------------------------------------------------------------------
@@ -210,7 +215,6 @@ reg        s_write;        // write access: M must be set
 reg        s_ptest;        // PTEST: no updates, no ATC entry, MMUSR result
 reg        s_pload;
 reg  [2:0] s_maxlvl;       // PTEST level
-reg        s_walk_norm;    // normal translation search (walk_done at the end)
 reg  [2:0] s_n;            // tables accessed
 reg        s_b, s_l, s_sv, s_wp, s_i, s_m, s_ci;
 reg  [5:0] s_bitpos;       // MSB of the next index field (0..31), 63 = none
@@ -223,7 +227,6 @@ reg        s_lim_lu;       // pending limit for s_idx
 reg [14:0] s_lim;
 reg        s_lim_chk;
 reg [31:0] s_lw0, s_lw1;   // fetched descriptor
-reg [31:0] s_daddr;        // address of the descriptor being fetched
 reg        s_long;         // it is a long descriptor
 reg        s_indirect;     // evaluating the target of an indirect descriptor
 reg [23:0] s_pa;
@@ -302,36 +305,42 @@ reg s_ptest_lvl0;
 assign w_active = (wst != W_IDLE) && (wst != W_ATC0) && (wst != W_DONE) && !s_ptest_lvl0;
 assign busy = (wst != W_IDLE) || walk_pend;
 
-// ATC entry creation
-reg        atc_wr;
-reg  [2:0] atc_wr_fc;
-reg [23:0] atc_wr_la;
-reg        atc_wr_b, atc_wr_ci, atc_wr_wp, atc_wr_m;
-reg [23:0] atc_wr_pa;
+// Shared s_la / s_fc ATC comparator used by W_ATC0 (PTEST #0), W_DONE (ATC
+// replacement), and PFLUSH (fl_fc).
+reg [N-1:0] s_la_match, s_fc_match;
+integer si;
+always @* begin
+	for (si = 0; si < N; si = si + 1) begin
+		s_la_match[si] = (atc_la[si][23:7] == s_la[31:15]) &&
+		                 (((atc_la[si][6:0] ^ s_la[14:8]) & pmask_lo) == 7'd0);
+		s_fc_match[si] = (atc_fc[si] == s_fc);
+	end
+
+end
+wire do_atc_wr = (wst == W_DONE) && !s_ptest;
+
 // PFLUSH
 reg        fl_all, fl_fc, fl_ea;
-reg  [2:0] fl_fcv, fl_fcm;
-reg [31:0] fl_la;
+reg  [2:0] fl_fcm;
 
 // victim: first invalid entry, else the first entry at or after the pointer
 // whose history bit is clear; when all history bits are set they are cleared
-reg [4:0] victim;
-reg       victim_found, all_hist;
+reg [4:0] victim, v_inv, v_all, v_ptr;
+reg       f_inv, f_all, f_ptr, all_hist;
 integer vi;
 always @* begin
-	victim = atc_ptr; victim_found = 1'b0; all_hist = 1'b1;
-	for (vi = 0; vi < N; vi = vi + 1) if (!atc_h[vi] && atc_v[vi]) all_hist = 1'b0;
-	for (vi = 0; vi < N; vi = vi + 1) begin
-		if (!victim_found && !atc_v[vi]) begin victim = vi[4:0]; victim_found = 1'b1; end
-	end
-	if (!victim_found) begin
-		for (vi = 0; vi < 2*N; vi = vi + 1) begin
-			if (!victim_found && (vi >= atc_ptr) && !atc_h[(vi >= N) ? vi - N : vi]) begin
-				victim = (vi >= N) ? vi[4:0] - 5'd22 : vi[4:0]; victim_found = 1'b1;
-			end
+	v_inv = 5'd0; f_inv = 1'b0;
+	v_all = 5'd0; f_all = 1'b0;
+	v_ptr = 5'd0; f_ptr = 1'b0;
+	for (vi = N - 1; vi >= 0; vi = vi - 1) begin
+		if (!atc_v[vi]) begin v_inv = vi[4:0]; f_inv = 1'b1; end
+		if (!atc_h[vi]) begin
+			v_all = vi[4:0]; f_all = 1'b1;
+			if (vi[4:0] >= atc_ptr) begin v_ptr = vi[4:0]; f_ptr = 1'b1; end
 		end
 	end
-	if (!victim_found) victim = atc_ptr;
+	all_hist = !f_all;
+	victim = f_inv ? v_inv : f_ptr ? v_ptr : f_all ? v_all : atc_ptr;
 end
 
 integer ai;
@@ -351,20 +360,20 @@ always @(posedge clk) if (ce) begin
 		if (tr_use) begin
 			for (ai = 0; ai < N; ai = ai + 1) if (tr_m_q[ai]) atc_h[ai] <= 1'b1;
 		end
-		if (atc_wr) begin
+		if (do_atc_wr) begin
 			// an existing entry for the same page is replaced
 			for (ai = 0; ai < N; ai = ai + 1) begin
-				if (atc_v[ai] && atc_fc[ai] == atc_wr_fc && ((atc_la[ai] & pmask) == (atc_wr_la & pmask)))
+				if (atc_v[ai] && s_fc_match[ai] && s_la_match[ai])
 					atc_v[ai] <= 1'b0;
 			end
 			atc_v[victim]  <= 1'b1;
-			atc_fc[victim] <= atc_wr_fc;
-			atc_la[victim] <= atc_wr_la;
-			atc_b[victim]  <= atc_wr_b;
-			atc_ci[victim] <= atc_wr_ci;
-			atc_wp[victim] <= atc_wr_wp;
-			atc_m[victim]  <= atc_wr_m;
-			atc_pa[victim] <= atc_wr_pa;
+			atc_fc[victim] <= s_fc;
+			atc_la[victim] <= s_la[31:8];
+			atc_b[victim]  <= s_i | s_b | s_l | s_sv;
+			atc_ci[victim] <= s_ci;
+			atc_wp[victim] <= s_wp;
+			atc_m[victim]  <= s_m;
+			atc_pa[victim] <= s_pa;
 			atc_h[victim]  <= 1'b1;
 			if (all_hist) for (ai = 0; ai < N; ai = ai + 1) if (ai[4:0] != victim) atc_h[ai] <= 1'b0;
 			atc_ptr <= (victim == N-1) ? 5'd0 : victim + 5'd1;
@@ -373,8 +382,7 @@ always @(posedge clk) if (ce) begin
 			for (ai = 0; ai < N; ai = ai + 1) begin atc_v[ai] <= 1'b0; atc_h[ai] <= 1'b0; end
 		end else if (fl_fc) begin
 			for (ai = 0; ai < N; ai = ai + 1)
-				if (((atc_fc[ai] ^ fl_fcv) & fl_fcm) == 3'd0 &&
-				    (!fl_ea || ((atc_la[ai] & pmask) == (fl_la[31:8] & pmask))))
+				if (((atc_fc[ai] ^ s_fc) & fl_fcm) == 3'd0 && (!fl_ea || s_la_match[ai]))
 					atc_v[ai] <= 1'b0;
 		end
 	end
@@ -444,17 +452,17 @@ end
 //---------------------------------------------------------------------------
 // the search state machine
 //---------------------------------------------------------------------------
-wire [31:0] root_hi = (s_fc[2] && tc_sre) ? srp_hi : crp_hi;
-wire [31:0] root_lo = (s_fc[2] && tc_sre) ? srp_lo : crp_lo;
+wire [2:0]  init_fc = (walk_req || walk_pend) ? walk_fc : op_fc;
+wire [31:0] root_hi = (init_fc[2] && tc_sre) ? srp_hi : crp_hi;
+wire [31:0] root_lo = (init_fc[2] && tc_sre) ? srp_lo : crp_lo;
 
 // page address with the contiguous-region offset of an early termination
-wire [31:0] pa_sum = {d_addr[31:8] & pa_field_mask, 8'd0} + (s_la & low_mask(s_bitpos));
-wire [31:0] root_pa_sum = ({s_tbl, 4'd0} & {pmask, 8'd0}) + (s_la & low_mask(s_bitpos));
+wire [23:0] base_pa = (wst == W_ROOT) ? s_tbl[31:8] : d_addr[31:8];
+wire [31:0] pa_sum  = {base_pa & pa_field_mask, 8'd0} + (s_la & low_mask(s_bitpos));
 
 always @(posedge clk) if (ce) begin
 	walk_done <= 1'b0;
 	op_done   <= 1'b0;
-	atc_wr    <= 1'b0;
 	fl_all    <= 1'b0; fl_fc <= 1'b0;
 	mmusr_we  <= 1'b0;
 	if (rst) begin
@@ -471,11 +479,23 @@ always @(posedge clk) if (ce) begin
 		if (walk_req) walk_pend <= 1'b1;
 		case (wst)
 			W_IDLE: begin
+				// UM 9.5.2: initialize the tree, the first index and its limit
+				s_n <= 3'd0; s_b <= 1'b0; s_l <= 1'b0; s_sv <= 1'b0; s_wp <= 1'b0; s_i <= 1'b0;
+				s_m <= 1'b0; s_ci <= 1'b0; s_indirect <= 1'b0; s_fld_done <= 1'b0;
+				s_bitpos <= 6'd31 - {2'd0, tc_is};
+				s_fld <= 2'd0;
+				s_dt <= root_hi[1:0];
+				s_tbl <= root_lo[31:4];
+				s_lim_lu <= root_hi[31];
+				s_lim <= root_hi[30:16];
+				s_lim_chk <= !tc_fcl;            // the function code level is not limited
+				s_fcl_pending <= tc_fcl;
 				if (walk_req || walk_pend) begin
 					walk_pend <= 1'b0;
 					s_la <= walk_la; s_fc <= walk_fc; s_write <= !walk_rw || walk_rmc;
-					s_ptest <= 1'b0; s_pload <= 1'b0; s_maxlvl <= 3'd7; s_walk_norm <= 1'b1;
-					wst <= W_INIT;
+					s_ptest <= 1'b0; s_pload <= 1'b0; s_maxlvl <= 3'd7;
+					op_desc_addr <= 32'd0;
+					wst <= W_ROOT;
 				end else if ((op_req || op_pend) && !(wpend && !op_kind[2])) begin
 					// PLOAD and PTEST search after the write posted before
 					// them, as a translation's search does (ap030_memsys): the
@@ -483,17 +503,21 @@ always @(posedge clk) if (ce) begin
 					// controller ahead of the instruction (UM 11.2.5.2), and a
 					// descriptor just stored must be seen
 					op_pend <= 1'b0;
-					s_la <= op_la; s_fc <= op_fc; s_walk_norm <= 1'b0;
+					s_la <= op_la; s_fc <= op_fc;
 					case (op_kind)
-						3'd0, 3'd1: begin s_write <= op_kind[0]; s_ptest <= 1'b0; s_pload <= 1'b1; s_maxlvl <= 3'd7; wst <= W_INIT; end
+						3'd0, 3'd1: begin
+							s_write <= op_kind[0]; s_ptest <= 1'b0; s_pload <= 1'b1; s_maxlvl <= 3'd7;
+							op_desc_addr <= 32'd0; wst <= W_ROOT;
+						end
 						3'd2, 3'd3: begin
 							s_write <= op_kind[0]; s_ptest <= 1'b1; s_pload <= 1'b0; s_maxlvl <= op_level;
+							op_desc_addr <= 32'd0;
 							if (op_level == 3'd0) begin s_ptest_lvl0 <= 1'b1; wst <= W_ATC0; end
-							else wst <= W_INIT;
+							else wst <= W_ROOT;
 						end
 						3'd4: begin fl_all <= 1'b1; op_done <= 1'b1; end
 						3'd5, 3'd6: begin
-							fl_fc <= 1'b1; fl_ea <= (op_kind == 3'd6); fl_fcv <= op_fc; fl_fcm <= op_fcmask; fl_la <= op_la;
+							fl_fc <= 1'b1; fl_ea <= (op_kind == 3'd6); fl_fcm <= op_fcmask;
 							op_done <= 1'b1;
 						end
 						default: op_done <= 1'b1;
@@ -506,9 +530,13 @@ always @(posedge clk) if (ce) begin
 				reg [N-1:0] m;
 				reg b, wp, mm;
 				integer k;
-				m = atc_match(s_la, s_fc);
+				m = {N{1'b0}};
 				b = 1'b0; wp = 1'b0; mm = 1'b0;
-				for (k = 0; k < N; k = k + 1) if (m[k]) begin b = b | atc_b[k]; wp = wp | atc_wp[k]; mm = mm | atc_m[k]; end
+				for (k = 0; k < N; k = k + 1) begin
+					if (atc_v[k] && s_fc_match[k] && s_la_match[k]) begin
+						m[k] = 1'b1; b = b | atc_b[k]; wp = wp | atc_wp[k]; mm = mm | atc_m[k];
+					end
+				end
 				if (tt_match(tt0, s_la, s_fc, !s_write, 1'b0) || tt_match(tt1, s_la, s_fc, !s_write, 1'b0))
 					mmusr_new <= 16'h0040;   // T set, the rest undefined (zero here)
 				else
@@ -519,22 +547,6 @@ always @(posedge clk) if (ce) begin
 				wst <= W_IDLE;
 			end
 
-			W_INIT: begin
-				// UM 9.5.2: select the tree, the first index and its limit
-				s_n <= 3'd0; s_b <= 1'b0; s_l <= 1'b0; s_sv <= 1'b0; s_wp <= 1'b0; s_i <= 1'b0;
-				s_m <= 1'b0; s_ci <= 1'b0; s_indirect <= 1'b0; s_fld_done <= 1'b0;
-				s_bitpos <= 6'd31 - {2'd0, tc_is};
-				s_fld <= 2'd0;
-				s_dt <= root_hi[1:0];
-				s_tbl <= root_lo[31:4];
-				s_lim_lu <= root_hi[31];
-				s_lim <= root_hi[30:16];
-				s_lim_chk <= !tc_fcl;            // the function code level is not limited
-				s_fcl_pending <= tc_fcl;
-				op_desc_addr <= 32'd0;
-				wst <= W_ROOT;
-			end
-
 			W_ROOT: begin
 				// the root pointer acts as the first "descriptor"
 				if (s_dt == 2'b01) begin
@@ -543,7 +555,7 @@ always @(posedge clk) if (ce) begin
 					if (lim_viol(s_lim_lu, s_lim, idx_now) && (fld_w != 0)) begin
 						s_l <= 1'b1; s_i <= 1'b1; wst <= W_DONE;
 					end else begin
-						s_pa <= root_pa_sum[31:8];
+						s_pa <= pa_sum[31:8];
 						// no descriptor in memory to update: a write search
 						// makes the entry modified at once (UM 9.5.3.1)
 						s_m <= s_write && !s_ptest;
@@ -572,7 +584,6 @@ always @(posedge clk) if (ce) begin
 			W_ADDR: begin
 				// descriptor address: table base plus index scaled by the format
 				s_long  <= (s_dt == 2'b11);
-				s_daddr <= {s_tbl, 4'd0} + ((s_dt == 2'b11) ? {14'd0, s_idx, 3'd0} : {15'd0, s_idx, 2'd0});
 				w_addr  <= {s_tbl, 4'd0} + ((s_dt == 2'b11) ? {14'd0, s_idx, 3'd0} : {15'd0, s_idx, 2'd0});
 				w_rw    <= 1'b1;
 				w_req   <= 1'b1;
@@ -581,8 +592,7 @@ always @(posedge clk) if (ce) begin
 
 			W_FETCH0: begin
 				if (w_ack) begin
-					w_req <= 1'b0;
-					if (w_berr) begin s_b <= 1'b1; s_i <= 1'b1; wst <= W_DONE; end
+					if (w_berr) begin w_req <= 1'b0; s_b <= 1'b1; s_i <= 1'b1; wst <= W_DONE; end
 					else begin
 						s_lw0 <= w_rdata;
 						// N and the PTEST An result count the descriptors fetched
@@ -591,25 +601,23 @@ always @(posedge clk) if (ce) begin
 						// does (WinUAE mmu030_table_search; UM Table 9-3 N: "the
 						// actual number of tables accessed")
 						if (s_long) begin
-							wst <= W_FETCH1R;
+							w_addr <= w_addr + 32'd4; w_rw <= 1'b1; w_req <= 1'b1;
+							wst <= W_FETCH1;
 						end else begin
+							w_req <= 1'b0;
 							s_n <= s_n + 3'd1;
-							op_desc_addr <= s_daddr;   // PTEST An: the last descriptor fetched completely
+							op_desc_addr <= w_addr;   // PTEST An: the last descriptor fetched completely
 							wst <= W_EVAL;
 						end
 					end
 				end
 			end
 
-			W_FETCH1R: begin
-				w_addr <= s_daddr + 32'd4; w_rw <= 1'b1; w_req <= 1'b1; wst <= W_FETCH1;
-			end
-
 			W_FETCH1: begin
 				if (w_ack) begin
 					w_req <= 1'b0;
 					if (w_berr) begin s_b <= 1'b1; s_i <= 1'b1; wst <= W_DONE; end
-					else begin s_lw1 <= w_rdata; s_n <= s_n + 3'd1; op_desc_addr <= s_daddr; wst <= W_EVAL; end
+					else begin s_lw1 <= w_rdata; s_n <= s_n + 3'd1; op_desc_addr <= w_addr - 32'd4; wst <= W_EVAL; end
 				end
 			end
 
@@ -649,7 +657,7 @@ always @(posedge clk) if (ce) begin
 						end
 						if (!s_ptest && !sv_acc && (!d_u || (s_write && !d_m && !(s_wp | d_wp)))) begin
 							w_wdata <= s_lw0 | 32'h8 | ((s_write && !(s_wp | d_wp)) ? 32'h10 : 32'h0);
-							w_addr  <= s_daddr; w_rw <= 1'b0; w_req <= 1'b1;
+							w_addr  <= op_desc_addr; w_rw <= 1'b0; w_req <= 1'b1;
 							if (s_write && !(s_wp | d_wp)) s_m <= 1'b1;
 							wst <= W_WB;
 						end else wst <= W_DONE;
@@ -658,7 +666,7 @@ always @(posedge clk) if (ce) begin
 						if (s_ptest && s_n == s_maxlvl) begin
 							wst <= W_DONE;
 						end else if (!s_ptest && !sv_acc && !d_u) begin
-							w_wdata <= s_lw0 | 32'h8; w_addr <= s_daddr; w_rw <= 1'b0; w_req <= 1'b1;
+							w_wdata <= s_lw0 | 32'h8; w_addr <= op_desc_addr; w_rw <= 1'b0; w_req <= 1'b1;
 							wst <= W_WB;
 						end else wst <= W_IND;
 					end
@@ -683,7 +691,6 @@ always @(posedge clk) if (ce) begin
 					s_indirect <= 1'b1;
 					s_dt <= dt_f;
 					s_long <= (dt_f == 2'b11);
-					s_daddr <= {d_addr[31:2], 2'd0};
 					w_addr <= {d_addr[31:2], 2'd0}; w_rw <= 1'b1; w_req <= 1'b1;
 					s_bitpos <= 6'd63;
 					wst <= W_FETCH0;
@@ -714,15 +721,7 @@ always @(posedge clk) if (ce) begin
 					mmusr_we <= 1'b1;
 					op_done <= 1'b1;
 				end else begin
-					// ATC entry (UM 9.4 / Figure 9-27); errors produce a B entry
-					atc_wr <= 1'b1;
-					atc_wr_fc <= s_fc;
-					atc_wr_la <= s_la[31:8];
-					atc_wr_b  <= s_i | s_b | s_l | s_sv;
-					atc_wr_ci <= s_ci;
-					atc_wr_wp <= s_wp;
-					atc_wr_m  <= s_m;
-					atc_wr_pa <= s_pa;
+					// ATC entry written by do_atc_wr above
 					if (s_pload) op_done <= 1'b1;
 					else walk_done <= 1'b1;
 				end

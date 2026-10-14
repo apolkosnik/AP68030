@@ -14,70 +14,44 @@
 // FC, ...) and 22-23 (write data: the DIB of a write fault, which UM 8.2.2
 // leaves to read faults).
 
-function [15:0] frame_word;
-	input [5:0] i;
+function [31:0] frame_long_out;
+	input [4:0] idx;
 	begin
-		case (i)
-			6'd0:  frame_word = exc_throw ? (exc_sr | 16'h2000) : exc_sr;   // throwaway: S set (UM 8.1.9)
-			6'd1:  frame_word = exc_pc[31:16];
-			6'd2:  frame_word = exc_pc[15:0];
-			6'd3:  frame_word = {exc_fmt, 2'b00, exc_vec, 2'b00};
+		case (idx)
+			5'd0:  frame_long_out = {exc_throw ? (exc_sr | 16'h2000) : exc_sr, exc_pc[31:16]};   // throwaway: S set (UM 8.1.9)
+			5'd1:  frame_long_out = {exc_pc[15:0], exc_fmt, 2'b00, exc_vec, 2'b00};
 			default: begin
 				if (exc_fmt == `FMT_SIXWORD || exc_fmt == `FMT_CPMID) begin
-					case (i)
-						6'd4: frame_word = exc_ia[31:16];
-						6'd5: frame_word = exc_ia[15:0];
-						6'd6: frame_word = {cp_kind, cp_id, cp_cond, cp_dr, cp_ca, cp_pcbit, cp_trace_wait, 4'd0};
-						6'd7: frame_word = ir;
-						6'd8: frame_word = ea[31:16];
-						default: frame_word = ea[15:0];
+					case (idx)
+						5'd2: frame_long_out = exc_fa;
+						5'd3: frame_long_out = {tr_t1, tr_t0, flow, cp_cond, cp_dr, cp_ca, cp_pcbit, cp_trace_wait, cp_kind, cp_id, 1'b0, ir};
+						default: frame_long_out = ea;
 					endcase
 				end else begin
-					case (i)
-						6'd4:  frame_word = {exc_rk, 4'd0, exc_rs};
-						6'd5:  frame_word = exc_ssw;
-						6'd6:  frame_word = exc_stage_c;
-						6'd7:  frame_word = exc_stage_b;
-						6'd8:  frame_word = exc_fa[31:16];
-						6'd9:  frame_word = exc_fa[15:0];
-						6'd10: frame_word = ea[31:16];
-						6'd11: frame_word = ea[15:0];
-						6'd12: frame_word = exc_dob[31:16];
-						6'd13: frame_word = exc_dob[15:0];
-						6'd14: frame_word = src[31:16];
-						6'd15: frame_word = src[15:0];
-						6'd16: frame_word = dst[31:16];
-						6'd17: frame_word = dst[15:0];
-						6'd18: frame_word = exc_baddr[31:16];
-						6'd19: frame_word = exc_baddr[15:0];
-						6'd20: frame_word = imm[31:16];
-						6'd21: frame_word = imm[15:0];
+					case (idx)
+						5'd2:  frame_long_out = {exc_rk, 4'd0, exc_rs, exc_ssw};
+						5'd3:  frame_long_out = {exc_stage_c, exc_stage_b};
+						5'd4:  frame_long_out = exc_fa;
+						5'd5:  frame_long_out = ea;
+						5'd6:  frame_long_out = exc_dob;
+						5'd7:  frame_long_out = src;
+						5'd8:  frame_long_out = dst;
+						5'd9:  frame_long_out = exc_baddr;
+						5'd10: frame_long_out = 32'd0;
 						// data input buffer; a suspended access keeps its write data there
-						6'd22: frame_word = (exc_rk == RK_HELD) ? exc_dib[31:16] : 16'd0;
-						6'd23: frame_word = (exc_rk == RK_HELD) ? exc_dib[15:0] : 16'd0;
-						6'd24: frame_word = tmp[31:16];
-						6'd25: frame_word = tmp[15:0];
-						6'd26: frame_word = ir;
-						6'd27: frame_word = {4'h0, exc_dw_dst, exc_dw_ret};  // version 0
-						6'd28: frame_word = tmp2[31:16];
-						6'd29: frame_word = tmp2[15:0];
-						6'd30: frame_word = ea2[31:16];
-						6'd31: frame_word = ea2[15:0];
-						6'd32: frame_word = {exc_cnt, sub};
-						6'd33: frame_word = mm_mask;
-						6'd34: frame_word = tmp3[15:0];
-						6'd35: frame_word = {ea_sel, imm_tgt, dw_reg, 1'b0, ea_pc, ea_ret};
-						6'd36: frame_word = {exc_got, 5'd0, imm_ret};
-						6'd37: frame_word = exc_partial[31:16];
-						6'd38: frame_word = exc_partial[15:0];
-						6'd39: frame_word = ext;
-						6'd40: frame_word = {tr_t1, tr_t0, flow, cp_cond, cp_dr, cp_ca, cp_pcbit, cp_trace_wait, cp_kind, cp_id, 1'b0};
-						6'd41: frame_word = {cp_len, cp_pos};
-						6'd42: frame_word = cp_base[31:16];
-						6'd43: frame_word = cp_base[15:0];
-						6'd44: frame_word = cp_resp;
-						6'd45: frame_word = {5'd0, exc_held};
-						default: frame_word = 16'd0;
+						5'd11: frame_long_out = (exc_rk == RK_HELD) ? exc_dib : 32'd0;
+						5'd12: frame_long_out = tmp;
+						5'd13: frame_long_out = {ir, 4'h0, exc_dw_dst, exc_dw_ret};  // version 0
+						5'd14: frame_long_out = tmp2;
+						5'd15: frame_long_out = ea2;
+						5'd16: frame_long_out = {exc_cnt, sub, mm_mask};
+						5'd17: frame_long_out = {tmp3[15:0], ea_sel, imm_tgt, dw_reg, 1'b0, ea_pc, ea_ret};
+						5'd18: frame_long_out = {exc_got, 5'd0, imm_ret, exc_partial[31:16]};
+						5'd19: frame_long_out = {exc_partial[15:0], ext};
+						5'd20: frame_long_out = {tr_t1, tr_t0, flow, cp_cond, cp_dr, cp_ca, cp_pcbit, cp_trace_wait, cp_kind, cp_id, 1'b0, cp_len, cp_pos};
+						5'd21: frame_long_out = {2'd0, g_alu, g_size, g_srck, g_dstk, g_flags, g_wb, g_dreg, g_sext, g_bitop, g_move_mem, 1'b0, nx};
+						5'd22: frame_long_out = {cp_resp, 5'd0, exc_held};
+						default: frame_long_out = 32'd0;
 					endcase
 				end
 			end
@@ -96,19 +70,5 @@ function [5:0] frame_lw;
 			`FMT_LONGBUS: frame_lw = 6'd23;
 			default: frame_lw = 6'd2;
 		endcase
-	end
-endfunction
-
-// word i of the frame image read by RTE (fr[] holds longwords)
-function [15:0] fr_word;
-	input [5:0] i;
-	begin
-		fr_word = i[0] ? fr[i[5:1]][15:0] : fr[i[5:1]][31:16];
-	end
-endfunction
-function [31:0] fr_long;
-	input [5:0] i;    // word index of the high word
-	begin
-		fr_long = {fr_word(i), fr_word(i + 6'd1)};
 	end
 endfunction

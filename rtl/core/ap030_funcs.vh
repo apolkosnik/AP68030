@@ -1,22 +1,31 @@
 // AP68030 core - helper functions (included by ap030_core.v at module level)
 
 // rotates for register bit fields
-function [31:0] rotl32; input [31:0] v; input [4:0] n;
-	begin rotl32 = (v << n) | (v >> (6'd32 - {1'b0, n})); if (n == 0) rotl32 = v; end endfunction
 function [31:0] rotr32; input [31:0] v; input [4:0] n;
-	begin rotr32 = (v >> n) | (v << (6'd32 - {1'b0, n})); if (n == 0) rotr32 = v; end endfunction
+	reg [31:0] s0, s1, s2, s3;
+	begin
+		s0     = n[0] ? {v[0],     v[31:1]}   : v;
+		s1     = n[1] ? {s0[1:0],  s0[31:2]}  : s0;
+		s2     = n[2] ? {s1[3:0],  s1[31:4]}  : s1;
+		s3     = n[3] ? {s2[7:0],  s2[31:8]}  : s2;
+		rotr32 = n[4] ? {s3[15:0], s3[31:16]} : s3;
+	end
+endfunction
+function [31:0] rotl32; input [31:0] v; input [4:0] n;
+	begin rotl32 = rotr32(v, 5'd0 - n); end
+endfunction
 
 // mask of the top w bits (w = 1..32)
 function [31:0] topmask; input [5:0] w;
 	begin topmask = (w >= 6'd32) ? 32'hFFFFFFFF : ~(32'hFFFFFFFF >> w); end endfunction
 
-// leading zeros of a w-bit field held in the low bits of v (returns w when zero)
-function [5:0] field_lz; input [31:0] v; input [5:0] w;
+// leading zeros of a w-bit field held in the top bits [31 : 32-w] of msb_v (returns w when zero)
+function [5:0] field_lz_msb; input [31:0] msb_v; input [5:0] w;
 	integer i; reg found;
 	begin
-		field_lz = w; found = 1'b0;
-		for (i = 31; i >= 0; i = i - 1) begin
-			if (!found && (i < w) && v[i]) begin field_lz = w - 6'd1 - i[5:0]; found = 1'b1; end
+		field_lz_msb = w; found = 1'b0;
+		for (i = 0; i < 32; i = i + 1) begin
+			if (!found && (i[5:0] < w) && msb_v[31 - i]) begin field_lz_msb = i[5:0]; found = 1'b1; end
 		end
 	end
 endfunction
@@ -69,26 +78,6 @@ function [1:0] sz_of_siz; input [1:0] siz;
 	end
 endfunction
 
-// bit field extraction from a 40-bit memory image (bit 39 = first byte MSB)
-function [31:0] bf_extract40; input [39:0] d; input [2:0] boff; input [5:0] w;
-	reg [39:0] sh;
-	begin
-		sh = d << boff;
-		bf_extract40 = sh[39:8] >> (6'd32 - w);
-		if (w >= 6'd32) bf_extract40 = sh[39:8];
-	end
-endfunction
-function [39:0] bf_insert40; input [39:0] d; input [2:0] boff; input [5:0] w; input [31:0] v;
-	reg [39:0] mask, val;
-	reg [6:0] sh;
-	begin
-		sh = 7'd40 - {4'd0, boff} - {1'b0, w};
-		mask = (w >= 6'd32) ? 40'hFFFFFFFF : ((40'd1 << w) - 40'd1);
-		val  = {8'd0, v} & mask;
-		bf_insert40 = (d & ~(mask << sh)) | (val << sh);
-	end
-endfunction
-
 // MMU instruction function code field (PRM PFLUSH/PLOAD/PTEST): 10xxx immediate,
 // 01ddd Dn, 00000 SFC, 00001 DFC; the caller supplies Dn
 function [2:0] mmu_fc; input [4:0] f; input [2:0] dn;
@@ -105,18 +94,18 @@ endfunction
 function mmu_fc_ok; input [4:0] f;
 	begin mmu_fc_ok = (f[4] && !f[3]) || (f[3] && !f[4]) || (f[4:1] == 4'd0); end endfunction
 
-// coprocessor "valid EA" categories (UM Table 10-4) against dw[5:0]
+// coprocessor "valid EA" categories (UM Table 10-4) against ir[5:0]
 function cp_ea_ok; input [2:0] cat;
 	begin
 		case (cat)
-			3'b000: cp_ea_ok = ea_ctrlalt;
-			3'b001: cp_ea_ok = ea_dataalt;
-			3'b010: cp_ea_ok = ea_memalt;
-			3'b011: cp_ea_ok = ea_alt;
-			3'b100: cp_ea_ok = ea_ctrl;
-			3'b101: cp_ea_ok = ea_data;
-			3'b110: cp_ea_ok = ea_mem | ea_imm;   // memory includes immediate (MC68030 UM table 10-4)
-			default: cp_ea_ok = ea_any;
+			3'b000: cp_ea_ok = ir_ea_ctrlalt;
+			3'b001: cp_ea_ok = ir_ea_dataalt;
+			3'b010: cp_ea_ok = ir_ea_memalt;
+			3'b011: cp_ea_ok = ir_ea_alt;
+			3'b100: cp_ea_ok = ir_ea_ctrl;
+			3'b101: cp_ea_ok = ir_ea_data;
+			3'b110: cp_ea_ok = ir_ea_mem | ir_ea_imm;   // memory includes immediate (MC68030 UM table 10-4)
+			default: cp_ea_ok = ir_ea_any;
 		endcase
 	end
 endfunction

@@ -42,6 +42,9 @@ task ea_ready;
    sr[4:0] <= alu_f;
    finish;
    wr(addr, g_size, src, S_FETCH);
+  end else if (ea_ret == S_LEA) begin
+   wreg({1'b1, ir[11:9]}, addr);
+   finish;
   end else state <= ea_ret;
  end
 endtask
@@ -69,17 +72,69 @@ task wreg; input [3:0] idx; input [31:0] val;
 	begin
 		rf_we <= 1'b1; rf_waddr <= idx; rf_wdata <= val;
 		rf_wact <= !sr_s ? 2'd0 : (sr_m ? 2'd2 : 2'd1);
-		byp_we = 1'b1; byp_reg = idx; byp_data = val;
+		if (state == S_GEN_EXEC || state == S_MOVEM1 || state == S_DBCC) begin
+			byp_we = 1'b1; byp_reg = idx; byp_data = val;
+		end
 	end endtask
 // register write merged by size (old value supplied)
 task wreg_sz; input [3:0] idx; input [31:0] old; input [31:0] val; input [1:0] sz;
 	begin wreg(idx, merge(old, val, sz)); end endtask
+
+// control register read/write (shared by MOVEC and cpCTRL)
+function [32:0] ctrl_rd;
+	input [11:0] sel;
+	begin
+		case (sel)
+			12'h000: ctrl_rd = {1'b0, 29'd0, sfc};
+			12'h001: ctrl_rd = {1'b0, 29'd0, dfc};
+			12'h002: ctrl_rd = {1'b0, cacr};
+			12'h800: ctrl_rd = {1'b0, usp_q};
+			12'h801: ctrl_rd = {1'b0, vbr};
+			12'h802: ctrl_rd = {1'b0, caar};
+			12'h803: ctrl_rd = {1'b0, msp_q};
+			12'h804: ctrl_rd = {1'b0, isp_q};
+			default: ctrl_rd = {1'b1, 32'd0};
+		endcase
+	end
+endfunction
+
+task ctrl_wr;
+	input [11:0] sel;
+	input [31:0] wval;
+	begin
+		case (sel)
+			12'h000: sfc <= wval[2:0];
+			12'h001: dfc <= wval[2:0];
+			12'h002: begin
+				cacr <= wval & `CACR_RDMASK;
+				cacr_ci <= wval[`CACR_CI]; cacr_cei <= wval[`CACR_CEI];
+				cacr_cd <= wval[`CACR_CD]; cacr_ced <= wval[`CACR_CED];
+			end
+			12'h800: begin sp_we <= 1'b1; sp_sel <= 2'd0; sp_wdata <= wval; end
+			12'h801: vbr <= wval;
+			12'h802: caar <= wval;
+			12'h803: begin sp_we <= 1'b1; sp_sel <= 2'd2; sp_wdata <= wval; end
+			default: begin sp_we <= 1'b1; sp_sel <= 2'd1; sp_wdata <= wval; end
+		endcase
+	end
+endtask
 
 // instruction complete: trace disposition, back to the boundary
 task finish;
 	begin
 		trace_pend <= tr_t1 | (tr_t0 & flow);
 		state <= S_FETCH;
+	end
+endtask
+
+// instruction complete with same-clock dispatch when no boundary event waits
+task finish_dispatch;
+	begin
+		if (!tr_t1 && !(tr_t0 & flow) && !irq_pend && !late_fault_pend && !stopped &&
+		    w0_v && !w0_f && !(dc_needs_ext && (!w1_v || w1_f)))
+			disp_req = 1'b1;
+		else
+			finish;
 	end
 endtask
 
@@ -106,10 +161,10 @@ task exc_go;
 	input [31:0] pcv;
 	input [31:0] iav;
 	begin
-		exc_vec <= vec; exc_fmt <= fmt; exc_pc <= pcv; exc_ia <= iav;
+		exc_vec <= vec; exc_fmt <= fmt; exc_pc <= pcv;
+		if (fmt == `FMT_SIXWORD || fmt == `FMT_CPMID) exc_fa <= iav;
 		exc_sr <= sr;
-		exc_cnt <= cnt; exc_dw_dst <= dw_dst; exc_dw_ret <= dw_ret;
-		exc_is_irq <= 1'b0; exc_is_reset <= 1'b0; exc_throw <= 1'b0; exc_late <= 1'b0;
+		exc_is_irq <= 1'b0; exc_throw <= 1'b0; exc_late <= 1'b0;
 		exc_busfault <= (vec == `VEC_BUSERR) || (vec == `VEC_ADDRERR);
 		// A trace pending for an instruction whose own exception is part of
 		// its execution is taken after that exception's processing (UM 8.1.4,
@@ -212,12 +267,9 @@ task exc_stream_fault;
 	input need_b;      // the instruction also needed stage B
 	input boundary;
 	begin
-		capture_pipe;
-		exc_fa <= 32'd0; exc_dob <= 32'd0; exc_got <= 3'd0; exc_partial <= 32'd0;
-		exc_ssw <= {w0_f, need_b & w1_f, ~w0_v | w0_f, ~w1_v | w1_f, 3'b000, 1'b0, 1'b0, 1'b1, 2'b00, 1'b0, fc_prog};
-		exc_rk <= boundary ? RK_BOUNDARY : RK_STREAM;
-		exc_rs <= state;
-		exc_go(`VEC_BUSERR, `FMT_LONGBUS, boundary ? scan_pc : pc_i, 32'd0);
+		sf_req = 1'b1;
+		sf_need_b = need_b;
+		sf_boundary = boundary;
 	end
 endtask
 
@@ -269,9 +321,9 @@ task dispatch;
 		status_cnt <= 2'd1;
 		// generic-path controls, so the decoder can look at the next word
 		// while this instruction executes
-		g_alu <= dc_alu; g_size <= dc_size; g_srck <= dc_srck; g_dstk <= dc_dstk; g_dreg <= dc_dreg; g_sreg <= dc_sreg;
-		g_flags <= dc_flags; g_wb <= dc_wb; g_sext <= dc_sext; g_bitop <= dc_bitop; g_shift <= dc_shift;
-		g_move_mem <= dc_move_mem; g_dstrd <= dc_dstrd;
+		g_alu <= dc_alu; g_size <= dc_size; g_srck <= dc_srck; g_dstk <= dc_dstk; g_dreg <= dc_dreg;
+		g_flags <= dc_flags; g_wb <= dc_wb; g_sext <= dc_sext; g_bitop <= dc_bitop;
+		g_move_mem <= dc_move_mem;
 		nx <= dc_first;
 		// register operands (with the bypass of a write applied this clock)
 		if (dc_srck == SK_REG) src <= (byp_we && byp_reg == dc_sreg) ? byp_data : rf_d;

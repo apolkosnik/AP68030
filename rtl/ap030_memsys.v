@@ -152,9 +152,9 @@ module ap030_memsys
 reg  [31:0] tr_la;
 reg   [2:0] tr_fc;
 reg         tr_rw, tr_rmc, tr_use, walk_req;
-reg  [31:0] walk_la;
-reg   [2:0] walk_fc;
-reg         walk_rw, walk_rmc;
+wire [31:0] walk_la;
+wire  [2:0] walk_fc;
+wire        walk_rw, walk_rmc;
 wire        tr_ok, tr_fault, tr_walk, tr_ci;
 wire [31:0] tr_pa;
 wire        walk_done;
@@ -360,10 +360,12 @@ assign     dc_fw_line  = r_addr[7:4];
 reg        wb_valid;
 assign     mmu_wpend = wb_valid;
 reg        wb_stage;     // 0: portion 1 pending, 1: portion 2 pending
-reg [31:0] wb_pa0, wb_pa1, wb_la0, wb_la1;
+reg [31:0] wb_pa0, wb_pa1;
+reg [31:8] wb_la0;
 reg        wb_ci0, wb_ci1;
 reg  [2:0] wb_n0, wb_n1, wb_total;
 reg [31:0] wb_data;
+wire [31:0] wb_data1 = wb_data & (32'hFFFF_FFFF >> (8 * (3'd4 - wb_n1)));
 reg  [2:0] wb_fc;
 reg        wb_rmc, wb_rmc_last;
 reg        wb_two;
@@ -452,7 +454,7 @@ localparam IS_IDLE = 3'd0, IS_LOOKUP = 3'd1, IS_WALK = 3'd2, IS_HIT = 3'd3, IS_B
 reg  [2:0] is;
 reg [31:0] ir_addr;
 reg  [2:0] ir_fc;
-reg [31:0] ir_pa;
+reg [31:8] ir_pa;
 reg        ir_ci, ir_tag_hit, ir_line_empty;
 // a fresh lookup starts from the idle state or while a hit is delivered
 // (hits pipeline: one lookup per clock)
@@ -479,7 +481,8 @@ wire  [2:0] ci_fc     = ilk_first ? i_req_fc : ir_fc;
 // puts bus completion, ATC lookup and fault capture on one timing path.
 // A stalled data lookup may delay an instruction translation; cache hits
 // still proceed, and lookup side effects remain qualified by lk_act.
-wire du_select = FAST_PORT ? (((ds == DS_IDLE) && d_go) || ds == DS_LOOKUP) : lk_act;
+wire du_select = ((ds == DS_IDLE) && d_go) || (ds == DS_LOOKUP);
+
 wire if_lookup = ilk_act && !du_select;
 
 always @* begin
@@ -492,6 +495,10 @@ always @* begin
 	ic_lk_la = ci_addr; ic_lk_fc = ci_fc;
 end
 
+assign walk_la  = (ds == DS_WALK) ? r_addr : ir_addr;
+assign walk_fc  = (ds == DS_WALK) ? d_fc   : ir_fc;
+assign walk_rw  = (ds == DS_WALK) ? d_rw   : 1'b1;
+assign walk_rmc = (ds == DS_WALK) ? (d_rmc && !d_iack) : 1'b0;
 assign d_wpend   = wb_valid;
 assign d_held    = dh_hold && (((ds == DS_IDLE) && d_go) || (ds == DS_LOOKUP) || (ds == DS_BUSREQ) ||
                                (ds == DS_WBWAIT) || (ds == DS_FLTWAIT));
@@ -501,7 +508,7 @@ assign bus_quiet = !wb_valid && b_idle && !walker_busy;
 // is bad (UM 9.2.1: hit with the B bit set aborts the access)
 wire rd_hit_ok = d_rw && !d_rmc && !d_iack && !d_nocache && dc_en && dc_hit && cachable_space && !tr_fault;
 
-reg [31:0] r_pa_hold;
+reg [31:8] r_pa_hold;
 reg        r_ci_hold, r_tag_hit, r_line_empty;
 reg w_ack_pending;
 
@@ -526,13 +533,12 @@ always @(posedge clk) if (ce) begin
 		r_ocs <= 1'b0; r_first <= 1'b1; r_cross_line <= 1'b0; d_pend <= 1'b0; i_pend <= 1'b0;
 		r_nocbreq <= 1'b0;
 		ip_addr <= 32'd0; ip_fc <= 3'd0;
-		ir_addr <= 32'd0; ir_fc <= 3'd0; ir_pa <= 32'd0; ir_ci <= 1'b0; ir_tag_hit <= 1'b0; ir_line_empty <= 1'b0;
+		ir_addr <= 32'd0; ir_fc <= 3'd0; ir_pa <= 24'd0; ir_ci <= 1'b0; ir_tag_hit <= 1'b0; ir_line_empty <= 1'b0;
 		f_addr <= 32'd0; f_fc <= 3'd0; f_size <= 2'd0; f_rw <= 1'b1; f_rm <= 1'b0; f_dob <= 32'd0;
-		walk_la <= 32'd0; walk_fc <= 3'd0; walk_rw <= 1'b1; walk_rmc <= 1'b0;
 		f_got <= 3'd0; f_partial <= 32'd0;
 		d_rdata_r <= 32'd0; i_data_r <= 32'd0;
 		w_ack_pending <= 1'b0; w_rdata <= 32'd0; w_berr <= 1'b0; rmw_open <= 1'b0;
-		wb_pa0 <= 32'd0; wb_pa1 <= 32'd0; wb_la0 <= 32'd0; wb_la1 <= 32'd0; wb_ci0 <= 1'b0; wb_ci1 <= 1'b0;
+		wb_pa0 <= 32'd0; wb_pa1 <= 32'd0; wb_la0 <= 24'd0; wb_ci0 <= 1'b0; wb_ci1 <= 1'b0;
 		wb_n0 <= 3'd0; wb_n1 <= 3'd0; wb_total <= 3'd0; wb_data <= 32'd0; wb_fc <= 3'd0;
 		wb_rmc <= 1'b0; wb_rmc_last <= 1'b0;
 	end else begin
@@ -554,7 +560,7 @@ always @(posedge clk) if (ce) begin
 		if (owner != OWN_NONE && !b_busy && !b_req) begin owner <= OWN_NONE; own_ifetch <= 1'b0; end
 
 		//------------------------------------------------------------ table search accesses
-		if (w_req && !w_ack_pending && slot_free) begin
+		if (w_req && !w_ack && !w_ack_pending && slot_free) begin
 			b_req <= 1'b1; b_kind <= `BK_TABLE; b_addr <= w_addr; b_nbytes <= 3'd4; b_total <= 3'd4;
 			b_rw <= w_rw; b_fc <= `FC_SUPER_DATA; b_rmc <= 1'b1; b_rmc_last <= 1'b0; b_ciout <= 1'b0;
 			b_cbreq <= 1'b0; b_ocs <= 1'b0; b_cache <= 1'b0; b_wdata <= w_wdata;
@@ -562,6 +568,7 @@ always @(posedge clk) if (ce) begin
 		end
 		if (owner == OWN_WALK && b_done) begin
 			w_ack <= 1'b1; w_rdata <= b_rdata; w_berr <= b_berr;
+			w_ack_pending <= 1'b0;
 		end
 		if (!w_req) w_ack_pending <= 1'b0;
 
@@ -575,18 +582,18 @@ always @(posedge clk) if (ce) begin
 			b_rmc_last <= wb_rmc_last && (wb_stage || !wb_two);
 			b_ciout <= wb_stage ? wb_ci1 : wb_ci0;
 			b_cbreq <= 1'b0; b_ocs <= !wb_stage; b_cache <= 1'b0;
-			b_wdata <= wb_stage ? (wb_data & (32'hFFFF_FFFF >> (8 * (3'd4 - wb_n1)))) : wb_data;
+			b_wdata <= wb_stage ? wb_data1 : wb_data;
 			owner <= OWN_WB; own_ifetch <= 1'b0;
 		end
 		if (owner == OWN_WB && b_done) begin
 			if (b_berr) begin
 				// UM 8.2.1: the remaining part of the operand is described
-				f_addr <= wb_stage ? wb_la1 : wb_la0;
+				f_addr <= wb_stage ? ({wb_la0, wb_pa0[7:2], 2'b00} + 32'd4) : {wb_la0, wb_pa0[7:0]};
 				f_fc   <= wb_fc;
 				f_size <= siz_of(wb_stage ? wb_n1 : wb_total);
 				f_rw   <= 1'b0;
 				f_rm   <= wb_rmc;
-				f_dob  <= wb_stage ? (wb_data & (32'hFFFF_FFFF >> (8 * (3'd4 - wb_n1)))) : wb_data;
+				f_dob  <= wb_stage ? wb_data1 : wb_data;
 				f_got  <= 3'd0; f_partial <= 32'd0;
 				// a posted write: the instruction in execution may already
 				// wait with its next access, which must not reach the bus
@@ -640,7 +647,7 @@ always @(posedge clk) if (ce) begin
 						// the search runs after the writes already posted (a
 						// descriptor may just have been written)
 						if (!walker_busy && !wb_valid) begin
-							walk_req <= 1'b1; walk_la <= tr_la; walk_fc <= tr_fc; walk_rw <= tr_rw; walk_rmc <= tr_rmc;
+							walk_req <= 1'b1;
 							ds <= DS_WALK;
 						end else ds <= DS_LOOKUP;
 					end else begin
@@ -653,11 +660,11 @@ always @(posedge clk) if (ce) begin
 							end
 							if (lk_first || r_first) begin
 								// first portion (also after a table search)
-								wb_pa0 <= tr_pa; wb_la0 <= c_addr; wb_ci0 <= tr_ci; wb_n0 <= c_pn;
+								wb_pa0 <= tr_pa; wb_la0 <= c_addr[31:8]; wb_ci0 <= tr_ci; wb_n0 <= c_pn;
 								wb_total <= c_rem; wb_data <= c_data; wb_fc <= d_fc; wb_rmc <= d_rmc;
 								wb_rmc_last <= d_rmc_last; wb_two <= (c_pn != c_rem);
 							end else begin
-								wb_pa1 <= tr_pa; wb_la1 <= c_addr; wb_ci1 <= tr_ci; wb_n1 <= c_pn;
+								wb_pa1 <= tr_pa; wb_ci1 <= tr_ci; wb_n1 <= c_pn;
 							end
 							if (c_pn != c_rem) begin
 								r_addr <= {c_addr[31:2], 2'b00} + 32'd4;
@@ -703,7 +710,7 @@ always @(posedge clk) if (ce) begin
 								owner <= OWN_DU; own_ifetch <= 1'b0;
 								ds <= DS_BUSWAIT;
 							end else begin
-								r_pa_hold <= tr_pa; r_ci_hold <= tr_ci;
+								r_pa_hold <= tr_pa[31:8]; r_ci_hold <= tr_ci;
 								r_tag_hit <= dc_tag_hit; r_line_empty <= dc_line_empty;
 								ds <= DS_BUSREQ;
 							end
@@ -735,7 +742,7 @@ always @(posedge clk) if (ce) begin
 			DS_BUSREQ: begin
 				if (slot_free && !w_req && !walker_busy && !wb_valid && !dh_hold) begin
 					b_req <= 1'b1; b_kind <= d_iack ? `BK_IACK : `BK_DATA;
-					b_addr <= d_iack ? r_addr : r_pa_hold; b_nbytes <= r_pn; b_total <= r_rem;
+					b_addr <= d_iack ? r_addr : {r_pa_hold, r_addr[7:0]}; b_nbytes <= r_pn; b_total <= r_rem;
 					b_rw <= 1'b1; b_fc <= d_fc; b_rmc <= d_rmc && !d_iack; b_rmc_last <= 1'b0;
 					b_ciout <= r_ci_hold && !d_iack; b_ocs <= r_ocs;
 					b_cache <= dc_fill_ok && !r_ci_hold && cachable_space && !d_iack && !d_nocache;   // RMW reads fill, as above
@@ -753,12 +760,12 @@ always @(posedge clk) if (ce) begin
 					if (d_iack) begin
 						if (b_berr) d_iack_berr <= 1'b1;
 						else begin d_ack_r <= 1'b1; d_avec <= b_avec; d_rdata_r <= {24'd0, b_rdata[7:0]}; end
-						
+
 						ds <= DS_IDLE;
 					end else if (b_berr) begin
 						f_addr <= r_addr; f_fc <= d_fc; f_size <= siz_of(r_rem); f_rw <= 1'b1; f_rm <= d_rmc;
 						f_dob <= 32'd0; f_got <= r_got; f_partial <= r_data;
-						d_fault <= 1'b1; 
+						d_fault <= 1'b1;
 						// UM 6.1.3.2, 7.5.1: a bus error on the first cycle of a
 						// burst (the read asked for one) leaves the whole line invalid
 						if (b_cbreq) begin dc_inv_line <= 1'b1; dc_inv_idx <= r_addr[7:4]; end
@@ -776,7 +783,7 @@ always @(posedge clk) if (ce) begin
 						r_nocbreq <= b_cbreq && b_ciin;
 						ds <= DS_LOOKUP;
 					end else begin
-						d_ack_r <= 1'b1; 
+						d_ack_r <= 1'b1;
 						d_rdata_r <= (r_data << (8 * r_pn)) | b_rdata;
 						ds <= DS_IDLE;
 					end
@@ -810,7 +817,7 @@ always @(posedge clk) if (ce) begin
 				if (!wb_valid) begin
 					if (wb_err_seen) d_fault <= 1'b1; else d_ack_r <= 1'b1;
 					wb_err_seen <= 1'b0;
-					
+
 					ds <= DS_IDLE;
 				end
 			end
@@ -849,12 +856,12 @@ always @(posedge clk) if (ce) begin
 						end else if (tr_walk) begin
 							// (not inside a read-modify-write operation, UM 7.3.3)
 							if (!walker_busy && !wb_valid && !rmw_open) begin
-								walk_req <= 1'b1; walk_la <= tr_la; walk_fc <= tr_fc; walk_rw <= 1'b1; walk_rmc <= 1'b0;
+								walk_req <= 1'b1;
 								is <= IS_WALK;
 							end else is <= IS_LOOKUP;
 						end else begin
 							tr_use <= 1'b1;
-							ir_pa <= tr_pa; ir_ci <= tr_ci;
+							ir_pa <= tr_pa[31:8]; ir_ci <= tr_ci;
 							is <= IS_BUSREQ;
 						end
 					end else is <= IS_LOOKUP;
@@ -867,7 +874,7 @@ always @(posedge clk) if (ce) begin
 				// lowest priority; none inside a read-modify-write operation (UM 7.3.3)
 				if (slot_free && !w_req && !walker_busy && !wb_valid && !lk_act && ds != DS_BUSREQ && !rmw_open) begin
 					b_req <= 1'b1; b_kind <= `BK_DATA;
-					b_addr <= ir_pa; b_nbytes <= 3'd4; b_total <= 3'd4;
+					b_addr <= {ir_pa, ir_addr[7:0]}; b_nbytes <= 3'd4; b_total <= 3'd4;
 					b_rw <= 1'b1; b_fc <= ir_fc; b_rmc <= 1'b0; b_rmc_last <= 1'b0;
 					b_ciout <= ir_ci; b_ocs <= 1'b1;
 					b_cache <= ic_fill_ok && !ir_ci;
@@ -884,7 +891,7 @@ always @(posedge clk) if (ce) begin
 						// UM 6.1.3.2, 7.5.1: the whole line invalid, as for data
 						if (b_cbreq) begin ic_inv_line <= 1'b1; ic_inv_idx <= ir_addr[7:4]; end
 					end else begin i_ack_r <= 1'b1; i_data_r <= b_rdata; end
-					
+
 					is <= IS_IDLE;
 				end
 			end

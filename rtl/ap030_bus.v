@@ -151,7 +151,7 @@ reg        t_first;       // no cycle of this transfer has completed yet
 reg        t_opdone;      // operand already reported (burst in progress)
 // the cycle that terminated at the previous falling edge
 reg        chk_late;
-reg        term_err, term_retry, term_avec, term_sync;
+reg        term_err, term_retry, term_avec;
 reg  [1:0] term_port;
 reg        term_ciin;     // CIIN with the terminating edge
 reg        term_burst;    // termination enters burst mode (AS stays asserted)
@@ -160,7 +160,6 @@ reg        beat_pend;     // a burst beat latched at the previous falling edge
 reg        beat_ciin, beat_last;
 reg  [1:0] beat_cnt;      // follow-on beats recognized so far
 reg  [1:0] beat_idx;      // line entry of the beat being latched
-reg [31:4] beat_line;     // the line being burst-filled (address pins stay constant)
 // pin-side posedge registers
 reg        rmc_p, ciout_p, cbreq_p, ecs_p, ocs_p, ecs_tog, d_oe_p;
 reg        rmc_first;     // the locked sequence has not completed a cycle yet
@@ -491,8 +490,6 @@ wire  [2:0] n_fc    = n_from_req ? req_fc : t_fc;
 wire        n_ciout = n_from_req ? req_ciout : t_ciout;
 wire        n_rmc   = n_from_req ? req_rmc : t_rmc;
 wire        n_ocs   = n_from_req ? req_ocs : t_ocs;
-wire        n_kind_data = n_from_req ? (req_kind == `BK_DATA) : (t_kind == `BK_DATA);
-wire        n_first = n_from_req ? 1'b1 : t_first;
 wire        n_cbreq = n_from_req ? (req_cbreq && req_rw && req_cache && req_kind == `BK_DATA)
                                  : (t_cbreq && t_rw && t_cache && t_first && !t_fill && !want_fill && (t_kind == `BK_DATA));
 
@@ -555,9 +552,8 @@ always @(posedge clk) if (ce) begin
 		t_off <= 2'd0; t_fill <= 1'b0; t_have <= 4'd0; t_ebuf <= 32'd0; t_noc <= 1'b0;
 		t_first <= 1'b1; t_opdone <= 1'b0;
 		chk_late <= 1'b0; term_err <= 1'b0; term_retry <= 1'b0; term_avec <= 1'b0;
-		term_sync <= 1'b0; term_port <= `PORT_32; term_ciin <= 1'b0; term_burst <= 1'b0;
+		term_port <= `PORT_32; term_ciin <= 1'b0; term_burst <= 1'b0;
 		beat_pend <= 1'b0; beat_ciin <= 1'b0; beat_last <= 1'b0; beat_cnt <= 2'd0; beat_idx <= 2'd0;
-		beat_line <= 28'd0;
 		rmc_p <= 1'b0; ciout_p <= 1'b0; cbreq_p <= 1'b0; ecs_p <= 1'b0; ocs_p <= 1'b0;
 		rmc_first <= 1'b0;
 		ecs_tog <= 1'b0; d_oe_p <= 1'b0; dben_rd_tp <= 1'b0; dben_wr_tp <= 1'b0;
@@ -636,7 +632,7 @@ always @(posedge clk) if (ce) begin
 				if (bst == B_BURST) begin c_as_clr <= 1'b1; bst <= B_IDLE; end
 			end else begin
 				if (!beat_ciin) begin
-					fill_stb <= 1'b1; fill_addr <= {beat_line, beat_idx}; fill_data <= din_l;
+					fill_stb <= 1'b1; fill_addr <= {a_o[31:4], beat_idx}; fill_data <= din_l;
 				end
 				beat_idx <= beat_idx + 2'd1;
 			end
@@ -704,11 +700,10 @@ always @(posedge clk) if (ce) begin
 					term_err  <= t_term_err;
 					term_retry <= t_term_retry;
 					term_avec <= t_term_avec;
-					term_sync <= t_term_sync;
 					term_port <= t_term_port;
 					term_ciin <= t_rw && ciin && (t_kind == `BK_DATA);   // latched with the terminating edge
 					term_burst <= enter_burst;
-					if (enter_burst) begin beat_cnt <= 2'd0; beat_idx <= t_addr[3:2] + 2'd1; beat_line <= t_addr[31:4]; end
+					if (enter_burst) begin beat_cnt <= 2'd0; beat_idx <= t_addr[3:2] + 2'd1; end
 					c_latch   <= t_rw;
 					if (!enter_burst) c_as_clr <= 1'b1;   // S3/S5 falling edge
 					bst <= enter_burst ? B_BURST : B_IDLE;

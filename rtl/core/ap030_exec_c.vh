@@ -7,21 +7,21 @@
 //-------------------------------------------------------------- instruction start
 S_CP0: begin
 	// cpGEN: the command word to the command CIR ($0A)
-	cp_id <= ir[11:9]; cp_base <= {14'd0, 1'b1, 1'b0, ir[11:9], 13'd0};
+	cp_id <= ir[11:9];
 	cp_kind <= 4'd0; cp_cond <= 1'b0; cp_pcbit <= 1'b0; cp_trace_wait <= 1'b0;
 	cpu_flt_fline <= 1'b1;
 	dreq({14'd0, 1'b1, 1'b0, ir[11:9], 13'd0} | 32'h0A, `SZ_W, 1'b0, {16'd0, ext}, `FC_CPU_SPACE, 1'b0, 1'b0, DW_NONE, S_CP1);
 end
 S_CPBCC: begin
 	// cpBcc: the operation word to the condition CIR ($0E)
-	cp_id <= ir[11:9]; cp_base <= {14'd0, 1'b1, 1'b0, ir[11:9], 13'd0};
+	cp_id <= ir[11:9];
 	cp_kind <= 4'd1; cp_cond <= 1'b1; cp_pcbit <= 1'b0; cp_trace_wait <= 1'b0;
 	cpu_flt_fline <= 1'b1;
 	dreq({14'd0, 1'b1, 1'b0, ir[11:9], 13'd0} | 32'h0E, `SZ_W, 1'b0, {16'd0, ir}, `FC_CPU_SPACE, 1'b0, 1'b0, DW_NONE, S_CP1);
 end
 S_CPDBCC, S_CPSCC, S_CPTRAP: begin
 	// the condition selector word (second word) to the condition CIR
-	cp_id <= ir[11:9]; cp_base <= {14'd0, 1'b1, 1'b0, ir[11:9], 13'd0};
+	cp_id <= ir[11:9];
 	cp_kind <= (state == S_CPDBCC) ? 4'd2 : (state == S_CPSCC) ? 4'd3 : 4'd4;
 	cp_cond <= 1'b1; cp_pcbit <= 1'b0; cp_trace_wait <= 1'b0;
 	cpu_flt_fline <= 1'b1;
@@ -54,7 +54,7 @@ S_CP2: begin : cp2
 			5'b00001: begin
 				// transfer multiple coprocessor registers
 				if (cp_cond || r[0]) exc_go(`VEC_CPPROTO, `FMT_CPMID, scan_pc, pc_i);
-				else if (!(r[13] ? (ea_ctrlalt || ea_pd) : (ea_ctrl || ea_pi))) begin
+				else if (!(r[13] ? (ir_ea_ctrlalt || ir_ea_pd) : (ir_ea_ctrl || ir_ea_pi))) begin
 					tmp <= {24'd0, `VEC_FLINE}; cir_wr(5'h02, `SZ_W, 32'h0001, S_CP_ABORT);
 				end else begin cp_len <= r[7:0]; state <= S_CPMULT; end
 			end
@@ -95,7 +95,7 @@ S_CP2: begin : cp2
 			5'b01010: begin
 				// evaluate and transfer effective address (DR=0; $2A is undefined, UM 10.6)
 				if (cp_cond || r[13]) exc_go(`VEC_CPPROTO, `FMT_CPMID, scan_pc, pc_i);
-				else if (!ea_ctrlalt) begin tmp <= {24'd0, `VEC_FLINE}; cir_wr(5'h02, `SZ_W, 32'h0001, S_CP_ABORT); end
+				else if (!ir_ea_ctrlalt) begin tmp <= {24'd0, `VEC_FLINE}; cir_wr(5'h02, `SZ_W, 32'h0001, S_CP_ABORT); end
 				else begin ea_ret <= S_CPEAX; state <= S_EA; end
 			end
 			5'b01100: begin
@@ -133,9 +133,9 @@ S_CP2: begin : cp2
 				if (cp_cond) exc_go(`VEC_CPPROTO, `FMT_CPMID, scan_pc, pc_i);
 				else if (!cp_ea_ok(r[10:8])) begin
 					tmp <= {24'd0, `VEC_FLINE}; cir_wr(5'h02, `SZ_W, 32'h0001, S_CP_ABORT);
-				end else if ((r[13] && !ea_alt) ||
-				             ((ea_dn || ea_an) && !(r[7:0] == 8'd1 || r[7:0] == 8'd2 || r[7:0] == 8'd4)) ||
-				             (ea_imm && r[0] && r[7:0] != 8'd1))
+				end else if ((r[13] && !ir_ea_alt) ||
+				             ((ir_ea_dn || ir_ea_an) && !(r[7:0] == 8'd1 || r[7:0] == 8'd2 || r[7:0] == 8'd4)) ||
+				             (ir_ea_imm && r[0] && r[7:0] != 8'd1))
 					exc_go(`VEC_CPPROTO, `FMT_CPMID, scan_pc, pc_i);
 				else begin cp_len <= r[7:0]; cp_pos <= 8'd0; state <= S_CPXEA; end
 			end
@@ -262,22 +262,22 @@ S_CPXEA: begin : cpxea
 	// evaluate EA and transfer data: register direct, immediate, or memory
 	reg [31:0] bytes;
 	bytes = {24'd0, cp_len};
-	if (ea_dn || ea_an) begin
-		dw_reg <= {ea_an, ir[2:0]};
-		if (!cp_dr) cir_wr(5'h10, sz_of_bytes(cp_len[2:0]), ea_an ? rf_b : rf_c, S_CPWAIT);
-		else begin dst <= ea_an ? rf_b : rf_c; cir_rd(5'h10, sz_of_bytes(cp_len[2:0]), ea_an ? DW_REGL : DW_REG, S_CPWAIT); end
-	end else if (ea_imm) begin
+	if (ir_ea_dn || ir_ea_an) begin
+		dw_reg <= {ir_ea_an, ir[2:0]};
+		if (!cp_dr) cir_wr(5'h10, sz_of_bytes(cp_len[2:0]), ir_ea_an ? rf_b : rf_c, S_CPWAIT);
+		else begin dst <= ir_ea_an ? rf_b : rf_c; cir_rd(5'h10, sz_of_bytes(cp_len[2:0]), ir_ea_an ? DW_REGL : DW_REG, S_CPWAIT); end
+	end else if (ir_ea_imm) begin
 		// immediate: from the instruction stream (byte operands take a word)
 		cp_pos <= 8'd0;
 		if (cp_len == 8'd1) begin
 			if (!w0_v) ; else if (w0_f) exc_stream_fault(1'b0, 1'b0);
 			else begin pop(2'd1); cir_wr(5'h10, `SZ_B, {24'd0, w0[7:0]}, S_CPWAIT); end
 		end else state <= S_CP_ISTREAM;
-	end else if (ea_pi) begin
+	end else if (ir_ea_pi) begin
 		ea <= rf_b;
 		wreg({1'b1, ir[2:0]}, rf_b + ((cp_len == 8'd1 && ir[2:0] == 3'd7) ? 32'd2 : bytes));
 		state <= S_CPXFER;
-	end else if (ea_pd) begin
+	end else if (ir_ea_pd) begin
 		ea <= rf_b - ((cp_len == 8'd1 && ir[2:0] == 3'd7) ? 32'd2 : bytes);
 		wreg({1'b1, ir[2:0]}, rf_b - ((cp_len == 8'd1 && ir[2:0] == 3'd7) ? 32'd2 : bytes));
 		state <= S_CPXFER;
@@ -335,37 +335,14 @@ S_CPREG: begin
 end
 S_CPCTRL: begin : cpctrl
 	// control register select code from the register select CIR (UM Table 10-5)
-	reg [31:0] v; reg bad;
-	bad = 1'b0;
-	case (tmp[11:0])
-		12'h000: v = {29'd0, sfc};
-		12'h001: v = {29'd0, dfc};
-		12'h002: v = cacr;
-		12'h800: v = usp_q;
-		12'h801: v = vbr;
-		12'h802: v = caar;
-		12'h803: v = msp_q;
-		12'h804: v = isp_q;
-		default: begin v = 32'd0; bad = 1'b1; end
-	endcase
-	if (bad) exc_go(`VEC_CPPROTO, `FMT_CPMID, scan_pc, pc_i);
-	else if (!cp_dr) cir_wr(5'h10, `SZ_L, v, S_CPWAIT);
+	reg [32:0] cr;
+	cr = ctrl_rd(tmp[11:0]);
+	if (cr[32]) exc_go(`VEC_CPPROTO, `FMT_CPMID, scan_pc, pc_i);
+	else if (!cp_dr) cir_wr(5'h10, `SZ_L, cr[31:0], S_CPWAIT);
 	else cir_rd(5'h10, `SZ_L, DW_TMP2, S_CPCTRL2);
 end
 S_CPCTRL2: begin
-	case (tmp[11:0])
-		12'h000: sfc <= tmp2[2:0];
-		12'h001: dfc <= tmp2[2:0];
-		12'h002: begin
-			cacr <= tmp2 & `CACR_RDMASK;
-			cacr_ci <= tmp2[`CACR_CI]; cacr_cei <= tmp2[`CACR_CEI]; cacr_cd <= tmp2[`CACR_CD]; cacr_ced <= tmp2[`CACR_CED];
-		end
-		12'h800: begin sp_we <= 1'b1; sp_sel <= 2'd0; sp_wdata <= tmp2; end
-		12'h801: vbr <= tmp2;
-		12'h802: caar <= tmp2;
-		12'h803: begin sp_we <= 1'b1; sp_sel <= 2'd2; sp_wdata <= tmp2; end
-		default: begin sp_we <= 1'b1; sp_sel <= 2'd1; sp_wdata <= tmp2; end
-	endcase
+	ctrl_wr(tmp[11:0], tmp2);
 	state <= S_CPWAIT;
 end
 S_CPREGS: begin
@@ -392,22 +369,29 @@ S_CP9: begin
 end
 S_CPMULT: begin
 	// transfer multiple coprocessor registers: EA, then the register mask
-	if (ea_pi) begin ea <= rf_b; state <= S_CPMULT2; end
-	else if (ea_pd) begin ea <= rf_b; state <= S_CPMULT2; end
+	if (ir_ea_pi) begin ea <= rf_b; state <= S_CPMULT2; end
+	else if (ir_ea_pd) begin ea <= rf_b; state <= S_CPMULT2; end
 	else begin ea_ret <= S_CPMULT2; state <= S_EA; end
 end
 S_CPMULT2: cir_rd(5'h14, `SZ_W, DW_TMP, S_CPMULT3);
 S_CPMULT3: begin : cpmult3
 	// cnt = operands left; each is cp_len bytes moved in longword parts
 	reg [4:0] n;
+	reg [11:0] tb;
 	n = popcount16(tmp[15:0]);
+	tb = (n[0] ? {4'd0, cp_len} : 12'd0) +
+	     (n[1] ? {3'd0, cp_len, 1'b0} : 12'd0) +
+	     (n[2] ? {2'd0, cp_len, 2'b00} : 12'd0) +
+	     (n[3] ? {1'd0, cp_len, 3'b000} : 12'd0) +
+	     (n[4] ? {cp_len, 4'b0000} : 12'd0);
 	cnt <= {3'd0, n};
 	cp_pos <= 8'd0;
-	if (ea_pi) wreg({1'b1, ir[2:0]}, rf_b + ({27'd0, n} * {24'd0, cp_len}));
-	if (ea_pd) begin
-		wreg({1'b1, ir[2:0]}, rf_b - ({27'd0, n} * {24'd0, cp_len}));
+	if (ir_ea_pi) wreg({1'b1, ir[2:0]}, rf_b + {20'd0, tb});
+	if (ir_ea_pd) begin
+		wreg({1'b1, ir[2:0]}, rf_b - {20'd0, tb});
 		ea <= rf_b - {24'd0, cp_len};        // first operand at An - length, descending
 	end
+
 	state <= S_CPMULT4;
 end
 S_CPMULT4: begin : cpmult4
@@ -419,16 +403,17 @@ S_CPMULT4: begin : cpmult4
 		// next operand
 		cnt <= cnt - 8'd1;
 		cp_pos <= 8'd0;
-		if (cnt != 8'd1) ea <= ea_pd ? (ea - {24'd0, cp_len}) : (ea + {24'd0, cp_len});
+		if (cnt != 8'd1) ea <= ir_ea_pd ? (ea - {24'd0, cp_len}) : (ea + {24'd0, cp_len});
 	end else if (!cp_dr) begin
 		cp_pos <= cp_pos + {5'd0, chunk};
-		tmp3 <= {29'd0, chunk};
+		tmp3 <= {14'd0, chunk};
 		rd(ea + {24'd0, cp_pos}, sz_of_bytes(chunk), DW_TMP, S_CPSAVE2);
 	end else begin
 		cp_pos <= cp_pos + {5'd0, chunk};
-		tmp3 <= {29'd0, chunk};
+		tmp3 <= {14'd0, chunk};
 		cir_rd(5'h10, sz_of_bytes(chunk), DW_TMP, S_CPREST5);
 	end
+
 end
 S_CPSAVE2: cir_wr(5'h10, sz_of_bytes(tmp3[2:0]), tmp, S_CPMULT4);
 S_CPREST5: wr(ea + {24'd0, cp_pos} - {29'd0, tmp3[2:0]}, sz_of_bytes(tmp3[2:0]), tmp, S_CPMULT4);
@@ -456,7 +441,7 @@ end
 
 //-------------------------------------------------------------- cpSAVE (UM 10.2.3.3)
 S_CPSAVE0: begin
-	cp_id <= ir[11:9]; cp_base <= {14'd0, 1'b1, 1'b0, ir[11:9], 13'd0};
+	cp_id <= ir[11:9];
 	cpu_flt_fline <= 1'b1;
 	dreq({14'd0, 1'b1, 1'b0, ir[11:9], 13'd0} | 32'h04, `SZ_W, 1'b1, 32'd0, `FC_CPU_SPACE, 1'b0, 1'b0, DW_TMP, S_CPSAVE1);
 end
@@ -466,7 +451,7 @@ S_CPSAVE1: begin : cpsave1
 	case (tmp[15:8])
 		8'h00: begin
 			// empty/reset: only the format word and its reserved word
-			if (ea_pd) begin base = rf_b - 32'd4; wreg({1'b1, ir[2:0]}, base); end else base = ea;
+			if (ir_ea_pd) begin base = rf_b - 32'd4; wreg({1'b1, ir[2:0]}, base); end else base = ea;
 			finish;
 			wr(base, `SZ_L, {tmp[15:0], 16'd0}, S_FETCH);
 		end
@@ -481,7 +466,7 @@ S_CPSAVE1: begin : cpsave1
 				tmp <= {24'd0, `VEC_FMTERR};
 				cir_wr(5'h02, `SZ_W, 32'h0001, S_CP_ABORT);
 			end else begin
-				if (ea_pd) begin base = rf_b - 32'd4 - {24'd0, tmp[7:0]}; wreg({1'b1, ir[2:0]}, base); end else base = ea;
+				if (ir_ea_pd) begin base = rf_b - 32'd4 - {24'd0, tmp[7:0]}; wreg({1'b1, ir[2:0]}, base); end else base = ea;
 				ea <= base;
 				cp_len <= tmp[7:0]; cp_pos <= tmp[7:0];
 				wr(base, `SZ_L, {tmp[15:0], 16'd0}, S_CPSV_BODY);
@@ -498,9 +483,9 @@ S_CPSV_WR: begin cp_pos <= cp_pos - 8'd4; wr(ea + {24'd0, cp_pos}, `SZ_L, tmp, S
 
 //-------------------------------------------------------------- cpRESTORE (UM 10.2.3.4)
 S_CPREST0: begin
-	cp_id <= ir[11:9]; cp_base <= {14'd0, 1'b1, 1'b0, ir[11:9], 13'd0};
-	if (ea_pi) ea <= rf_b;
-	rd(ea_pi ? rf_b : ea, `SZ_W, DW_TMP, S_CPREST1);
+	cp_id <= ir[11:9];
+	if (ir_ea_pi) ea <= rf_b;
+	rd(ir_ea_pi ? rf_b : ea, `SZ_W, DW_TMP, S_CPREST1);
 end
 S_CPREST1: begin
 	cpu_flt_fline <= 1'b1;
@@ -510,7 +495,7 @@ S_CPREST2: begin cpu_flt_fline <= 1'b0; cir_rd(5'h06, `SZ_W, DW_TMP2, S_CPREST3)
 S_CPREST3: begin
 	case (tmp2[15:8])
 		8'h00: begin
-			if (ea_pi) wreg({1'b1, ir[2:0]}, ea + 32'd4);
+			if (ir_ea_pi) wreg({1'b1, ir[2:0]}, ea + 32'd4);
 			finish;
 		end
 		8'h01: cir_rd(5'h06, `SZ_W, DW_TMP2, S_CPREST3);          // not ready: read again, no interrupts
@@ -520,7 +505,7 @@ S_CPREST3: begin
 				cir_wr(5'h02, `SZ_W, 32'h0001, S_CP_ABORT);
 			end else begin
 				cp_len <= tmp[7:0]; cp_pos <= 8'd0;
-				if (ea_pi) wreg({1'b1, ir[2:0]}, ea + 32'd4 + {24'd0, tmp[7:0]});
+				if (ir_ea_pi) wreg({1'b1, ir[2:0]}, ea + 32'd4 + {24'd0, tmp[7:0]});
 				state <= S_CPRS_BODY;
 			end
 		end
@@ -549,25 +534,25 @@ S_PMMU0: begin
 	else case (ext[15:13])
 		3'b000: begin
 			// PMOVE TT0/TT1
-			if (ext[12:11] != 2'b01 || ext[7:0] != 8'd0 || (ext[9] && ext[8]) || !ea_ctrlalt) exc_pre(`VEC_FLINE);
+			if (ext[12:11] != 2'b01 || ext[7:0] != 8'd0 || (ext[9] && ext[8]) || !ir_ea_ctrlalt) exc_pre(`VEC_FLINE);
 			else begin ea_ret <= ext[9] ? S_PMOVE_WR : S_PMOVE_RD; state <= S_EA; end
 		end
 		3'b001: begin
 			case (ext[12:10])
 				3'b000: begin   // PLOAD
-					if (ext[8:5] != 4'd0 || !mmu_fc_ok(ext[4:0]) || !ea_ctrlalt) exc_pre(`VEC_FLINE);
+					if (ext[8:5] != 4'd0 || !mmu_fc_ok(ext[4:0]) || !ir_ea_ctrlalt) exc_pre(`VEC_FLINE);
 					else begin ea_ret <= S_PLOAD; state <= S_EA; end
 				end
 				3'b001: begin   // PFLUSHA
-					if (ext[9:0] != 10'd0 || ea_pcd || ea_pci || ea_imm || ea_bad) exc_pre(`VEC_FLINE);
+					if (ext[9:0] != 10'd0 || ir_ea_pcd || ir_ea_pci || ir_ea_imm || ir_ea_bad) exc_pre(`VEC_FLINE);
 					else begin op_req <= 1'b1; op_kind <= 3'd4; state <= S_PFLUSH; end
 				end
 				3'b100: begin   // PFLUSH by function code
-					if (ext[9:8] != 2'd0 || !mmu_fc_ok(ext[4:0]) || ea_pcd || ea_pci || ea_imm || ea_bad) exc_pre(`VEC_FLINE);
+					if (ext[9:8] != 2'd0 || !mmu_fc_ok(ext[4:0]) || ir_ea_pcd || ir_ea_pci || ir_ea_imm || ir_ea_bad) exc_pre(`VEC_FLINE);
 					else begin op_req <= 1'b1; op_kind <= 3'd5; op_fc <= mmu_fc(ext[4:0], rf_a[2:0]); op_fcmask <= ext[7:5]; state <= S_PFLUSH; end
 				end
 				3'b110: begin   // PFLUSH by function code and EA
-					if (ext[9:8] != 2'd0 || !mmu_fc_ok(ext[4:0]) || !ea_ctrlalt) exc_pre(`VEC_FLINE);
+					if (ext[9:8] != 2'd0 || !mmu_fc_ok(ext[4:0]) || !ir_ea_ctrlalt) exc_pre(`VEC_FLINE);
 					else begin ea_ret <= S_PFLUSH2; state <= S_EA; end
 				end
 				default: exc_pre(`VEC_FLINE);
@@ -575,18 +560,18 @@ S_PMMU0: begin
 		end
 		3'b010: begin
 			// PMOVE TC / SRP / CRP
-			if (!(ext[12:10] == 3'b000 || ext[12:10] == 3'b010 || ext[12:10] == 3'b011) || ext[7:0] != 8'd0 || (ext[9] && ext[8]) || !ea_ctrlalt)
+			if (!(ext[12:10] == 3'b000 || ext[12:10] == 3'b010 || ext[12:10] == 3'b011) || ext[7:0] != 8'd0 || (ext[9] && ext[8]) || !ir_ea_ctrlalt)
 				exc_pre(`VEC_FLINE);
 			else begin ea_ret <= ext[9] ? S_PMOVE_WR : S_PMOVE_RD; state <= S_EA; end
 		end
 		3'b011: begin
 			// PMOVE MMUSR (no FD bit)
-			if (ext[12:10] != 3'b000 || ext[8:0] != 9'd0 || !ea_ctrlalt) exc_pre(`VEC_FLINE);
+			if (ext[12:10] != 3'b000 || ext[8:0] != 9'd0 || !ir_ea_ctrlalt) exc_pre(`VEC_FLINE);
 			else begin ea_ret <= ext[9] ? S_PMOVE_WR : S_PMOVE_RD; state <= S_EA; end
 		end
 		3'b100: begin
 			// PTEST
-			if (!mmu_fc_ok(ext[4:0]) || !ea_ctrlalt || (ext[8] && ext[12:10] == 3'd0)) exc_pre(`VEC_FLINE);
+			if (!mmu_fc_ok(ext[4:0]) || !ir_ea_ctrlalt || (ext[8] && ext[12:10] == 3'd0)) exc_pre(`VEC_FLINE);
 			else begin ea_ret <= S_PTEST; state <= S_EA; end
 		end
 		default: exc_pre(`VEC_FLINE);
