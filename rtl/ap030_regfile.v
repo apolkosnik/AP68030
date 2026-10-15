@@ -54,12 +54,14 @@ module ap030_regfile
 (* ramstyle = "MLAB, no_rw_check" *) reg [31:0] md [0:15];
 (* ramstyle = "MLAB, no_rw_check" *) reg [31:0] me [0:15];
 reg [15:0] zero;           // the register reads 0 (reset, not written since; bit 15 unused)
+`ifdef VERILATOR
 // the registers as they read (for benches: rf.r[n]; nothing uses it in synthesis)
 wire [31:0] r [0:14];
 genvar gr;
 generate for (gr = 0; gr < 15; gr = gr + 1) begin : g_r
 	assign r[gr] = zero[gr] ? 32'd0 : ma[gr];
 end endgenerate
+`endif
 reg [31:0] usp, isp, msp;
 wire       mwe = ce && we && (waddr != 4'd15) && !rst;
 always @(posedge clk) if (mwe) ma[waddr] <= wdata;
@@ -69,7 +71,9 @@ always @(posedge clk) if (mwe) md[waddr] <= wdata;
 always @(posedge clk) if (mwe) me[waddr] <= wdata;
 
 wire [1:0] act = !sr_s ? 2'd0 : (sr_m ? 2'd2 : 2'd1);
+`ifdef VERILATOR
 wire [31:0] a7 = (act == 2'd0) ? usp : (act == 2'd1) ? isp : msp;   // committed A7 (the benches show it)
+`endif
 
 // a write is visible to reads in the same clock it is applied, so a value
 // written by one state can be read by the next without a hazard.  A pending

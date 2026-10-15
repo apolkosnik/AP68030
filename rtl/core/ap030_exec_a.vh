@@ -4,7 +4,7 @@
 
 //-------------------------------------------------------------- reset (UM 8.1.1)
 S_RESET0: begin
-	exc_active <= 1'b1; exc_busfault <= 1'b1; exc_is_reset <= 1'b1;
+	exc_active <= 1'b1; exc_busfault <= 1'b1;
 	status_cnt <= 2'd3;
 	dreq(32'd0, `SZ_L, 1'b1, 32'd0, `FC_SUPER_PROG, 1'b0, 1'b0, DW_TMP, S_RESET1);
 end
@@ -13,7 +13,7 @@ S_RESET1: begin
 	dreq(32'd4, `SZ_L, 1'b1, 32'd0, `FC_SUPER_PROG, 1'b0, 1'b0, DW_TMP, S_RESET2);
 end
 S_RESET2: begin
-	exc_busfault <= 1'b0; exc_active <= 1'b0; exc_is_reset <= 1'b0; fetch_hold <= 1'b0;
+	exc_busfault <= 1'b0; exc_active <= 1'b0; fetch_hold <= 1'b0;
 	pc_i <= tmp;
 	if (tmp[0]) begin halted_r <= 1'b1; state <= S_HALT; end
 	else begin flush_req = 1'b1; flush_pc = tmp; state <= S_FETCH; end
@@ -41,7 +41,7 @@ S_FETCH: begin
 		if (w0_f) exc_stream_fault(1'b0, 1'b1);
 		else if (dc_needs_ext && !w1_v) ;                    // second word not yet here
 		else if (dc_needs_ext && w1_f) exc_stream_fault(1'b1, 1'b1);
-		else dispatch;
+		else disp_req = 1'b1;
 	end
 end
 
@@ -73,7 +73,7 @@ S_DWAIT: begin
 	end else if (rte_fake || d_ack) begin : deliver
 		reg [31:0] data;
 		reg  [1:0] dsz;
-		data = rte_fake ? rte_fake_data : d_rdata;
+		data = rte_fake ? exc_dib : d_rdata;
 		dsz  = d_size;
 		if (rerun_merge) begin
 			// UM 8.2.1: a rerun of the second portion completes the operand;
@@ -90,15 +90,81 @@ S_DWAIT: begin
 			DW_TMP:  tmp <= data;
 			DW_TMP2: tmp2 <= data;
 			DW_EA:   ea <= data;
-			DW_IMM:  imm <= data;
 			DW_REG:  wreg(dw_reg, merge(dst, data, dsz));
 			DW_REGL: wreg(dw_reg, sext_sz(data, dsz));
 			DW_SR:   sr <= data[15:0] & `SR_MASK;
-			DW_FRAME: begin fr[cnt[4:0]] <= data; cnt <= cnt + 8'd1; end
+			DW_FRAME: begin
+				cnt <= cnt + 8'd1;
+				case (cnt[4:0])
+					5'd2: if (exc_fmt == `FMT_CPMID) pc_i <= data;
+					      else begin
+					      	exc_rk <= (exc_fmt == `FMT_SHORTBUS) ? RK_BOUNDARY : data[31:28];
+					      	exc_rs <= data[23:16];
+					      	exc_ssw <= data[15:0];
+					      end
+					5'd3: if (exc_fmt == `FMT_CPMID) begin
+					      	{cp_cond, cp_dr, cp_ca, cp_pcbit, cp_trace_wait, cp_kind, cp_id} <= data[28:17];
+					      	ir <= data[15:0];
+					      end else begin
+					      	exc_stage_c <= data[31:16];
+					      	exc_stage_b <= data[15:0];
+					      end
+					5'd4: if (exc_fmt == `FMT_CPMID) ea <= data;
+					      else exc_fa <= data;
+					5'd5: ea <= data;
+					5'd6: exc_dob <= data;
+					5'd7: src <= data;
+					5'd8: dst <= data;
+					5'd9: exc_baddr <= data;
+					5'd11: exc_dib <= data;
+					5'd12: tmp <= data;
+					5'd13: begin
+						ir <= data[31:16];
+						rte_ver_err <= (data[15:12] != 4'h0);
+						exc_dw_dst <= data[11:8]; exc_dw_ret <= data[7:0];
+					end
+					5'd14: tmp2 <= data;
+					5'd15: ea2 <= data;
+					5'd16: begin
+						exc_cnt <= data[31:24]; sub <= data[23:16];
+						mm_mask <= data[15:0];
+					end
+					5'd17: begin
+						tmp3 <= {1'b0, data[31:16]};
+
+						{ea_sel, imm_tgt, dw_reg} <= data[15:10];
+						ea_pc <= data[8]; ea_ret <= data[7:0];
+					end
+					5'd18: begin
+						exc_got <= data[31:29]; imm_ret <= data[23:16];
+						exc_partial[31:16] <= data[15:0];
+					end
+					5'd19: begin
+						exc_partial[15:0] <= data[31:16];
+						ext <= data[15:0];
+					end
+					5'd20: begin
+						{tr_t1, tr_t0, flow, cp_cond, cp_dr, cp_ca, cp_pcbit, cp_trace_wait, cp_kind, cp_id} <= data[31:17];
+						{cp_len, cp_pos} <= data[15:0];
+					end
+					5'd21: begin
+						{g_alu, g_size, g_srck, g_dstk, g_flags, g_wb} <= data[29:16];
+						{g_dreg, g_sext, g_bitop, g_move_mem} <= data[15:9];
+						nx <= data[7:0];
+					end
+					5'd22: begin
+						cp_resp <= data[31:16];
+						exc_held <= data[10:0];
+					end
+					default: ;
+				endcase
+			end
 			default: ;
 		endcase
 		if (dw_ret == S_MOVE_DEA) begin
 			ea_sel <= 1'b1; ea_ret <= S_MOVE_WR; state <= S_EA;
+		end else if (dw_ret == S_JMP && !ea[0]) begin
+			go_pc(ea);
 		end else state <= dw_ret;
 	end else if (d_fault) begin
 		if (exc_busfault) begin
@@ -257,50 +323,20 @@ S_EA_IND: begin : ea_ind_blk
 end
 
 //-------------------------------------------------------------- generic path
-S_GEN_RD: begin
-	rd(ea, g_size, (g_srck == SK_EA) ? DW_SRC : DW_DST, g_move_mem ? S_MOVE_DEA : nx);
-end
-
 S_GEN_EXEC: begin : gen_exec
-	reg can_overlap;
-	if (g_alu_shift && !sh_wait) begin
-		// the shifter works from registered operands: its result is valid
-		// in the next clock
-		sh_wait <= 1'b1;
+	if (g_flags) sr[4:0] <= alu_f;
+	if (g_dstk == DK_REG && g_wb) wreg(g_dreg, g_dreg[3] ? alu_r : merge(dst, alu_r, g_size));
+	if (g_dstk == DK_EA && g_wb) begin
+		finish;
+		wr(ea, g_size, alu_r, S_FETCH);
 	end else begin
-		sh_wait <= 1'b0;
-		if (g_flags) sr[4:0] <= alu_f;
-		if (g_dstk == DK_REG && g_wb) wreg(g_dreg, g_dreg[3] ? alu_r : merge(dst, alu_r, g_size));
-		if (g_dstk == DK_EA && g_wb) begin
-			finish;
-			wr(ea, g_size, alu_r, S_FETCH);
-		end else begin
-			// the next instruction can be dispatched in this clock when nothing
-			// else has to happen at the boundary
-			can_overlap = !tr_t1 && !(tr_t0 & flow) && !irq_pend && !late_fault_pend && !stopped &&
-			              w0_v && !w0_f && !(dc_needs_ext && (!w1_v || w1_f));
-			if (can_overlap) begin
-				dispatch;
-				// an exception taken at that dispatch (illegal, privilege,
-				// A/F-line) stacks the SR this instruction leaves behind
-				if (g_flags) exc_sr[4:0] <= alu_f;
-			end else finish;
-		end
+		finish_dispatch;
 	end
 end
+// (S_MOVE_DEA handled directly by dispatch / S_IMM / S_DWAIT)
 
-//-------------------------------------------------------------- MOVE to memory
-S_MOVE_DEA: begin
-	ea_sel <= 1'b1; ea_ret <= S_MOVE_WR; state <= S_EA;
-end
-S_MOVE_WR: begin
-	sr[4:0] <= alu_f;      // ALU op MOVE on the source
-	finish;
-	wr(ea, g_size, src, S_FETCH);
-end
 
-//-------------------------------------------------------------- LEA / PEA
-S_LEA: begin wreg({1'b1, ir[11:9]}, ea); finish; end
+//-------------------------------------------------------------- PEA
 S_PEA: begin wreg(4'd15, rf_c - 32'd4); finish; wr(rf_c - 32'd4, `SZ_L, ea, S_FETCH); end
 
 //-------------------------------------------------------------- Bcc / BRA / BSR
@@ -323,6 +359,8 @@ S_BCC: begin : bcc_state
 	end else if (ir[11:8] == 4'h0 || cc_true(ir[11:8], sr[4:0])) begin
 		pop(npop);
 		go_pc(target);
+	end else if (npop == 2'd0) begin
+		finish_dispatch;
 	end else begin
 		pop(npop);
 		finish;
@@ -368,7 +406,7 @@ S_DBCC: begin : dbcc_state
 	// the displacement (ext) is relative to its own address, pc_i + 2
 	reg [15:0] nw;
 	nw = rf_a[15:0] - 16'd1;
-	if (cc_true(ir[11:8], sr[4:0])) finish;
+	if (cc_true(ir[11:8], sr[4:0])) finish_dispatch;
 	else begin
 		wreg({1'b0, ir[2:0]}, {rf_a[31:16], nw});
 		// the MC68020/030 prefetch from the branch target whenever the
@@ -378,7 +416,7 @@ S_DBCC: begin : dbcc_state
 			go_pc(pc_i + 32'd2 + sext16(ext));
 			if (ext[0]) exc_pc <= pc_i + 32'd2 + sext16(ext);   // the frame's PC is the target
 		end
-		else finish;
+		else finish_dispatch;
 	end
 end
 S_SCC: begin : scc_state
@@ -414,18 +452,24 @@ S_LINK: begin : link_state
 	if (two && !w0_v) ; else if (two && w0_f) exc_stream_fault(1'b0, 1'b0);
 	else begin
 		if (two) pop(2'd1);
-		imm <= disp;
+		ea <= disp;
 		tmp <= rf_c - 32'd4;
 		// LINK A7 pushes the initial A7 on the 68020/030 (only the 68040
 		// pushes the decremented value; WinUAE gencpu and 68030 cputest)
 		wr(rf_c - 32'd4, `SZ_L, rf_a, S_LINK2);
 	end
 end
-S_LINK2: begin wreg({1'b1, ir[2:0]}, tmp); state <= S_LINK3; end
-S_LINK3: begin wreg(4'd15, tmp + imm); finish; end
-S_UNLK: begin tmp <= rf_a; rd(rf_a, `SZ_L, DW_TMP2, S_UNLK2); end
-S_UNLK2: begin wreg({1'b1, ir[2:0]}, tmp2); state <= S_UNLK3; end
-S_UNLK3: begin if (ir[2:0] != 3'd7) wreg(4'd15, tmp + 32'd4); finish; end
+S_LINK2: begin
+	if (ir[2:0] != 3'd7) begin
+		wreg({1'b1, ir[2:0]}, tmp);
+		sp_we <= 1'b1; sp_sel <= !sr_s ? 2'd0 : (sr_m ? 2'd2 : 2'd1); sp_wdata <= tmp + ea;
+	end else begin
+		wreg(4'd15, tmp + ea);
+	end
+	finish;
+end
+S_UNLK: begin tmp <= rf_a; dw_reg <= {1'b1, ir[2:0]}; rd(rf_a, `SZ_L, DW_REGL, S_UNLK2); end
+S_UNLK2: begin if (ir[2:0] != 3'd7) wreg(4'd15, tmp + 32'd4); finish; end
 
 //-------------------------------------------------------------- MOVE USP / from SR,CCR / to SR,CCR
 S_MOVE_USP: begin
@@ -467,39 +511,14 @@ end
 
 //-------------------------------------------------------------- MOVEC (PRM)
 S_MOVEC: begin : movec_state
-	reg [31:0] v;
-	reg bad;
-	bad = 1'b0;
-	case (ext[11:0])
-		12'h000: v = {29'd0, sfc};
-		12'h001: v = {29'd0, dfc};
-		12'h002: v = cacr;
-		12'h800: v = usp_q;
-		12'h801: v = vbr;
-		12'h802: v = caar;
-		12'h803: v = msp_q;
-		12'h804: v = isp_q;
-		default: begin v = 32'd0; bad = 1'b1; end
-	endcase
-	if (bad) go_illegal;
+	reg [32:0] cr;
+	cr = ctrl_rd(ext[11:0]);
+	if (cr[32]) go_illegal;
 	else if (!ir[0]) begin
-		wreg({ext[15], ext[14:12]}, v);
+		wreg({ext[15], ext[14:12]}, cr[31:0]);
 		finish;
 	end else begin
-		case (ext[11:0])
-			12'h000: sfc <= rf_a[2:0];
-			12'h001: dfc <= rf_a[2:0];
-			12'h002: begin
-				cacr <= rf_a & `CACR_RDMASK;
-				cacr_ci <= rf_a[`CACR_CI]; cacr_cei <= rf_a[`CACR_CEI];
-				cacr_cd <= rf_a[`CACR_CD]; cacr_ced <= rf_a[`CACR_CED];
-			end
-			12'h800: begin sp_we <= 1'b1; sp_sel <= 2'd0; sp_wdata <= rf_a; end
-			12'h801: vbr <= rf_a;
-			12'h802: caar <= rf_a;
-			12'h803: begin sp_we <= 1'b1; sp_sel <= 2'd2; sp_wdata <= rf_a; end
-			default: begin sp_we <= 1'b1; sp_sel <= 2'd1; sp_wdata <= rf_a; end
-		endcase
+		ctrl_wr(ext[11:0], rf_a);
 		finish;
 	end
 end
@@ -516,7 +535,8 @@ S_MOVES0: begin
 		dreq(ea, g_size, 1'b1, 32'd0, sfc, 1'b0, 1'b0, ext[15] ? DW_REGL : DW_REG, S_MOVES1);
 	end
 end
-S_MOVES1: finish;
+S_MOVES1: finish_dispatch;
+
 
 //-------------------------------------------------------------- NOP / STOP / RESET / TRAP / BKPT
 S_NOP: begin
@@ -642,13 +662,20 @@ S_MOVEP0: begin
 end
 S_MOVEP1: begin : movep1
 	reg [2:0] n;
+	reg [7:0] wb;
 	n = ir[6] ? 3'd4 : 3'd2;
+	case ({ir[6] & ~cnt[1], ~cnt[0]})
+		2'd3: wb = dst[31:24];
+		2'd2: wb = dst[23:16];
+		2'd1: wb = dst[15:8];
+		default: wb = dst[7:0];
+	endcase
 	if (cnt[2:0] == n) begin
 		if (!ir[7]) wreg({1'b0, ir[11:9]}, ir[6] ? tmp : {dst[31:16], tmp[15:0]});
 		finish;
 	end else if (ir[7]) begin
 		cnt <= cnt + 8'd1;
-		wr(ea + {cnt[6:0], 1'b0}, `SZ_B, ir[6] ? (dst >> (8 * (3'd3 - cnt[2:0]))) : (dst >> (8 * (3'd1 - cnt[1:0]))), S_MOVEP1);
+		wr(ea + {cnt[6:0], 1'b0}, `SZ_B, {24'd0, wb}, S_MOVEP1);
 	end else begin
 		cnt <= cnt + 8'd1;
 		rd(ea + {cnt[6:0], 1'b0}, `SZ_B, DW_TMP2, S_MOVEP2);

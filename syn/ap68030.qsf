@@ -17,10 +17,86 @@ set_global_assignment -name VERILOG_FILE ../rtl/ap030_muldiv.v
 set_global_assignment -name VERILOG_FILE ../rtl/ap030_regfile.v
 set_global_assignment -name SDC_FILE ap68030.sdc
 set_global_assignment -name OPTIMIZATION_MODE "HIGH PERFORMANCE EFFORT"
+# Use a reproducible placement; run_syn.sh checks every timing corner.
+set_global_assignment -name SEED 3
 set_global_assignment -name NUM_PARALLEL_PROCESSORS 8
 # the pins are not assigned: this project only measures the core
 set_global_assignment -name ERROR_CHECK_FREQUENCY_DIVISOR 256
 
-set_global_assignment -name LAST_QUARTUS_VERSION "17.0.2 Standard Edition"# timing check only: no pin assignments, every port but the clock is virtual
-set_instance_assignment -name VIRTUAL_PIN ON -to *
-set_instance_assignment -name VIRTUAL_PIN OFF -to clk
+set_global_assignment -name LAST_QUARTUS_VERSION "17.0.2 Standard Edition"
+# Timing check only: leave clk on a physical clock input. A blanket wildcard
+# also virtualizes clk~input; Quartus 17 ignores the subsequent OFF-to-clk
+# exception and routes the clock from a logic cell instead of a package pin.
+# Keep this list in step with ap030_top's non-clock ports.
+set_instance_assignment -name VIRTUAL_PIN ON -to ce
+set_instance_assignment -name VIRTUAL_PIN ON -to a[*]
+set_instance_assignment -name VIRTUAL_PIN ON -to fc[*]
+set_instance_assignment -name VIRTUAL_PIN ON -to siz[*]
+set_instance_assignment -name VIRTUAL_PIN ON -to rw
+set_instance_assignment -name VIRTUAL_PIN ON -to rmc_n
+set_instance_assignment -name VIRTUAL_PIN ON -to as_n
+set_instance_assignment -name VIRTUAL_PIN ON -to ds_n
+set_instance_assignment -name VIRTUAL_PIN ON -to dben_n
+set_instance_assignment -name VIRTUAL_PIN ON -to ecs_n
+set_instance_assignment -name VIRTUAL_PIN ON -to ocs_n
+set_instance_assignment -name VIRTUAL_PIN ON -to ciout_n
+set_instance_assignment -name VIRTUAL_PIN ON -to cbreq_n
+set_instance_assignment -name VIRTUAL_PIN ON -to bus_oe
+set_instance_assignment -name VIRTUAL_PIN ON -to d_o[*]
+set_instance_assignment -name VIRTUAL_PIN ON -to d_oe
+set_instance_assignment -name VIRTUAL_PIN ON -to d_i[*]
+set_instance_assignment -name VIRTUAL_PIN ON -to dsack0_n
+set_instance_assignment -name VIRTUAL_PIN ON -to dsack1_n
+set_instance_assignment -name VIRTUAL_PIN ON -to sterm_n
+set_instance_assignment -name VIRTUAL_PIN ON -to berr_n
+set_instance_assignment -name VIRTUAL_PIN ON -to halt_n
+set_instance_assignment -name VIRTUAL_PIN ON -to avec_n
+set_instance_assignment -name VIRTUAL_PIN ON -to ciin_n
+set_instance_assignment -name VIRTUAL_PIN ON -to cback_n
+set_instance_assignment -name VIRTUAL_PIN ON -to br_n
+set_instance_assignment -name VIRTUAL_PIN ON -to bg_n
+set_instance_assignment -name VIRTUAL_PIN ON -to bgack_n
+set_instance_assignment -name VIRTUAL_PIN ON -to ipl_n[*]
+set_instance_assignment -name VIRTUAL_PIN ON -to ipend_n
+set_instance_assignment -name VIRTUAL_PIN ON -to reset_n_i
+set_instance_assignment -name VIRTUAL_PIN ON -to reset_n_oe
+set_instance_assignment -name VIRTUAL_PIN ON -to cdis_n
+set_instance_assignment -name VIRTUAL_PIN ON -to mmudis_n
+set_instance_assignment -name VIRTUAL_PIN ON -to refill_n
+set_instance_assignment -name VIRTUAL_PIN ON -to status_n
+set_instance_assignment -name VIRTUAL_PIN ON -to fast_req
+set_instance_assignment -name VIRTUAL_PIN ON -to fast_addr[*]
+set_instance_assignment -name VIRTUAL_PIN ON -to fast_fc[*]
+set_instance_assignment -name VIRTUAL_PIN ON -to fast_rw
+set_instance_assignment -name VIRTUAL_PIN ON -to fast_ci
+set_instance_assignment -name VIRTUAL_PIN ON -to fast_burst
+set_instance_assignment -name VIRTUAL_PIN ON -to fast_be[*]
+set_instance_assignment -name VIRTUAL_PIN ON -to fast_wdata[*]
+set_instance_assignment -name VIRTUAL_PIN ON -to fast_match
+set_instance_assignment -name VIRTUAL_PIN ON -to fast_ready
+set_instance_assignment -name VIRTUAL_PIN ON -to fast_valid
+set_instance_assignment -name VIRTUAL_PIN ON -to fast_last
+set_instance_assignment -name VIRTUAL_PIN ON -to fast_word[*]
+set_instance_assignment -name VIRTUAL_PIN ON -to fast_rdata[*]
+set_instance_assignment -name VIRTUAL_PIN ON -to dbg_pc[*]
+set_instance_assignment -name VIRTUAL_PIN ON -to dbg_sr[*]
+set_instance_assignment -name VIRTUAL_PIN ON -to dbg_state[*]
+set_instance_assignment -name VIRTUAL_PIN ON -to dbg_inst
+set_instance_assignment -name VIRTUAL_PIN ON -to tm_pop[*]
+set_instance_assignment -name VIRTUAL_PIN ON -to tm_md[*]
+set_instance_assignment -name VIRTUAL_PIN ON -to tm_q[*]
+set_instance_assignment -name VIRTUAL_PIN ON -to tm_qn[*]
+set_instance_assignment -name VIRTUAL_PIN ON -to tm_scan[*]
+set_instance_assignment -name VIRTUAL_PIN ON -to tm_flush
+set_instance_assignment -name VIRTUAL_PIN ON -to fetch_stop_v
+set_instance_assignment -name VIRTUAL_PIN ON -to fetch_stop[*]
+set_instance_assignment -name VIRTUAL_PIN ON -to fetch_scan_v
+set_instance_assignment -name VIRTUAL_PIN ON -to fetch_scan_to[*]
+set_instance_assignment -name VIRTUAL_PIN ON -to dbg_halted
+set_instance_assignment -name VIRTUAL_PIN ON -to dbg_vbr[*]
+set_instance_assignment -name VIRTUAL_PIN ON -to dbg_cacr[*]
+set_instance_assignment -name VIRTUAL_PIN ON -to dbg_cache_clear
+set_instance_assignment -name VIRTUAL_PIN ON -to snoop_we
+set_instance_assignment -name VIRTUAL_PIN ON -to snoop_addr[*]
+set_instance_assignment -name VIRTUAL_PIN ON -to nmi_vec_nocache
+set_instance_assignment -name VIRTUAL_PIN ON -to fetch_lazy

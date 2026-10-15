@@ -20,7 +20,8 @@ reg        dc_priv;
 reg        dc_illegal;
 reg [31:0] dc_quick;
 reg        dc_move_mem; // MOVE to a memory destination
-reg        dc_shift;    // register shift/rotate
+reg        dc_ext;      // second word is part of the operation
+reg        dc_eaonly_r; // evaluate memory EA before dc_first
 
 localparam SK_REG = 2'd0, SK_IMM = 2'd1, SK_EA = 2'd2, SK_QUICK = 2'd3;
 localparam DK_REG = 2'd0, DK_EA = 2'd1, DK_NONE = 2'd2, DK_IMM = 2'd3;
@@ -49,6 +50,7 @@ wire ea_data     = ea_dn | ea_mem | ea_imm;
 wire ea_dataalt  = ea_dn | ea_memalt;
 wire ea_alt      = ea_dn | ea_an | ea_memalt;
 wire ea_any      = !ea_bad;
+wire [1:0] ea_srck = (ea_dn | ea_an) ? SK_REG : ea_imm ? SK_IMM : SK_EA;
 
 // MOVE destination classification (dw[8:6] mode, dw[11:9] register)
 wire [2:0] dm = dw[8:6];
@@ -65,10 +67,11 @@ always @* begin
 	dc_size = `SZ_L;
 	dc_alu = `ALU_MOVE;
 	dc_srck = SK_REG; dc_dstk = DK_REG;
-	dc_sreg = {1'b0, dw[2:0]};
+	dc_sreg = {ea_an, dw[2:0]};
 	dc_dreg = {1'b0, dw[11:9]};
 	dc_flags = 1'b1; dc_wb = 1'b1; dc_dstrd = 1'b1; dc_sext = 1'b0; dc_bitop = 1'b0;
-	dc_priv = 1'b0; dc_illegal = 1'b0; dc_quick = 32'd0; dc_move_mem = 1'b0; dc_shift = 1'b0;
+	dc_priv = 1'b0; dc_illegal = 1'b0; dc_quick = 32'd0; dc_move_mem = 1'b0;
+	dc_ext = 1'b0; dc_eaonly_r = 1'b0;
 
 	case (dw[15:12])
 	//------------------------------------------------------------------ 0000
@@ -76,7 +79,7 @@ always @* begin
 		if (dw[8]) begin
 			if (ea_an) begin
 				// MOVEP
-				dc_first = S_MOVEP0;
+				dc_first = S_MOVEP0; dc_ext = 1'b1;
 				dc_size = dw[6] ? `SZ_L : `SZ_W;
 			end else begin
 				// dynamic bit operations: BTST/BCHG/BCLR/BSET Dn,<ea>
@@ -107,27 +110,26 @@ always @* begin
 				2'b10: dc_alu = `ALU_BCLR;
 				default: dc_alu = `ALU_BSET;
 			endcase
-			dc_first = S_GEN_EXEC;
 			if (ea_dn) begin dc_dstk = DK_REG; dc_dreg = {1'b0, dw[2:0]}; dc_size = `SZ_L; end
 			else begin dc_dstk = DK_EA; if (!(dw[7:6] == 2'b00 ? ea_mem : ea_memalt)) dc_illegal = 1'b1; end
 		end else if (dw[7:6] == 2'b11) begin
 			// CHK2/CMP2 (00C0/02C0/04C0), CAS (0AC0/0CC0/0EC0), CAS2 (0CFC/0EFC), CALLM/RTM (illegal)
 			case (dw[11:9])
 				3'b000, 3'b001, 3'b010: begin
-					dc_first = S_CHK2_0;
+					dc_first = S_CHK2_1; dc_srck = SK_EA; dc_ext = 1'b1;
 					dc_size = dw[10:9];
 					if (!ea_ctrl) dc_illegal = 1'b1;
 				end
 				3'b101, 3'b110, 3'b111: begin
-					dc_size = dw[10:9] - 2'd1;
+					dc_size = dw[10:9] - 2'd1; dc_ext = 1'b1;
 					if (ea_imm && dw[11:9] != 3'b101) dc_first = S_CAS2_0;
-					else begin dc_first = S_CAS0; if (!ea_memalt) dc_illegal = 1'b1; end
+					else begin dc_first = S_CAS0; dc_eaonly_r = 1'b1; if (!ea_memalt) dc_illegal = 1'b1; end
 				end
 				default: dc_illegal = 1'b1;
 			endcase
 		end else if (dw[11:9] == 3'b111) begin
 			// MOVES
-			dc_first = S_MOVES0;
+			dc_first = S_MOVES0; dc_ext = 1'b1; dc_eaonly_r = 1'b1;
 			dc_size = sz_std;
 			dc_priv = 1'b1;
 			if (!ea_memalt) dc_illegal = 1'b1;
@@ -135,7 +137,6 @@ always @* begin
 			// ORI ANDI SUBI ADDI EORI CMPI #imm,<ea>; to CCR/SR
 			dc_srck = SK_IMM;
 			dc_size = sz_std;
-			dc_first = S_GEN_EXEC;
 			case (dw[11:9])
 				3'b000: dc_alu = `ALU_OR;
 				3'b001: dc_alu = `ALU_AND;
@@ -163,11 +164,8 @@ always @* begin
 		dc_size = (dw[13:12] == 2'b01) ? `SZ_B : (dw[13:12] == 2'b11) ? `SZ_W : `SZ_L;
 		dc_alu = `ALU_MOVE;
 		dc_dstrd = 1'b0;
-		if (ea_dn) dc_srck = SK_REG;
-		else if (ea_an) begin dc_srck = SK_REG; dc_sreg = {1'b1, dw[2:0]}; if (dc_size == `SZ_B) dc_illegal = 1'b1; end
-		else if (ea_imm) begin dc_srck = SK_IMM; dc_first = S_GEN_EXEC; end
-		else if (ea_mem) begin dc_srck = SK_EA; dc_first = S_GEN_EXEC; end
-		else dc_illegal = 1'b1;
+		dc_srck = ea_srck;
+		if (!ea_any || (ea_an && dc_size == `SZ_B)) dc_illegal = 1'b1;
 		if (dm_dn) begin dc_dstk = DK_REG; dc_dreg = {1'b0, dw[11:9]}; end
 		else if (dm_an) begin
 			// MOVEA
@@ -186,67 +184,65 @@ always @* begin
 				2'b11: begin
 					if (dw[11:9] == 3'b100 && ea_dn) begin   // EXTB.L Dn ($49C0)
 						dc_alu = `ALU_EXTB; dc_size = `SZ_L; dc_srck = SK_QUICK; dc_dstk = DK_REG; dc_dreg = {1'b0, dw[2:0]};
-					end else begin dc_first = S_LEA; dc_flags = 1'b0; if (!ea_ctrl) dc_illegal = 1'b1; end   // LEA
+					end else begin dc_first = S_LEA; dc_eaonly_r = 1'b1; dc_flags = 1'b0; if (!ea_ctrl) dc_illegal = 1'b1; end   // LEA
 				end
 				2'b10, 2'b00: begin
 					dc_first = S_CHK; dc_size = dw[7] ? `SZ_W : `SZ_L; dc_flags = 1'b0; dc_wb = 1'b0;
-					if (ea_dn) dc_srck = SK_REG;
-					else if (ea_imm) dc_srck = SK_IMM;
-					else if (ea_mem) dc_srck = SK_EA;
-					else dc_illegal = 1'b1;
+					dc_srck = ea_srck;
+					if (!ea_data) dc_illegal = 1'b1;
 				end
 				default: dc_illegal = 1'b1;
 			endcase
 		end else case (dw[11:9])
 			3'b000: begin  // NEGX / MOVE from SR
-				if (dw[7:6] == 2'b11) begin dc_first = S_MOVE_FSR; dc_size = `SZ_W; dc_dreg = {1'b0, dw[2:0]}; dc_priv = 1'b1; if (!ea_dataalt) dc_illegal = 1'b1; end
+				if (dw[7:6] == 2'b11) begin dc_first = S_MOVE_FSR; dc_eaonly_r = 1'b1; dc_size = `SZ_W; dc_dreg = {1'b0, dw[2:0]}; dc_priv = 1'b1; if (!ea_dataalt) dc_illegal = 1'b1; end
 				else begin dc_alu = `ALU_NEGX; dc_size = sz_std; dc_srck = SK_QUICK;
 					if (ea_dn) begin dc_dstk = DK_REG; dc_dreg = {1'b0, dw[2:0]}; end
-					else begin dc_dstk = DK_EA; dc_first = S_GEN_EXEC; if (!ea_memalt) dc_illegal = 1'b1; end
+					else begin dc_dstk = DK_EA; if (!ea_memalt) dc_illegal = 1'b1; end
 				end
 			end
 			3'b001: begin  // CLR / MOVE from CCR
-				if (dw[7:6] == 2'b11) begin dc_first = S_MOVE_FSR; dc_size = `SZ_W; dc_dreg = {1'b0, dw[2:0]}; if (!ea_dataalt) dc_illegal = 1'b1; end
+				if (dw[7:6] == 2'b11) begin dc_first = S_MOVE_FSR; dc_eaonly_r = 1'b1; dc_size = `SZ_W; dc_dreg = {1'b0, dw[2:0]}; if (!ea_dataalt) dc_illegal = 1'b1; end
 				else begin dc_alu = `ALU_CLR; dc_size = sz_std; dc_srck = SK_QUICK; dc_dstrd = 1'b0;
 					if (ea_dn) begin dc_dstk = DK_REG; dc_dreg = {1'b0, dw[2:0]}; end
-					else begin dc_dstk = DK_EA; dc_first = S_GEN_EXEC; if (!ea_memalt) dc_illegal = 1'b1; end
+					else begin dc_dstk = DK_EA; if (!ea_memalt) dc_illegal = 1'b1; end
 				end
 			end
 			3'b010: begin  // NEG / MOVE to CCR
 				if (dw[7:6] == 2'b11) begin
 					dc_first = S_MOVE_SR; dc_size = `SZ_W; dc_dstk = DK_NONE;
-					if (ea_dn) dc_srck = SK_REG; else if (ea_imm) dc_srck = SK_IMM; else if (ea_mem) dc_srck = SK_EA; else dc_illegal = 1'b1;
+					dc_srck = ea_srck; if (!ea_data) dc_illegal = 1'b1;
 				end else begin dc_alu = `ALU_NEG; dc_size = sz_std; dc_srck = SK_QUICK;
 					if (ea_dn) begin dc_dstk = DK_REG; dc_dreg = {1'b0, dw[2:0]}; end
-					else begin dc_dstk = DK_EA; dc_first = S_GEN_EXEC; if (!ea_memalt) dc_illegal = 1'b1; end
+					else begin dc_dstk = DK_EA; if (!ea_memalt) dc_illegal = 1'b1; end
 				end
 			end
 			3'b011: begin  // NOT / MOVE to SR
 				if (dw[7:6] == 2'b11) begin
 					dc_first = S_MOVE_SR; dc_size = `SZ_W; dc_priv = 1'b1; dc_dstk = DK_NONE;
-					if (ea_dn) dc_srck = SK_REG; else if (ea_imm) dc_srck = SK_IMM; else if (ea_mem) dc_srck = SK_EA; else dc_illegal = 1'b1;
+					dc_srck = ea_srck; if (!ea_data) dc_illegal = 1'b1;
 				end else begin dc_alu = `ALU_NOT; dc_size = sz_std; dc_srck = SK_QUICK;
 					if (ea_dn) begin dc_dstk = DK_REG; dc_dreg = {1'b0, dw[2:0]}; end
-					else begin dc_dstk = DK_EA; dc_first = S_GEN_EXEC; if (!ea_memalt) dc_illegal = 1'b1; end
+					else begin dc_dstk = DK_EA; if (!ea_memalt) dc_illegal = 1'b1; end
 				end
 			end
 			3'b100: begin
 				case (dw[7:6])
 					2'b00: begin  // NBCD / LINK.L
-						if (ea_an) begin dc_first = S_LINK; dc_size = `SZ_L; end
+						if (ea_an) begin dc_first = S_LINK; dc_ext = 1'b1; dc_size = `SZ_L; end
 						else begin dc_alu = `ALU_NBCD; dc_size = `SZ_B; dc_srck = SK_QUICK;
 							if (ea_dn) begin dc_dstk = DK_REG; dc_dreg = {1'b0, dw[2:0]}; end
-							else begin dc_dstk = DK_EA; dc_first = S_GEN_EXEC; if (!ea_memalt) dc_illegal = 1'b1; end
+							else begin dc_dstk = DK_EA; if (!ea_memalt) dc_illegal = 1'b1; end
 						end
 					end
 					2'b01: begin  // SWAP / BKPT / PEA
 						if (ea_dn) begin dc_alu = `ALU_SWAP; dc_size = `SZ_L; dc_srck = SK_QUICK; dc_dstk = DK_REG; dc_dreg = {1'b0, dw[2:0]}; end
 						else if (ea_an) dc_first = S_BKPT;
-						else begin dc_first = S_PEA; if (!ea_ctrl) dc_illegal = 1'b1; end
+						else begin dc_first = S_PEA; dc_eaonly_r = 1'b1; if (!ea_ctrl) dc_illegal = 1'b1; end
 					end
 					default: begin  // EXT.W / EXT.L / MOVEM reg->mem
 						if (ea_dn) begin dc_alu = `ALU_EXT; dc_size = dw[6] ? `SZ_L : `SZ_W; dc_srck = SK_QUICK; dc_dstk = DK_REG; dc_dreg = {1'b0, dw[2:0]}; end
-						else begin dc_first = S_MOVEM0; dc_size = dw[6] ? `SZ_L : `SZ_W; if (!(ea_ctrlalt || ea_pd)) dc_illegal = 1'b1; end
+						else begin dc_first = S_MOVEM0; dc_ext = 1'b1; dc_eaonly_r = !ea_pi && !ea_pd; dc_size = dw[6] ? `SZ_L : `SZ_W; if (!(ea_ctrlalt || ea_pd)) dc_illegal = 1'b1; end
 					end
 				endcase
 			end
@@ -255,21 +251,19 @@ always @* begin
 					if (ea_imm) dc_illegal = 1'b1;   // ILLEGAL ($4AFC)
 					else begin dc_alu = `ALU_TAS; dc_size = `SZ_B;
 						if (ea_dn) begin dc_srck = SK_QUICK; dc_dstk = DK_REG; dc_dreg = {1'b0, dw[2:0]}; end
-						else begin dc_first = S_TAS; if (!ea_memalt) dc_illegal = 1'b1; end
+						else begin dc_first = S_TAS; dc_eaonly_r = 1'b1; if (!ea_memalt) dc_illegal = 1'b1; end
 					end
 				end else begin
-					dc_alu = `ALU_TST; dc_size = sz_std; dc_wb = 1'b0;
-					if (ea_dn) begin dc_srck = SK_REG; dc_dstk = DK_NONE; end
-					else if (ea_an) begin dc_srck = SK_REG; dc_sreg = {1'b1, dw[2:0]}; dc_dstk = DK_NONE; if (dc_size == `SZ_B) dc_illegal = 1'b1; end
-					else if (ea_imm) begin dc_srck = SK_IMM; dc_dstk = DK_NONE; dc_first = S_GEN_EXEC; end
-					else begin dc_srck = SK_EA; dc_dstk = DK_NONE; dc_first = S_GEN_EXEC; if (!ea_mem) dc_illegal = 1'b1; end
+					dc_alu = `ALU_TST; dc_size = sz_std; dc_wb = 1'b0; dc_dstk = DK_NONE;
+					dc_srck = ea_srck;
+					if (!ea_any || (ea_an && dc_size == `SZ_B)) dc_illegal = 1'b1;
 				end
 			end
 			3'b110: begin  // MULL / DIVL / MOVEM mem->reg
-				if (dw[7]) begin dc_first = S_MOVEM0; dc_size = dw[6] ? `SZ_L : `SZ_W; if (!(ea_ctrl || ea_pi)) dc_illegal = 1'b1; end
+				if (dw[7]) begin dc_first = S_MOVEM0; dc_ext = 1'b1; dc_eaonly_r = !ea_pi && !ea_pd; dc_size = dw[6] ? `SZ_L : `SZ_W; if (!(ea_ctrl || ea_pi)) dc_illegal = 1'b1; end
 				else begin
-					dc_first = S_MULDIV0; dc_size = `SZ_L; dc_dstk = DK_NONE;
-					if (ea_dn) dc_srck = SK_REG; else if (ea_imm) dc_srck = SK_IMM; else if (ea_mem) dc_srck = SK_EA; else dc_illegal = 1'b1;
+					dc_first = S_MULDIV0; dc_ext = 1'b1; dc_size = `SZ_L; dc_dstk = DK_NONE;
+					dc_srck = ea_srck; if (!ea_data) dc_illegal = 1'b1;
 				end
 			end
 			default: begin  // 3'b111
@@ -277,29 +271,29 @@ always @* begin
 					2'b01: begin
 						case (dw[5:3])
 							3'b000, 3'b001: dc_first = S_TRAP;
-							3'b010: begin dc_first = S_LINK; dc_size = `SZ_W; end
+							3'b010: begin dc_first = S_LINK; dc_ext = 1'b1; dc_size = `SZ_W; end
 							3'b011: dc_first = S_UNLK;
 							3'b100, 3'b101: begin dc_first = S_MOVE_USP; dc_priv = 1'b1; end
 							3'b110: begin
 								case (dw[2:0])
 									3'b000: begin dc_first = S_RESETI; dc_priv = 1'b1; end
 									3'b001: dc_first = S_NOP;
-									3'b010: begin dc_first = S_STOP; dc_priv = 1'b1; end
+									3'b010: begin dc_first = S_STOP; dc_ext = 1'b1; dc_priv = 1'b1; end
 									3'b011: begin dc_first = S_RTE0; dc_priv = 1'b1; end
-									3'b100: dc_first = S_RTD;
+									3'b100: begin dc_first = S_RTD; dc_ext = 1'b1; end
 									3'b101: dc_first = S_RTS;
 									3'b110: dc_first = S_TRAPCC;   // TRAPV
 									default: dc_first = S_RTR;
 								endcase
 							end
 							default: begin
-								if (dw[2:1] == 2'b01) begin dc_first = S_MOVEC; dc_priv = 1'b1; end   // 4E7A/4E7B
+								if (dw[2:1] == 2'b01) begin dc_first = S_MOVEC; dc_ext = 1'b1; dc_priv = 1'b1; end   // 4E7A/4E7B
 								else dc_illegal = 1'b1;
 							end
 						endcase
 					end
-					2'b10: begin dc_first = S_JSR; if (!ea_ctrl) dc_illegal = 1'b1; end
-					2'b11: begin dc_first = S_JMP; if (!ea_ctrl) dc_illegal = 1'b1; end
+					2'b10: begin dc_first = S_JSR; dc_eaonly_r = 1'b1; if (!ea_ctrl) dc_illegal = 1'b1; end
+					2'b11: begin dc_first = S_JMP; dc_eaonly_r = 1'b1; if (!ea_ctrl) dc_illegal = 1'b1; end
 					default: dc_illegal = 1'b1;
 				endcase
 			end
@@ -309,9 +303,9 @@ always @* begin
 	//------------------------------------------------------------------ 0101 ADDQ/SUBQ/Scc/DBcc/TRAPcc
 	4'h5: begin
 		if (dw[7:6] == 2'b11) begin
-			if (ea_an) dc_first = S_DBCC;
+			if (ea_an) begin dc_first = S_DBCC; dc_ext = 1'b1; end
 			else if (em == 3'b111 && (er == 3'b010 || er == 3'b011 || er == 3'b100)) dc_first = S_TRAPCC;
-			else begin dc_first = S_SCC; dc_size = `SZ_B; dc_dreg = {1'b0, dw[2:0]}; if (!ea_dataalt) dc_illegal = 1'b1; end
+			else begin dc_first = S_SCC; dc_eaonly_r = 1'b1; dc_size = `SZ_B; dc_dreg = {1'b0, dw[2:0]}; if (!ea_dataalt) dc_illegal = 1'b1; end
 		end else begin
 			dc_size = sz_std;
 			dc_srck = SK_QUICK;
@@ -322,7 +316,7 @@ always @* begin
 				dc_dstk = DK_REG; dc_dreg = {1'b1, dw[2:0]}; dc_flags = 1'b0; dc_size = `SZ_L;
 				dc_alu = dw[8] ? `ALU_SUBA : `ALU_ADDA;
 				if (sz_std == `SZ_B) dc_illegal = 1'b1;
-			end else begin dc_dstk = DK_EA; dc_first = S_GEN_EXEC; if (!ea_memalt) dc_illegal = 1'b1; end
+			end else begin dc_dstk = DK_EA; if (!ea_memalt) dc_illegal = 1'b1; end
 		end
 	end
 
@@ -343,23 +337,20 @@ always @* begin
 		case (dw[8:6])
 			3'b011, 3'b111: begin
 				dc_first = S_MULDIV0; dc_size = `SZ_W; dc_dstk = DK_REG; dc_dreg = {1'b0, dw[11:9]};
-				if (ea_dn) dc_srck = SK_REG; else if (ea_imm) dc_srck = SK_IMM; else if (ea_mem) dc_srck = SK_EA; else dc_illegal = 1'b1;
+				dc_srck = ea_srck; if (!ea_data) dc_illegal = 1'b1;
 			end
 			3'b100: begin
 				if (ea_dn) begin dc_alu = `ALU_SBCD; dc_size = `SZ_B; dc_srck = SK_REG; dc_dstk = DK_REG; end
 				else if (ea_an) begin dc_first = S_PACK; dc_alu = `ALU_SBCD; dc_size = `SZ_B; end
-				else begin dc_alu = `ALU_OR; dc_size = sz_std; dc_srck = SK_REG; dc_sreg = {1'b0, dw[11:9]}; dc_dstk = DK_EA; dc_first = S_GEN_EXEC; if (!ea_memalt) dc_illegal = 1'b1; end
+				else begin dc_alu = `ALU_OR; dc_size = sz_std; dc_srck = SK_REG; dc_sreg = {1'b0, dw[11:9]}; dc_dstk = DK_EA; if (!ea_memalt) dc_illegal = 1'b1; end
 			end
 			3'b101, 3'b110: begin
-				if (ea_dn || ea_an) dc_first = S_PACK;   // PACK / UNPK
-				else begin dc_alu = `ALU_OR; dc_size = sz_std; dc_srck = SK_REG; dc_sreg = {1'b0, dw[11:9]}; dc_dstk = DK_EA; dc_first = S_GEN_EXEC; if (!ea_memalt) dc_illegal = 1'b1; end
+				if (ea_dn || ea_an) begin dc_first = S_PACK; dc_ext = 1'b1; end   // PACK / UNPK
+				else begin dc_alu = `ALU_OR; dc_size = sz_std; dc_srck = SK_REG; dc_sreg = {1'b0, dw[11:9]}; dc_dstk = DK_EA; if (!ea_memalt) dc_illegal = 1'b1; end
 			end
 			default: begin  // OR <ea>,Dn
 				dc_alu = `ALU_OR; dc_size = sz_std; dc_dstk = DK_REG;
-				if (ea_dn) dc_srck = SK_REG;
-				else if (ea_imm) begin dc_srck = SK_IMM; dc_first = S_GEN_EXEC; end
-				else if (ea_mem) begin dc_srck = SK_EA; dc_first = S_GEN_EXEC; end
-				else dc_illegal = 1'b1;
+				dc_srck = ea_srck; if (!ea_data) dc_illegal = 1'b1;
 			end
 		endcase
 	end
@@ -371,25 +362,18 @@ always @* begin
 				dc_alu = dw[14] ? `ALU_ADDA : `ALU_SUBA; dc_flags = 1'b0; dc_sext = 1'b1;
 				dc_size = dw[8] ? `SZ_L : `SZ_W;
 				dc_dstk = DK_REG; dc_dreg = {1'b1, dw[11:9]};
-				if (ea_dn) dc_srck = SK_REG;
-				else if (ea_an) begin dc_srck = SK_REG; dc_sreg = {1'b1, dw[2:0]}; end
-				else if (ea_imm) begin dc_srck = SK_IMM; dc_first = S_GEN_EXEC; end
-				else if (ea_mem) begin dc_srck = SK_EA; dc_first = S_GEN_EXEC; end
-				else dc_illegal = 1'b1;
+				dc_srck = ea_srck; if (!ea_any) dc_illegal = 1'b1;
 			end
 			3'b100, 3'b101, 3'b110: begin
 				dc_size = dw[7:6];
 				if (ea_dn) begin dc_alu = dw[14] ? `ALU_ADDX : `ALU_SUBX; dc_srck = SK_REG; dc_dstk = DK_REG; end
 				else if (ea_an) begin dc_alu = dw[14] ? `ALU_ADDX : `ALU_SUBX; dc_first = S_PACK; end   // -(Ay),-(Ax) form
-				else begin dc_alu = dw[14] ? `ALU_ADD : `ALU_SUB; dc_srck = SK_REG; dc_sreg = {1'b0, dw[11:9]}; dc_dstk = DK_EA; dc_first = S_GEN_EXEC; if (!ea_memalt) dc_illegal = 1'b1; end
+				else begin dc_alu = dw[14] ? `ALU_ADD : `ALU_SUB; dc_srck = SK_REG; dc_sreg = {1'b0, dw[11:9]}; dc_dstk = DK_EA; if (!ea_memalt) dc_illegal = 1'b1; end
 			end
 			default: begin  // SUB/ADD <ea>,Dn
 				dc_alu = dw[14] ? `ALU_ADD : `ALU_SUB; dc_size = sz_std; dc_dstk = DK_REG;
-				if (ea_dn) dc_srck = SK_REG;
-				else if (ea_an) begin dc_srck = SK_REG; dc_sreg = {1'b1, dw[2:0]}; if (dc_size == `SZ_B) dc_illegal = 1'b1; end
-				else if (ea_imm) begin dc_srck = SK_IMM; dc_first = S_GEN_EXEC; end
-				else if (ea_mem) begin dc_srck = SK_EA; dc_first = S_GEN_EXEC; end
-				else dc_illegal = 1'b1;
+				dc_srck = ea_srck;
+				if (!ea_any || (ea_an && dc_size == `SZ_B)) dc_illegal = 1'b1;
 			end
 		endcase
 	end
@@ -404,11 +388,7 @@ always @* begin
 				dc_alu = `ALU_CMPA; dc_wb = 1'b0; dc_sext = 1'b1;
 				dc_size = dw[8] ? `SZ_L : `SZ_W;
 				dc_dstk = DK_REG; dc_dreg = {1'b1, dw[11:9]};
-				if (ea_dn) dc_srck = SK_REG;
-				else if (ea_an) begin dc_srck = SK_REG; dc_sreg = {1'b1, dw[2:0]}; end
-				else if (ea_imm) begin dc_srck = SK_IMM; dc_first = S_GEN_EXEC; end
-				else if (ea_mem) begin dc_srck = SK_EA; dc_first = S_GEN_EXEC; end
-				else dc_illegal = 1'b1;
+				dc_srck = ea_srck; if (!ea_any) dc_illegal = 1'b1;
 			end
 			3'b100, 3'b101, 3'b110: begin
 				dc_size = dw[7:6];
@@ -416,16 +396,13 @@ always @* begin
 				else begin
 					dc_alu = `ALU_EOR; dc_srck = SK_REG; dc_sreg = {1'b0, dw[11:9]};
 					if (ea_dn) begin dc_dstk = DK_REG; dc_dreg = {1'b0, dw[2:0]}; end
-					else begin dc_dstk = DK_EA; dc_first = S_GEN_EXEC; if (!ea_memalt) dc_illegal = 1'b1; end
+					else begin dc_dstk = DK_EA; if (!ea_memalt) dc_illegal = 1'b1; end
 				end
 			end
 			default: begin  // CMP <ea>,Dn
 				dc_alu = `ALU_CMP; dc_size = sz_std; dc_wb = 1'b0; dc_dstk = DK_REG;
-				if (ea_dn) dc_srck = SK_REG;
-				else if (ea_an) begin dc_srck = SK_REG; dc_sreg = {1'b1, dw[2:0]}; if (dc_size == `SZ_B) dc_illegal = 1'b1; end
-				else if (ea_imm) begin dc_srck = SK_IMM; dc_first = S_GEN_EXEC; end
-				else if (ea_mem) begin dc_srck = SK_EA; dc_first = S_GEN_EXEC; end
-				else dc_illegal = 1'b1;
+				dc_srck = ea_srck;
+				if (!ea_any || (ea_an && dc_size == `SZ_B)) dc_illegal = 1'b1;
 			end
 		endcase
 	end
@@ -435,26 +412,23 @@ always @* begin
 		case (dw[8:6])
 			3'b011, 3'b111: begin
 				dc_first = S_MULDIV0; dc_size = `SZ_W; dc_dstk = DK_REG; dc_dreg = {1'b0, dw[11:9]};
-				if (ea_dn) dc_srck = SK_REG; else if (ea_imm) dc_srck = SK_IMM; else if (ea_mem) dc_srck = SK_EA; else dc_illegal = 1'b1;
+				dc_srck = ea_srck; if (!ea_data) dc_illegal = 1'b1;
 			end
 			3'b100: begin
 				if (ea_dn) begin dc_alu = `ALU_ABCD; dc_size = `SZ_B; dc_srck = SK_REG; dc_dstk = DK_REG; end
 				else if (ea_an) begin dc_first = S_PACK; dc_alu = `ALU_ABCD; dc_size = `SZ_B; end
-				else begin dc_alu = `ALU_AND; dc_size = sz_std; dc_srck = SK_REG; dc_sreg = {1'b0, dw[11:9]}; dc_dstk = DK_EA; dc_first = S_GEN_EXEC; if (!ea_memalt) dc_illegal = 1'b1; end
+				else begin dc_alu = `ALU_AND; dc_size = sz_std; dc_srck = SK_REG; dc_sreg = {1'b0, dw[11:9]}; dc_dstk = DK_EA; if (!ea_memalt) dc_illegal = 1'b1; end
 			end
 			3'b101, 3'b110: begin
 				if (ea_dn && dw[8:6] == 3'b101) dc_first = S_EXG;        // EXG Dx,Dy
 				else if (ea_an && dw[8:6] == 3'b101) dc_first = S_EXG;   // EXG Ax,Ay
 				else if (ea_an && dw[8:6] == 3'b110) dc_first = S_EXG;   // EXG Dx,Ay
 				else if (ea_dn) dc_illegal = 1'b1;
-				else begin dc_alu = `ALU_AND; dc_size = sz_std; dc_srck = SK_REG; dc_sreg = {1'b0, dw[11:9]}; dc_dstk = DK_EA; dc_first = S_GEN_EXEC; if (!ea_memalt) dc_illegal = 1'b1; end
+				else begin dc_alu = `ALU_AND; dc_size = sz_std; dc_srck = SK_REG; dc_sreg = {1'b0, dw[11:9]}; dc_dstk = DK_EA; if (!ea_memalt) dc_illegal = 1'b1; end
 			end
 			default: begin
 				dc_alu = `ALU_AND; dc_size = sz_std; dc_dstk = DK_REG;
-				if (ea_dn) dc_srck = SK_REG;
-				else if (ea_imm) begin dc_srck = SK_IMM; dc_first = S_GEN_EXEC; end
-				else if (ea_mem) begin dc_srck = SK_EA; dc_first = S_GEN_EXEC; end
-				else dc_illegal = 1'b1;
+				dc_srck = ea_srck; if (!ea_data) dc_illegal = 1'b1;
 			end
 		endcase
 	end
@@ -462,11 +436,11 @@ always @* begin
 	//------------------------------------------------------------------ 1110 shifts / bitfields
 	4'hE: begin
 		if (dw[11] && dw[7:6] == 2'b11) begin
-			dc_first = S_BF0;
+			dc_first = S_BF0; dc_ext = 1'b1; dc_eaonly_r = 1'b1;
 			if (!(ea_dn || ea_ctrlalt || (dw[10:8] == 3'b000 || dw[10:8] == 3'b001 || dw[10:8] == 3'b011 || dw[10:8] == 3'b101) && ea_ctrl)) dc_illegal = 1'b1;
 		end else if (dw[7:6] == 2'b11) begin
 			// memory shift: word, count 1
-			dc_size = `SZ_W; dc_srck = SK_QUICK; dc_quick = 32'd1; dc_dstk = DK_EA; dc_first = S_GEN_EXEC;
+			dc_size = `SZ_W; dc_srck = SK_QUICK; dc_quick = 32'd1; dc_dstk = DK_EA;
 			case (dw[10:9])
 				2'b00: dc_alu = dw[8] ? `ALU_ASL : `ALU_ASR;
 				2'b01: dc_alu = dw[8] ? `ALU_LSL : `ALU_LSR;
@@ -476,7 +450,7 @@ always @* begin
 			if (!ea_memalt) dc_illegal = 1'b1;
 		end else begin
 			// register shift: count immediate (0 -> 8) or Dn mod 64
-			dc_size = sz_std; dc_shift = 1'b1;
+			dc_size = sz_std;
 			dc_dstk = DK_REG; dc_dreg = {1'b0, dw[2:0]};
 			if (dw[5]) begin dc_srck = SK_REG; dc_sreg = {1'b0, dw[11:9]}; end
 			else begin dc_srck = SK_QUICK; dc_quick = (dw[11:9] == 3'd0) ? 32'd8 : {29'd0, dw[11:9]}; end
@@ -493,12 +467,13 @@ always @* begin
 	default: begin
 		if (dw[11:9] == 3'b000) begin
 			// MMU instructions (CpID 0): privileged, the second word decides
-			dc_first = S_PMMU0;
+			dc_first = S_PMMU0; dc_ext = 1'b1;
 			dc_priv = 1'b1;
 		end else begin
 			case (dw[8:6])
-				3'b000: dc_first = S_CP0;                  // cpGEN
+				3'b000: begin dc_first = S_CP0; dc_ext = 1'b1; end       // cpGEN
 				3'b001: begin
+					dc_ext = 1'b1;
 					if (ea_an) dc_first = S_CPDBCC;          // cpDBcc
 					else if (em == 3'b111 && er[2:1] != 2'b00) begin
 						// cpTRAPcc: opmode 010/011/100 in er; 101-111 are neither a cpTRAPcc
@@ -509,8 +484,8 @@ always @* begin
 					else begin dc_first = S_CPSCC; dc_dreg = {1'b0, dw[2:0]}; dc_size = `SZ_B; end   // cpScc: byte operand
 				end
 				3'b010, 3'b011: dc_first = S_CPBCC;        // cpBcc.W / .L
-				3'b100: begin dc_first = S_CPSAVE0; dc_priv = 1'b1; if (!(ea_ctrlalt || ea_pd)) dc_illegal = 1'b1; end
-				3'b101: begin dc_first = S_CPREST0; dc_priv = 1'b1; if (!(ea_ctrl || ea_pi)) dc_illegal = 1'b1; end
+				3'b100: begin dc_first = S_CPSAVE0; dc_eaonly_r = !ea_pd; dc_priv = 1'b1; if (!(ea_ctrlalt || ea_pd)) dc_illegal = 1'b1; end
+				3'b101: begin dc_first = S_CPREST0; dc_eaonly_r = !ea_pi; dc_priv = 1'b1; if (!(ea_ctrl || ea_pi)) dc_illegal = 1'b1; end
 				default: dc_illegal = 1'b1;                // F-line emulator
 			endcase
 		end
@@ -525,16 +500,6 @@ end
 // uses the word takes (UM 8.1.2)
 wire dc_trap = dc_illegal || (dc_priv && !sr_s);
 // instructions whose second word is part of the operation (popped with the opcode)
-wire dc_needs_ext = !dc_trap && (
-                    (dc_first == S_MULDIV0 && dw[15:12] == 4'h4) || (dc_first == S_CHK2_0) ||
-                    (dc_first == S_CAS0) || (dc_first == S_CAS2_0) || (dc_first == S_BF0) ||
-                    (dc_first == S_MOVES0) || (dc_first == S_MOVEC) || (dc_first == S_PMMU0) ||
-                    (dc_first == S_CP0) || (dc_first == S_CPSCC) || (dc_first == S_CPDBCC) || (dc_first == S_CPTRAP) ||
-                    (dc_first == S_MOVEP0) || (dc_first == S_MOVEM0) || (dc_first == S_LINK) || (dc_first == S_RTD) || (dc_first == S_STOP) ||
-                    (dc_first == S_DBCC) || (dc_first == S_PACK && (dw[8:6] == 3'b101 || dw[8:6] == 3'b110) && dw[15:12] == 4'h8));
+wire dc_needs_ext = !dc_trap && dc_ext;
 // instructions that evaluate their memory EA (no operand read) before their first state
-wire dc_eaonly = ea_mem && ((dc_first == S_LEA) || (dc_first == S_PEA) || (dc_first == S_JMP) || (dc_first == S_JSR) ||
-                            (dc_first == S_TAS) || (dc_first == S_SCC) || (dc_first == S_MOVE_FSR) || (dc_first == S_CAS0) ||
-                            (dc_first == S_CHK2_0) || (dc_first == S_BF0) || (dc_first == S_MOVES0) ||
-                            (dc_first == S_CPSAVE0 && !ea_pd) || (dc_first == S_CPREST0 && !ea_pi) ||   // the frame length sets the step
-                            (dc_first == S_MOVEM0 && !ea_pi && !ea_pd));
+wire dc_eaonly = ea_mem && dc_eaonly_r;
