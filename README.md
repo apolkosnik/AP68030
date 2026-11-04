@@ -16,14 +16,14 @@ sequential MC68030 core this repository started with: the bus controller
 
 ## Status at a glance
 
-Measured at commit `8361a50` (default build); the 8 KB / FPU build at `8157742`.
+Measured at commit `d079c58` (default build); the 8 KB / FPU build at `8157742`.
 
 | | |
 |---|---|
 | Target | Cyclone V 5CSEBA6U23I7 (MiSTer), out-of-context fit at 70 MHz (14.286 ns) |
-| Area, default build (68030 caches, coprocessor interface, no FPU) | 21,899 ALMs, 14,546 registers |
+| Area, default build (68030 caches, coprocessor interface, no FPU) | 19,846 ALMs, 13,460 registers, 62 RAM blocks |
 | Area, 8 KB caches and on-chip FPU | 24,432 ALMs, 17,401 registers, 339,968 block memory bits, 15 DSP blocks |
-| Timing | Default build: +0.562 ns at 70 MHz, Fmax 72.9 MHz, no failing endpoint. 8 KB caches and on-chip FPU: +0.006 ns, Fmax 70.0 MHz |
+| Timing | Default build: +0.426 ns at 70 MHz, Fmax 72.2 MHz, no failing endpoint. 8 KB caches and on-chip FPU: +0.006 ns, Fmax 70.0 MHz |
 | Regression | AP68030's 18 programs, each plain and with wait states, plus Dhrystone: all 37 runs pass (default build) |
 | Dhrystone 2.1 | 0.133 DMIPS/MHz with the 68030 caches; 0.375 DMIPS/MHz with the 8 KB caches (AP68030 itself: 0.235) |
 | Corpus | The WinUAE 68030 `cputest` corpus has not been run on this core yet |
@@ -40,6 +40,17 @@ Measured at commit `8361a50` (default build); the 8 KB / FPU build at `8157742`.
   lines the 68030 caches hold was tried: it reached 0.162 DMIPS/MHz, because
   the hits are still limited to what 256 bytes hold and the pipeline's miss
   path is long. For speed, use `CACHE030 = 0` (0.375 DMIPS/MHz).
+
+## Where the area goes
+
+The pipeline is the AP68060's, so the default build carries what a
+pipelined core needs (five back-end stages with forwarding, a decoder and
+predecoders for one instruction per clock, the microcode sequencer, about
+10,000 ALMs together) plus the 68030's parts: the PMMU (about 1,500), the
+coprocessor interface's engine (about 2,600), the 68030 caches and bus
+controller (about 1,000). The 68060's own translation and, with
+`CACHE030 = 1`, the pipeline's caches are tied off, so synthesis removes
+them. The sequential AP68030 is 17,041 ALMs.
 
 ## Configuration
 
