@@ -60,6 +60,8 @@ module ap68060_backend
 	output logic [15:0] sr,
 	output logic [31:0] vbr,
 	output logic [31:0] cacr,
+	output logic [31:0] caar,
+	output logic  [3:0] cclr30,         // pulse: a MOVEC to CACR with CD, CED, CI, CEI
 	output logic        bc_clr,         // MOVEC to CACR with CABC or CUBC: clear the branch cache
 	output logic        bk_ov,          // pulse: the BKPT at bk_pc is replaced by the opcode bk_w (68030)
 	output logic [31:0] bk_pc,
@@ -312,6 +314,7 @@ assign urp  = urp_r;
 assign srp  = srp_r;
 assign vbr  = vbr_r;
 assign cacr = cacr_r;
+assign caar = caar_r;
 assign sfc  = sfc_r;
 assign dfc  = dfc_r;
 
@@ -1764,6 +1767,7 @@ always_ff @(posedge clk) begin
 	flush   <= 1'b0;
 	fe_flush <= 1'b0;
 	rr_v    <= 1'b0;
+	cclr30  <= 4'd0;
 	sub_arm <= 1'b0;
 	sub_clr <= 1'b0;
 	ucond_v <= 1'b0;
@@ -2185,6 +2189,7 @@ always_ff @(posedge clk) begin
 					8'h02: begin
 						cacr_r <= wb_res & 32'h0000_3313;
 						bc_clr <= wb_res[3] || wb_res[2];
+						cclr30 <= {wb_res[11], wb_res[10], wb_res[3], wb_res[2]};
 					end
 					8'h03: tc_r   <= wb_res & 32'h0000_FFFE;
 					8'h04: itt0_r <= wb_res & 32'hFFFF_E364;

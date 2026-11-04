@@ -39,12 +39,24 @@
 // buffer; the next data read of that address (a single transfer, or the   //
 // first long word of a line read, then ended as by CIIN) takes the buffer //
 // instead of a bus cycle.  sub_clr (an exception) disarms it.             //
+//                                                                          //
+// C030 = 1: the MC68030's own caches here (the pipeline's are off then):   //
+// AP68030's ap030_cache, a 256-byte instruction cache for client 1's       //
+// fetches and a 256-byte data cache for client 0's accesses outside CPU    //
+// space (UM section 6: 16 lines of four long words, a valid bit each,      //
+// logical tags with the FC; CACR EI/FI/IBE, ED/FD/DBE/WA, CI/CEI/CD/CED    //
+// with CAAR).  A read hit answers from the cache, a cachable miss is a     //
+// cachable bus read (CBREQ when the burst is enabled and the line has no   //
+// valid entry of its tag) whose fill strobes write the entries; writes     //
+// update the data cache (write-through; WA's allocation).  Nothing new     //
+// starts until the bus is idle (a burst still filling).                  //
 //--------------------------------------------------------------------------//
 `include "ap030_defs.svh"
 module ap68030_biu
 	import ap68060_pkg::*;
 #(
-	parameter int NC = 2            // number of requesters, 0 = highest priority
+	parameter int NC = 2,           // number of requesters, 0 = highest priority
+	parameter bit C030 = 1'b0       // the 68030's 256-byte caches here
 )
 (
 	input  logic              clk,
@@ -75,6 +87,12 @@ module ap68030_biu
 	input  logic [31:0]       sub_a,
 	input  logic [31:0]       sub_d,         // right justified
 	input  logic  [1:0]       sub_sz,        // SIZ code (00 long, 01 byte, 10 word)
+	// C030: the 68030's CACR, its clear bits (pulse: CD CED CI CEI) and CAAR
+	input  logic [31:0]       cacr30,
+	input  logic  [3:0]       cclr,
+	input  logic  [7:2]       caar_idx,
+	input  logic              snoop_we,
+	input  logic [31:0]       snoop_addr,
 	output logic              rsto_busy,
 	output logic              rsto_n,
 	// the MC68030 pins
@@ -110,7 +128,7 @@ module ap68030_biu
 //--------------------------------------------------------------------------
 // the transaction latched
 //--------------------------------------------------------------------------
-typedef enum logic [1:0] { S_IDLE, S_REQ, S_WAIT, S_SUB } st_t;
+typedef enum logic [2:0] { S_IDLE, S_REQ, S_WAIT, S_SUB, S_HIT } st_t;
 st_t         st;
 logic [$clog2(NC)-1:0] cl;
 busreq_t     q;
@@ -121,6 +139,7 @@ logic  [1:0] nth;               // ... its place in transfer order
 logic        first;             // the line's first transfer
 logic        lk_open;           // a locked sequence is open (RMC held)
 logic        tci;               // CIIN on the line's first long word
+logic        q_cache, q_cbreq;  // C030: the bus read is cachable / may burst
 logic        sub_v;             // a substitution is armed
 logic [31:0] sub_ar, sub_lanes;
 
@@ -166,8 +185,8 @@ ap030_bus bus (
 	.clk(clk), .ce(1'b1), .ce_f(1'b1), .rst(!nreset),
 	.req(b_req), .req_kind(kind), .req_addr(t_addr), .req_nbytes(t_nb), .req_total(t_nb),
 	.req_rw(q.rd), .req_fc(fc), .req_rmc(q.lock), .req_rmc_last(q.locke),
-	.req_ciout(q.ci), .req_cbreq(line && q.rd && first && !q.ci), .req_ocs(1'b1),
-	.req_cache(line && q.rd && !q.ci), .req_wdata(t_wd),
+	.req_ciout(q.ci), .req_cbreq((line && q.rd && first && !q.ci) || q_cbreq), .req_ocs(1'b1),
+	.req_cache((line && q.rd && !q.ci) || q_cache), .req_wdata(t_wd),
 	.req_ack(b_ack), .busy(b_busy), .done(b_done), .rd_data(b_rd),
 	.res_berr(b_berr), .res_avec(b_avec), .res_ciin(b_ciin),
 	.fill_stb(b_fill), .fill_addr(b_fill_addr), .fill_data(b_fill_data),
@@ -182,6 +201,61 @@ ap030_bus bus (
 );
 assign b_req = (st == S_REQ);
 assign own   = !b_granted;
+
+//--------------------------------------------------------------------------
+// C030: the 68030's caches
+//--------------------------------------------------------------------------
+// the client a new transaction comes from (0 = highest priority)
+logic [$clog2(NC)-1:0] csel;
+always_comb begin
+	csel = '0;
+	for (int c = NC - 1; c >= 0; c--) if (req[c]) csel = c[$clog2(NC)-1:0];
+end
+busreq_t     rs;
+assign rs = breq[csel];
+wire         rs_d   = (csel == '0) && (rs.tt != TT_ACK) && (rs.tm != 3'd7) && (rs.siz != SIZ_LINE);
+wire         rs_i   = (csel != '0) && (rs.siz != SIZ_LINE);
+wire         ic_on  = cacr30[0], ic_fok = cacr30[0] && !cacr30[1];
+wire         dc_on  = cacr30[8], dc_fok = cacr30[8] && !cacr30[9];
+logic        ic_tag_hit, ic_hit, ic_empty, dc_tag_hit, dc_hit, dc_empty;
+logic [31:0] ic_q, dc_q;
+logic        cfill_d, cfill_i;     // the transaction's fill strobes go to that cache
+logic        hit_i;                // S_HIT: from the instruction cache
+// a read hit (a locked read never: it is always a bus cycle)
+wire         c_dhit = C030 && rs_d && rs.rd && !rs.lock && dc_on && dc_hit;
+wire         c_ihit = C030 && rs_i && rs.rd && ic_on && ic_hit;
+// a write: the data cache's update (hit; WA allocation)
+wire  [3:0]  rs_be  = (rs.siz == SIZ_B) ? (4'b1000 >> rs.addr[1:0]) :
+                      (rs.siz == SIZ_W) ? (rs.addr[1] ? 4'b0011 : 4'b1100) : 4'b1111;
+// a new transaction starts this clock (C030: once the bus is idle -- a
+// burst's fill strobes still belong to the last one)
+wire         c_go   = (st == S_IDLE) && !sn_busy && !rsto_busy && !rsto_req && !halt && (|req) &&
+                      (!C030 || b_idle);
+wire         c_wr   = C030 && c_go && rs_d && !rs.rd && !sub_hit(rs, sub_v && !sub_arm, sub_ar);
+
+wire         fill_d = C030 && b_fill && cfill_d;
+wire         fill_i = C030 && b_fill && cfill_i;
+ap030_cache #(.FC_BITS(1)) icache (
+	.clk(clk), .rst(!nreset),
+	.lk_la(rs.addr), .lk_fc(rs.tm), .lk_tag_hit(ic_tag_hit), .lk_hit(ic_hit),
+	.lk_line_empty(ic_empty), .lk_data(ic_q),
+	.fi_we(fill_i), .fi_addr({q.addr[31:4], b_fill_addr[3:2]}), .fi_fc(q.tm), .fi_data(b_fill_data),
+	.wr_we(1'b0), .wr_la(32'd0), .wr_fc(3'd0), .wr_be(4'd0), .wr_data(32'd0),
+	.wr_wa(1'b0), .wr_allow_fill(1'b0),
+	.inv_we(1'b0), .inv_la(32'd0), .snp_we(1'b0), .snp_la(32'd0),
+	.clr_all(cclr[1]), .clr_entry(cclr[0]), .clr_index(caar_idx)
+);
+ap030_cache #(.FC_BITS(3)) dcache (
+	.clk(clk), .rst(!nreset),
+	.lk_la(rs.addr), .lk_fc(rs.tm), .lk_tag_hit(dc_tag_hit), .lk_hit(dc_hit),
+	.lk_line_empty(dc_empty), .lk_data(dc_q),
+	.fi_we(fill_d), .fi_addr({q.addr[31:4], b_fill_addr[3:2]}), .fi_fc(q.tm), .fi_data(b_fill_data),
+	.wr_we(c_wr), .wr_la(rs.addr), .wr_fc(rs.tm), .wr_be(rs_be), .wr_data(wdata[csel][31:0]),
+	.wr_wa(cacr30[13]), .wr_allow_fill(dc_fok),
+	.inv_we(1'b0), .inv_la(32'd0), .snp_we(snoop_we), .snp_la(snoop_addr),
+	.clr_all(cclr[3]), .clr_entry(cclr[2]), .clr_index(caar_idx)
+);
+
 
 // read data back on the lanes D31-D0 (the requesters pick their bytes by
 // address); an acknowledge's vector on D7-D0
@@ -214,6 +288,7 @@ always_ff @(posedge clk) begin
 		rclient <= '0; rdata <= '0; rbeat <= '0; errbeat <= '0;
 		rsto_n <= 1'b1; rsto_cnt <= '0; rsto_pend <= 1'b0;
 		sub_v <= 1'b0; sub_ar <= '0; sub_lanes <= '0;
+		cfill_d <= 1'b0; cfill_i <= 1'b0; q_cache <= 1'b0; q_cbreq <= 1'b0; hit_i <= 1'b0;
 	end
 	else begin
 		// RESET instruction: RSTO once nothing is in progress
@@ -241,23 +316,26 @@ always_ff @(posedge clk) begin
 		S_IDLE: begin
 			// a new transaction: the highest-priority client asking (none
 			// while snoop invalidations are pending, RSTO or a halt)
-			if (!sn_busy && !rsto_busy && !rsto_req && !halt) begin
-				for (int c = NC - 1; c >= 0; c--)
-					if (req[c]) cl <= c[$clog2(NC)-1:0];
-				if (|req) begin
-					logic [$clog2(NC)-1:0] c0;
-					c0 = '0;
-					for (int c = NC - 1; c >= 0; c--) if (req[c]) c0 = c[$clog2(NC)-1:0];
-					q     <= breq[c0];
-					qw    <= wdata[c0];
-					gnt[c0] <= 1'b1;
-					k     <= breq[c0].addr[3:2];
-					nth   <= 2'd0;
-					got   <= '0;
-					first <= 1'b1;
-					tci   <= 1'b0;
-					st    <= sub_hit(breq[c0], sub_v && !sub_arm, sub_ar) ? S_SUB : S_REQ;
-				end
+			if (c_go) begin
+				cl    <= csel;
+				q     <= rs;
+				qw    <= wdata[csel];
+				gnt[csel] <= 1'b1;
+				k     <= rs.addr[3:2];
+				nth   <= 2'd0;
+				got   <= '0;
+				first <= 1'b1;
+				tci   <= 1'b0;
+				// C030: a read hit, else the bus read's cache attributes
+				hit_i   <= c_ihit;
+				cfill_d <= C030 && rs_d && rs.rd && !rs.ci && dc_fok;
+				cfill_i <= C030 && rs_i && rs.rd && !rs.ci && ic_fok;
+				q_cache <= C030 && rs.rd && !rs.ci && ((rs_d && dc_fok) || (rs_i && ic_fok));
+				q_cbreq <= C030 && rs.rd && !rs.ci &&
+				           ((rs_d && dc_fok && cacr30[12] && !rs.lock && (!dc_tag_hit || dc_empty)) ||
+				            (rs_i && ic_fok && cacr30[4] && (!ic_tag_hit || ic_empty)));
+				st    <= sub_hit(rs, sub_v && !sub_arm, sub_ar) ? S_SUB :
+				         (c_dhit || c_ihit) ? S_HIT : S_REQ;
 			end
 		end
 		S_REQ: if (b_ack) st <= S_WAIT;
@@ -310,6 +388,13 @@ always_ff @(posedge clk) begin
 					st    <= S_REQ;
 				end
 			end
+		end
+		S_HIT: begin
+			// C030: the cache's entry, read in the lookup clock
+			rvalid  <= 1'b1; rclient <= cl; rdata <= hit_i ? ic_q : dc_q;
+			rbeat   <= q.addr[3:2];
+			done[cl] <= 1'b1;
+			st      <= S_IDLE;
 		end
 		S_SUB: begin
 			// the data input buffer for the read (a line: its first long
