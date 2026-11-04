@@ -546,8 +546,10 @@ always_comb begin
 			use_n    = 4'd1;
 			go       = 1'b1;
 			flt      = win_flt[0];
+			// (an F-line with CpID 0 the 68030 does not support: the
+			// privilege violation in user mode, UM 9.8)
 			nrec.exc = (opw[15:12] == 4'hA) ? 8'd10 :
-			           (opw[15:12] == 4'hF) ? 8'd11 : 8'd4;
+			           (opw[15:12] == 4'hF) ? ((opw[11:9] == 3'd0 && !smode) ? 8'd8 : 8'd11) : 8'd4;
 		end
 		else if (fast) begin
 			if (pd0.tot <= qcnt || q_flt) begin
