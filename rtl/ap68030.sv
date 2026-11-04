@@ -224,6 +224,11 @@ logic        dm_hold1, mt_v, mt_ng, mt_wr, mt_done;
 logic  [2:0] mt_op, mt_fc;
 logic  [1:0] mt_scope, mt_caches;
 logic [31:0] mt_addr, mt_pa, mt_fslw, urp, srp, dm_st_faddr;
+// 68030 bus fault frames: the failed write, the RTE's rerun and completion
+logic [31:0] dm_st_dob, sb_fa, sb_dob, rr_pa, rr_wd, sub_a, sub_d;
+logic        dm_st_lastc, rr_v, sub_arm, sub_clr;
+logic  [2:0] sb_fn, sb_ffc, rr_n, rr_fc;
+logic  [1:0] sub_sz, rte_alt;
 logic        mt_fault, dm_lkend, dm_iack_end;
 logic  [2:0] iack_lvl;
 logic  [1:0] dm_ack;
@@ -280,6 +285,11 @@ ap68060_backend #(.FPU_PIPE(FPU_PIPE), .EARLY_RES(EARLY_RES), .SKID(SKID),
 	.mt_caches(mt_caches), .mt_addr(mt_addr), .mt_fc(mt_fc), .mt_ng(mt_ng),
 	.mt_wr(mt_wr), .mt_done(mt_done), .mt_pa(mt_pa), .mt_fault(mt_fault), .mt_fslw(mt_fslw),
 	.dm_st_faddr(dm_st_faddr),
+	.dm_st_dob(dm_st_dob), .dm_st_lastc(dm_st_lastc),
+	.sb_fa(sb_fa), .sb_dob(sb_dob), .sb_fn(sb_fn), .sb_ffc(sb_ffc),
+	.rr_v(rr_v), .rr_pa(rr_pa), .rr_n(rr_n), .rr_wd(rr_wd), .rr_fc(rr_fc),
+	.sub_arm(sub_arm), .sub_clr(sub_clr), .sub_a(sub_a), .sub_d(sub_d), .sub_sz(sub_sz),
+	.rte_alt(rte_alt),
 	.urp(urp), .srp(srp),
 	.ipl(ipl_v), .iack_lvl(iack_lvl), .rsto_req(rsto_req), .rsto_busy(rsto_busy),
 	.kill_now(kill_now), .lk_abandon(lk_abandon), .adv_ag(adv_ag),
@@ -299,6 +309,7 @@ ap68060_dmu #(.DC1_ATC(DC1_ATC)) dmu (
 	.faddr(dm_faddr), .fslw(dm_fslw),
 	.st_v(dm_st_v), .st_data(dm_st_data), .st_rdy(dm_st_rdy),
 	.st_fault(dm_st_fault), .st_fslw(dm_st_fslw), .st_faddr(dm_st_faddr), .lkend(dm_lkend), .iack_end(dm_iack_end),
+	.st_dob(dm_st_dob), .st_lastc(dm_st_lastc),
 	.mt_v(mt_v), .mt_op(mt_op), .mt_scope(mt_scope), .mt_caches(mt_caches),
 	.mt_addr(mt_addr), .mt_fc(mt_fc), .mt_ng(mt_ng), .mt_wr(mt_wr),
 	.mt_done(mt_done), .mt_pa(mt_pa), .mt_fault(mt_fault), .mt_fslw(mt_fslw),
@@ -317,6 +328,8 @@ ap68060_dmu #(.DC1_ATC(DC1_ATC)) dmu (
 	.bi_gnt(b_gnt[0]), .bi_done(b_done[0]), .bi_err(b_err[0]), .bi_drop(b_drop), .bi_more(b_more),
 	.bi_rvalid(b_rvalid && b_rclient == 1'b0), .b_rdata(b_rdata), .b_rbeat(b_rbeat),
 	.sb_empty(sb_empty), .sb_err(sb_err), .sb_fslw(sb_fslw), .sb_err_ack(sb_err_ack),
+	.sb_fa(sb_fa), .sb_dob(sb_dob), .sb_fn(sb_fn), .sb_ffc(sb_ffc),
+	.rr_v(rr_v), .rr_pa(rr_pa), .rr_n(rr_n), .rr_wd(rr_wd), .rr_fc(rr_fc),
 	.b_ravec(b_ravec), .b_rtci(b_rtci),
 	.sn_req(sn_req), .sn_pa(sn_pa), .sn_look(sn_look), .sn_hit(sn_hit),
 	.sn_dirty(sn_dirty), .sn_line(sn_line), .sn_inv(sn_inv), .sn_act(sn_act), .sn_wr(sn_wr),
@@ -406,7 +419,7 @@ ap68060_decode #(.LOOP_PRED(LOOP_PRED)) dec (
 	.win(win), .win_flt(win_flt), .win_fdem(win_fdem), .win_fatc(win_fatc),
 	.win_bt(win_bt), .bt_tgt(bt_tgt),
 	.pd0(pd0), .pd0_n(pd0_n), .qcnt(qcnt), .qpc(qpc), .q_odd(q_odd),
-	.smode(sr[13]),
+	.smode(sr[13]), .rte_alt(rte_alt),
 	.consume(consume), .d_redir_v(d_redir_v), .d_redir_pc(d_redir_pc),
 	.rq_n(rq_n), .rq0(rq0), .rq1(rq1), .rq_pop(rq_pop), .rq_pop_e(rq_pop_e),
 	.bht_we(bht_we), .bht_wa(bht_wa), .bht_dis(bht_dis),
@@ -435,6 +448,7 @@ ap68030_biu #(.NC(NC)) biu (
 	.ravec(b_ravec), .rtci(b_rtci), .errbeat(b_errbeat), .idle(b_idle), .own(b_own),
 	.unlock(lk_abandon), .sn_busy(sn_busy || sn_act), .halt(dbg_halted),
 	.rsto_req(rsto_req), .rsto_busy(rsto_busy), .rsto_n(rsto_n),
+	.sub_arm(sub_arm), .sub_clr(sub_clr), .sub_a(sub_a), .sub_d(sub_d), .sub_sz(sub_sz),
 	.a_o(a), .fc_o(fc), .siz_o(siz), .rw_o(rw), .rmc_n_o(rmc_n),
 	.as_n_o(as_n), .ds_n_o(ds_n), .dben_n_o(dben_n), .ecs_n_o(ecs_n), .ocs_n_o(ocs_n),
 	.ciout_n_o(ciout_n), .cbreq_n_o(cbreq_n), .bus_oe(bus_oe),

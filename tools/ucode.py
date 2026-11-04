@@ -432,6 +432,38 @@ R('RTE',
   U(op='MOV', sz='L', msz='L', a='LD', d='T2', ag='BASED', agb='SP', const=2, mfc='SUP'),
   U(ag='ADDT0', agb='SP', agw='SP'),
   U(op='RTE', sz='W', a='T1', b='T2', last=1))
+# RTE of a $A/$B frame (68030): the first RTE saw the format and ran again
+# as this routine.  MISC 6 takes FA and the SSW, 13 the DIB, 7 the DOB and
+# the internal word and then acts at WB: a write rerun (DF set) or the read
+# completion armed (DF clear); then SR, PC and SP += the length.
+R('RTE_BUSA',
+  U(op='MOV', sz='W', msz='W', a='LD', d='T3', ag='BASED', agb='SP', const=6, mfc='SUP'),
+  U(op='RTEF', cond=2, sz='W', a='T3', d='T0'),
+  U(op='MOV', sz='W', msz='W', a='LD', d='T4', ag='BASED', agb='SP', const=0x08, mfc='SUP'),
+  U(op='MOV', sz='W', msz='W', a='LD', d='T5', ag='BASED', agb='SP', const=0x0A, mfc='SUP'),
+  U(op='MOV', sz='L', msz='L', a='LD', d='T6', ag='BASED', agb='SP', const=0x10, mfc='SUP'),
+  U(op='MOV', sz='L', msz='L', a='LD', d='T7', ag='BASED', agb='SP', const=0x18, mfc='SUP'),
+  U(op='MISC', cond=6, sz='L', a='T6', b='T5'),
+  U(op='MISC', cond=7, sz='L', a='T7', b='T4'),
+  U(op='MOV', sz='W', msz='W', a='LD', d='T1', ag='BASED', agb='SP', const=0, mfc='SUP'),
+  U(op='MOV', sz='L', msz='L', a='LD', d='T2', ag='BASED', agb='SP', const=2, mfc='SUP'),
+  U(ag='ADDT0', agb='SP', agw='SP'),
+  U(op='RTE', sz='W', a='T1', b='T2', last=1))
+R('RTE_BUSB',
+  U(op='MOV', sz='W', msz='W', a='LD', d='T3', ag='BASED', agb='SP', const=6, mfc='SUP'),
+  U(op='RTEF', cond=2, sz='W', a='T3', d='T0'),
+  U(op='MOV', sz='W', msz='W', a='LD', d='T4', ag='BASED', agb='SP', const=0x08, mfc='SUP'),
+  U(op='MOV', sz='W', msz='W', a='LD', d='T5', ag='BASED', agb='SP', const=0x0A, mfc='SUP'),
+  U(op='MOV', sz='L', msz='L', a='LD', d='T6', ag='BASED', agb='SP', const=0x10, mfc='SUP'),
+  U(op='MOV', sz='L', msz='L', a='LD', d='T7', ag='BASED', agb='SP', const=0x18, mfc='SUP'),
+  U(op='MOV', sz='L', msz='L', a='LD', d='T3', ag='BASED', agb='SP', const=0x2C, mfc='SUP'),
+  U(op='MISC', cond=6, sz='L', a='T6', b='T5'),
+  U(op='MISC', cond=13, sz='L', a='T3'),
+  U(op='MISC', cond=7, sz='L', a='T7', b='T4'),
+  U(op='MOV', sz='W', msz='W', a='LD', d='T1', ag='BASED', agb='SP', const=0, mfc='SUP'),
+  U(op='MOV', sz='L', msz='L', a='LD', d='T2', ag='BASED', agb='SP', const=2, mfc='SUP'),
+  U(ag='ADDT0', agb='SP', agw='SP'),
+  U(op='RTE', sz='W', a='T1', b='T2', last=1))
 # RTR: CCR = (SP)+ word, PC = (SP)+ long
 R('RTR',
   U(op='MOV', sz='W', msz='W', a='LD', d='T1', ag='BASED', agb='SP', const=0),
@@ -744,6 +776,33 @@ R('EXC_FMT4',
   U(op='MOV', sz='W', a='T10', ag='BASEDU', agb='SSP', const=-16, msz='W', mem='ST', mfc='SUP'),
   U(op='MOV', sz='L', ag='BASED', agb='T8', const=0, msz='L', mem='LD', mfc='SUP',
     a='LD', br='A', cond=15, last=1))     # cond 15: the handler fetch
+# 68030 bus fault frames (MC68030UM 8.4.2, figures 8-7, 8-8).  T11 the
+# data cycle fault address, T13 the SSW, T6 the data output buffer, T7 the
+# internal word at +$08 (this core's: 1 a write the RTE reruns when DF is
+# set, 2 a read the RTE completes from the data input buffer when DF is
+# clear).  Format $A (32 bytes): +$08 internal, +$0A SSW, +$10 FA, +$18
+# DOB.  Format $B (92 bytes): the same, +$2C DIB, +$36 version (0).
+R('EXC_FMTA',
+  U(op='MOV', sz='L', a='T6',  ag='BASED', agb='SSP', const=-32 + 0x18, msz='L', mem='ST', mfc='SUP'),
+  U(op='MOV', sz='L', a='T11', ag='BASED', agb='SSP', const=-32 + 0x10, msz='L', mem='ST', mfc='SUP'),
+  U(op='MOV', sz='W', a='T13', ag='BASED', agb='SSP', const=-32 + 0x0A, msz='W', mem='ST', mfc='SUP'),
+  U(op='MOV', sz='W', a='T7',  ag='BASED', agb='SSP', const=-32 + 0x08, msz='W', mem='ST', mfc='SUP'),
+  U(op='MOV', sz='W', a='T12', ag='BASED', agb='SSP', const=-32 + 0x06, msz='W', mem='ST', mfc='SUP'),
+  U(op='MOV', sz='L', a='T9',  ag='BASED', agb='SSP', const=-32 + 0x02, msz='L', mem='ST', mfc='SUP'),
+  U(op='MOV', sz='W', a='T10', ag='BASEDU', agb='SSP', const=-32, msz='W', mem='ST', mfc='SUP'),
+  U(op='MOV', sz='L', ag='BASED', agb='T8', const=0, msz='L', mem='LD', mfc='SUP',
+    a='LD', br='A', cond=15, last=1))     # cond 15: the handler fetch
+R('EXC_FMTB',
+  U(op='MOV', sz='W', a='ZERO', ag='BASED', agb='SSP', const=-92 + 0x36, msz='W', mem='ST', mfc='SUP'),
+  U(op='MOV', sz='L', a='T6',  ag='BASED', agb='SSP', const=-92 + 0x18, msz='L', mem='ST', mfc='SUP'),
+  U(op='MOV', sz='L', a='T11', ag='BASED', agb='SSP', const=-92 + 0x10, msz='L', mem='ST', mfc='SUP'),
+  U(op='MOV', sz='W', a='T13', ag='BASED', agb='SSP', const=-92 + 0x0A, msz='W', mem='ST', mfc='SUP'),
+  U(op='MOV', sz='W', a='T7',  ag='BASED', agb='SSP', const=-92 + 0x08, msz='W', mem='ST', mfc='SUP'),
+  U(op='MOV', sz='W', a='T12', ag='BASED', agb='SSP', const=-92 + 0x06, msz='W', mem='ST', mfc='SUP'),
+  U(op='MOV', sz='L', a='T9',  ag='BASED', agb='SSP', const=-92 + 0x02, msz='L', mem='ST', mfc='SUP'),
+  U(op='MOV', sz='W', a='T10', ag='BASEDU', agb='SSP', const=-92, msz='W', mem='ST', mfc='SUP'),
+  U(op='MOV', sz='L', ag='BASED', agb='T8', const=0, msz='L', mem='LD', mfc='SUP',
+    a='LD', br='A', cond=15, last=1))     # cond 15: the handler fetch
 R('EXC_RESET',
   U(op='MOV', sz='L', ag='BASED', agb='ZERO', const=0, msz='L', mem='LD', mfc='SUP',
     a='LD', d='ISP'),
@@ -891,7 +950,8 @@ def emit():
             f.write('localparam logic [2:0] DS_%s = 3\'d%d;\n' % (n, i))
         for n, i in JC.items():
             f.write('localparam logic [5:0] JC_%s = 6\'d%d;\n' % (n, i))
-        for n in ['EXC_FMT0', 'EXC_FMT2', 'EXC_FMT4', 'EXC_RESET', 'EXC_IRQ', 'EXC_IRQM',
+        for n in ['EXC_FMT0', 'EXC_FMT2', 'EXC_FMT4', 'EXC_FMTA', 'EXC_FMTB', 'EXC_RESET', 'EXC_IRQ', 'EXC_IRQM',
+                  'RTE', 'RTE_BUSA', 'RTE_BUSB',
                   'DEC_EXC', 'UNIMPL', 'LPSTOP', 'PMMU', 'BCC', 'BSR', 'DBCC', 'FBCC', 'FDBCC', 'FPU_GEN',
                   'TRAP', 'BKPT', 'ILLEGAL', 'MOVEM_RM', 'MOVEM_MR',
                   'MOVEC_RD', 'MOVEC_WR', 'JSR', 'JSR_K', 'JMP', 'RTS',

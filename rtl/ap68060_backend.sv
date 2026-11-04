@@ -129,6 +129,26 @@ module ap68060_backend
 	input  logic        dm_st_fault,
 	input  logic [31:0] dm_st_fslw,
 	input  logic [31:0] dm_st_faddr,
+	input  logic [31:0] dm_st_dob,      // 68030 frames: the failed write cycle's data
+	input  logic        dm_st_lastc,    // ... the store's final bus cycle
+	input  logic [31:0] sb_fa,          // ... a failed rerun write (store buffer)
+	input  logic [31:0] sb_dob,
+	input  logic  [2:0] sb_fn,
+	input  logic  [2:0] sb_ffc,
+	// RTE of a $A/$B frame: the faulted write again (DF set) ...
+	output logic        rr_v,
+	output logic [31:0] rr_pa,
+	output logic  [2:0] rr_n,
+	output logic [31:0] rr_wd,
+	output logic  [2:0] rr_fc,
+	// ... or the read completed from the data input buffer (DF clear)
+	output logic        sub_arm,
+	output logic        sub_clr,
+	output logic [31:0] sub_a,
+	output logic [31:0] sub_d,
+	output logic  [1:0] sub_sz,
+	// the next RTE decoded runs the $A (1) / $B (2) frame's routine
+	output logic  [1:0] rte_alt,
 
 	// interrupts (synchronized level, 0-7)
 	input  logic  [2:0] ipl,
@@ -167,6 +187,8 @@ localparam logic [3:0] EK_FMT4  = 4'd2;   // format $4: access error, FP disable
 localparam logic [3:0] EK_IRQ   = 4'd3;   // interrupt (IACK + format $0)
 localparam logic [3:0] EK_RESET = 4'd4;   // reset: SSP/PC from 0/4
 localparam logic [3:0] EK_IRQM  = 4'd5;   // interrupt with M set: format $0 on the MSP, throwaway $1 on the ISP
+localparam logic [3:0] EK_FMTA  = 4'd6;   // format $A: short bus cycle fault
+localparam logic [3:0] EK_FMTB  = 4'd7;   // format $B: long bus cycle fault, address error
 
 //--------------------------------------------------------------------------
 // pipeline registers
@@ -208,6 +230,9 @@ logic  [3:0] wb_exc_fmt;
 logic        wb_xcommit;      // the uop's address updates stand (FPU unimp/unsupp)
 logic [31:0] wb_exc_addr;
 logic [31:0] wb_exc_fslw;     // FSLW of an access error
+logic [31:0] wb_exc_dob;      // 68030 $A frame: the failed write's data
+logic  [1:0] wb_exc_int;      // ... the frame's internal word: 1 a write the
+                              // RTE reruns (DF), 2 a read it can complete (!DF)
 logic        wb_st;           // store at WB
 logic [31:0] wb_st_data;
 logic [15:0] wb_sr_new;       // SR write
@@ -263,10 +288,17 @@ logic        pcr_edebug, pcr_dfp, pcr_ess;
 logic        bus_l, bus_sl, bus_le, bus_sle;
 
 // exception information for the exception microroutine
-logic [31:0] xi_pc, xi_addr, xi_fslw;
+logic [31:0] xi_pc, xi_addr, xi_fslw, xi_dob;
+logic  [1:0] xi_int;
+// RTE of a $A/$B frame (68030): the frame's words its routine read
+logic [31:0] rb_fa, rb_dob, rb_dib;
+logic [15:0] rb_ssw;
+logic  [1:0] rb_int;
+logic  [1:0] rte_bx;            // EX: this RTE's frame is $A (1) / $B (2): run again
+logic  [1:0] wb_rteb;
 logic [15:0] xi_sr, xi_vecw;
 logic [31:0] xi_vaddr;
-logic  [1:0] xw_ph;           // exception entry: back-file writes of T8-T13
+logic  [2:0] xw_ph;           // exception entry: back-file writes of T8-T13, T6-T7
 
 assign sr   = {sr_r[15:5], ccr_b};
 assign dtt0 = dtt0_r;
@@ -1163,8 +1195,10 @@ always_comb begin
 				4'h0, 4'h1: xs.res = 32'd8;
 				4'h2:       xs.res = 32'd12;
 				4'h9:       xs.res = 32'd20;
-				4'hA:       xs.res = 32'd32;
-				4'hB:       xs.res = 32'd92;
+				// $A/$B: the plain RTE (cond 0) leaves the frame in place
+				// and runs again as the frame's routine (rte_bx, rte_alt)
+				4'hA:       xs.res = (ex_u.cond[1]) ? 32'd32 : 32'd0;
+				4'hB:       xs.res = (ex_u.cond[1]) ? 32'd92 : 32'd0;
 				default: begin xs.res = 32'd0; xs.xvec = 8'd14; end
 			endcase
 		end
@@ -1174,8 +1208,13 @@ always_comb begin
 			xs.flags  = xs.sr_new[4:0];
 			xs.taken  = 1'b1;
 			// a throwaway frame: SR from it, then this RTE again (on the
-			// stack the new SR selects)
-			xs.target = rte_fmt1 ? ex_u.pc : ex_bv;
+			// stack the new SR selects); a $A/$B frame: nothing changes, the
+			// RTE again as that frame's routine
+			xs.target = (rte_fmt1 || rte_bx != 2'd0) ? ex_u.pc : ex_bv;
+			if (rte_bx != 2'd0) begin
+				xs.sr_we = 1'b0;
+				xs.flags = ccr_f;
+			end
 		end
 		OP_BF: begin
 			xs.res   = bf_res;
@@ -1426,7 +1465,9 @@ wire [31:0] wb_next = wb_redir_pc;
 // S, M or mask bits (MC68030UM 8.1.6; AP68030's rule); a traced STOP loads
 // SR, takes the trace and never stops
 wire wb_srchg    = wb_sr_we && ({wb_sr_new[15:12], wb_sr_new[10:8]} != {sr_r[15:12], sr_r[10:8]});
-wire tr_now      = sr_r[15] || (sr_r[14] && (wb_cof || wb_srchg));
+// (the first RTE of a $A/$B frame only hands over to its routine)
+wire tr_now      = (sr_r[15] || (sr_r[14] && (wb_cof || wb_srchg))) &&
+                   !(wb_u.op == OP_RTE && wb_rteb != 2'd0);
 wire wb_is_stop  = (wb_u.op == OP_MISC) && (wb_u.cond == 4'd2 || wb_u.cond == 4'd8);
 wire stop_traced = wb_is_stop && tr_now;
 // (a trap instruction -- TRAP, TRAPV, TRAPcc, CHK, CHK2, divide by zero --
@@ -1511,20 +1552,25 @@ always_comb begin
 	end
 	bwe[2] = 1'b0; bwa[2] = '0; bwd[2] = '0;
 	case (xw_ph)
-		2'd1: begin
+		3'd1: begin
 			bwe = 3'b011;
 			bwa[0] = R_T0 + 5'd8;  bwd[0] = xi_vaddr;
 			bwa[1] = R_T0 + 5'd9;  bwd[1] = xi_pc;
 		end
-		2'd2: begin
+		3'd2: begin
 			bwe = 3'b011;
 			bwa[0] = R_T0 + 5'd10; bwd[0] = {16'd0, xi_sr};
 			bwa[1] = R_T0 + 5'd11; bwd[1] = xi_addr;
 		end
-		2'd3: begin
+		3'd3: begin
 			bwe = 3'b011;
 			bwa[0] = R_T0 + 5'd12; bwd[0] = {16'd0, xi_vecw};
 			bwa[1] = R_T0 + 5'd13; bwd[1] = xi_fslw;
+		end
+		3'd4: begin
+			bwe = 3'b011;
+			bwa[0] = R_T0 + 5'd6;  bwd[0] = xi_dob;
+			bwa[1] = R_T0 + 5'd7;  bwd[1] = {30'd0, xi_int};
 		end
 		default: ;
 	endcase
@@ -1574,7 +1620,8 @@ assign kill_now = (adv_wb && (wb_is_exc || wb_redir)) || x_go;
 // exception entry values
 logic  [7:0] x_vec;
 logic  [3:0] x_fmt;
-logic [31:0] x_pc, x_addr, x_fslw;
+logic [31:0] x_pc, x_addr, x_fslw, x_dob;
+logic  [1:0] x_int;
 logic [15:0] x_osr, x_nsr;
 logic  [3:0] x_kind;
 logic  [4:0] x_ssp;
@@ -1598,6 +1645,8 @@ always_comb begin
 		cur[15:14] = 2'b00;
 	x_osr  = cur;
 	x_fslw = 32'd0;
+	x_dob  = 32'd0;
+	x_int  = 2'd0;
 	x_addr = wb_u.pc;
 	x_pc   = wb_u.pc;
 	x_vec  = wb_exc;
@@ -1605,6 +1654,8 @@ always_comb begin
 		x_vec  = wb_exc;
 		x_addr = wb_exc_addr;
 		x_fslw = wb_exc_fslw;
+		x_dob  = wb_exc_dob;
+		x_int  = wb_exc_int;
 		// TRAP #n, TRAPcc, CHK and divide-by-zero stack the next
 		// instruction; faults and illegal opcodes the instruction
 		x_pc   = ((wb_exc >= 8'd32 && wb_exc < 8'd48) ||
@@ -1622,27 +1673,45 @@ always_comb begin
 		x_pc   = wb_next;
 		x_addr = (trace_defer && xstk) ? trace_addr : wb_u.pc;
 	end
-	// 68060 frames (MC68060UM table 8-1): $4 access error, $2 address
-	// error, CHK, TRAPcc/TRAPV, divide by zero, trace; $0 the rest; the FPU
-	// brings its own ($0, $2, $3, $4)
-	x_fmt  = (x_vec == 8'd2) ? 4'h4 :
-	         (x_vec == 8'd3 || x_vec == 8'd5 || x_vec == 8'd6 || x_vec == 8'd7 ||
-	          x_vec == 8'd9) ? 4'h2 : 4'h0;
+	// 68030 frames (MC68030UM 8.4): $B bus error (a write that ended its
+	// instruction: $A, below) and address error; $2 CHK, CHK2, TRAPcc,
+	// TRAPV, divide by zero, trace; $0 the rest; the FPU brings its own
+	x_fmt  = (x_vec == 8'd2 || x_vec == 8'd3) ? 4'hB :
+	         (x_vec == 8'd5 || x_vec == 8'd6 || x_vec == 8'd7 || x_vec == 8'd9) ? 4'h2 : 4'h0;
 	if (adv_wb && wb_is_exc && wb_exc_fmtv) x_fmt = wb_exc_fmt;
 	x_kind = take_irq && !(adv_wb && wb_is_exc) ? (cur[12] ? EK_IRQM : EK_IRQ) :
+	         (x_fmt == 4'hB) ? EK_FMTB : (x_fmt == 4'hA) ? EK_FMTA :
 	         (x_fmt == 4'h4) ? EK_FMT4 : (x_fmt == 4'h2 || x_fmt == 4'h3) ? EK_FMT2 : EK_FMT0;
+	// the special status word of a $A/$B frame (T13): an address error RC
+	// and RB; an instruction fetch FC and RC (stage C faulted, rerun) and
+	// the program space; a data cycle DF, RM, RW, SIZ (the failed cycle's)
+	// and its function code
+	if (x_fmt == 4'hA || x_fmt == 4'hB) begin
+		if (x_vec == 8'd3)
+			x_fslw = 32'h0000_3000;
+		else if ((x_fslw & FSLW_IO) != 32'd0)
+			x_fslw = {16'd0, 16'hA000 | {13'd0, x_fslw[18:16]}};
+		else
+			x_fslw = {16'd0, 7'd0, 1'b1, (x_fslw & FSLW_LK) != 32'd0,
+			          (x_fslw & FSLW_WE) == 32'd0, x_fslw[22:21], 1'b0, x_fslw[18:16]};
+	end
 	// the active supervisor stack: the MSP with M set (an interrupt's
 	// routine names its two stacks itself)
 	x_ssp  = cur[12] ? R_MSP : R_ISP;
 	// a store buffer bus error: an access error, the stacked address
 	// meaningless; the PC is the one the exception due here would stack,
 	// or where execution continues (8.4.6)
+	// (68030: the RTE's rerun of a faulted write failed again: format $A
+	// with that write)
 	if (take_sbe) begin
 		x_vec  = 8'd2;
-		x_fmt  = 4'h4;
-		x_kind = EK_FMT4;
-		x_fslw = sb_fslw;                // SBE and/or PBE
-		x_addr = 32'd0;
+		x_fmt  = 4'hA;
+		x_kind = EK_FMTA;
+		x_fslw = {16'd0, 7'd0, 1'b1, 1'b0, 1'b0,
+		          (sb_fn == 3'd1) ? 2'b01 : (sb_fn == 3'd2) ? 2'b10 : 2'b00, 1'b0, sb_ffc};
+		x_addr = sb_fa;
+		x_dob  = sb_dob;
+		x_int  = 2'd1;
 		if (!(adv_wb && wb_is_exc)) x_pc = (stopped && !wb_v) ? stop_pc : wb_next;
 	end
 
@@ -1670,6 +1739,9 @@ always_ff @(posedge clk) begin
 	exc_go  <= 1'b0;
 	flush   <= 1'b0;
 	fe_flush <= 1'b0;
+	rr_v    <= 1'b0;
+	sub_arm <= 1'b0;
+	sub_clr <= 1'b0;
 	ucond_v <= 1'b0;
 	dbg_retire <= 1'b0;
 
@@ -1680,7 +1752,7 @@ always_ff @(posedge clk) begin
 		eredir_pend <= 1'b0;
 		wb_eredir   <= 1'b0;
 		fv <= 32'd0;
-		xw_ph <= 2'd0;
+		xw_ph <= 3'd0;
 		ccr_f   <= 5'd0;
 		ccr_b   <= 5'd0;
 		sr_r    <= 16'h2700;
@@ -1712,6 +1784,12 @@ always_ff @(posedge clk) begin
 		trace_defer <= 1'b0;
 		trace_addr  <= 32'd0;
 		rte_fmt1 <= 1'b0;
+		rte_bx   <= 2'd0;
+		rte_alt  <= 2'd0;
+		rb_fa <= '0; rb_ssw <= '0; rb_dib <= '0; rb_dob <= '0; rb_int <= '0;
+		rr_v <= 1'b0; rr_pa <= '0; rr_n <= '0; rr_wd <= '0; rr_fc <= '0;
+		sub_arm <= 1'b0; sub_clr <= 1'b0; sub_a <= '0; sub_d <= '0; sub_sz <= '0;
+		xi_dob <= '0; xi_int <= '0;
 		cas2_eq <= 1'b0;
 		ex_latch <= 32'd0;
 		bf_off   <= 32'd0;
@@ -1987,6 +2065,12 @@ always_ff @(posedge clk) begin
 			wb_exc_pc  <= ex_odd_pc;
 			wb_exc_fmtv <= 1'b0;
 			wb_xcommit  <= 1'b0;
+			wb_exc_dob  <= 32'd0;
+			// a data read that faulted: the handler may complete it (DIB, DF
+			// cleared) for the RTE
+			wb_exc_int  <= (ex_u.exc == 8'd0 && ex_fault && (ex_fslw & FSLW_IO) == 32'd0 &&
+			                (ex_fslw & FSLW_WE) == 32'd0 && ex_fslw[24]) ? 2'd2 : 2'd0;
+			wb_rteb     <= (ex_u.op == OP_RTE) ? rte_bx : 2'd0;
 			if (ex_u.exc == 8'd0 && !ex_fault && ex_is_fp && ex_xvec != 8'd0) begin
 				wb_exc_pcv  <= 1'b1;
 				wb_exc_pc   <= fp_xnext ? ex_npc : ex_u.pc;
@@ -2032,7 +2116,20 @@ always_ff @(posedge clk) begin
 		// overflow of the uop leaving EX (word forms check 16 bits)
 		if (adv_ex && (ex_u.op == OP_DIV || ex_u.op == OP_MUL)) md_ovfl <= (ex_u.op == OP_DIV) && md_dkill;
 		if (adv_ex && ex_u.op == OP_MDHI) md_hiin <= ex_av;
-		if (adv_ex && ex_u.op == OP_RTEF && !ex_u.cond[0]) rte_fmt1 <= (ex_av[15:12] == 4'h1);
+		if (adv_ex && ex_u.op == OP_RTEF && !ex_u.cond[0]) begin
+			rte_fmt1 <= (ex_av[15:12] == 4'h1);
+			rte_bx   <= ex_u.cond[1] ? 2'd0 : (ex_av[15:12] == 4'hA) ? 2'd1 :
+			            (ex_av[15:12] == 4'hB) ? 2'd2 : 2'd0;
+		end
+		// RTE of a $A/$B frame: its words (MISC 6: FA, SSW; 13: DIB; 7: DOB
+		// and the internal word, then the action at WB)
+		if (adv_ex && ex_u.op == OP_MISC && ex_u.cond == 4'd6) begin
+			rb_fa <= ex_av; rb_ssw <= ex_bv[15:0];
+		end
+		if (adv_ex && ex_u.op == OP_MISC && ex_u.cond == 4'd13) rb_dib <= ex_av;
+		if (adv_ex && ex_u.op == OP_MISC && ex_u.cond == 4'd7) begin
+			rb_dob <= ex_av; rb_int <= ex_bv[1:0];
+		end
 		if (adv_ex && ex_u.op == OP_CAS2C)
 			cas2_eq <= ex_u.cond[0] ? (cas2_eq && cmp_flags[2]) : cmp_flags[2];
 		if (!stall_wb) wb_v <= adv_ex;
@@ -2096,6 +2193,24 @@ always_ff @(posedge clk) begin
 			if (wb_u.op == OP_MISC && wb_u.cond == 4'd9) begin
 				bk_ov <= 1'b1; bk_pc <= wb_u.pc; bk_w <= wb_res[15:0];
 			end
+			// RTE of a $A/$B frame: DF set on a write the instruction
+			// completed without -- the write again (the failed cycle); DF
+			// clear on a read -- the read the instruction makes again takes
+			// the data input buffer
+			if (wb_u.op == OP_MISC && wb_u.cond == 4'd7) begin
+				rr_v    <= rb_int[0] && rb_ssw[8];
+				rr_pa   <= rb_fa;
+				rr_n    <= (rb_ssw[5:4] == 2'b01) ? 3'd1 : (rb_ssw[5:4] == 2'b10) ? 3'd2 : 3'd4;
+				rr_wd   <= (rb_ssw[5:4] == 2'b01) ? {rb_dob[7:0], 24'd0} :
+				           (rb_ssw[5:4] == 2'b10) ? {rb_dob[15:0], 16'd0} : rb_dob;
+				rr_fc   <= rb_ssw[2:0];
+				sub_arm <= rb_int[1] && !rb_ssw[8];
+				sub_a   <= rb_fa;
+				sub_d   <= rb_dib;
+				sub_sz  <= rb_ssw[5:4];
+			end
+			// the first RTE of a $A/$B frame: the next is its routine
+			if (wb_u.op == OP_RTE) rte_alt <= wb_rteb;
 			if (wb_redir) begin
 				flush    <= 1'b1;
 				if (!wb_eredir) begin
@@ -2151,7 +2266,12 @@ always_ff @(posedge clk) begin
 			fe_flush <= 1'b1;
 			redir_v  <= 1'b0;
 			ras_rv   <= 1'b0;
-			xw_ph    <= 2'd1;          // T8-T13 first, then exc_go
+			xw_ph    <= 3'd1;          // T8-T13, T6-T7 first, then exc_go
+			xi_dob   <= x_dob;
+			xi_int   <= x_int;
+			rte_alt  <= 2'd0;
+			// a new bus fault frame: a completion the last RTE armed is void
+			if (x_kind == EK_FMTA || x_kind == EK_FMTB) sub_clr <= 1'b1;
 			exc_kind <= x_kind;
 			exc_ssp  <= x_ssp;
 			xi_sr    <= x_osr;
@@ -2183,10 +2303,14 @@ always_ff @(posedge clk) begin
 		end
 
 		// exception entry, continued: three cycles of back-file writes
-		if (xw_ph != 2'd0) begin
-			xw_ph <= xw_ph + 2'd1;
-			if (xw_ph == 2'd3) begin
-				xw_ph  <= 2'd0;
+		if (xw_ph != 3'd0) begin
+			// (the front end stays flushed until the routine has the
+			// sequencer: nothing it fetched meanwhile is dispatched)
+			flush    <= 1'b1;
+			fe_flush <= 1'b1;
+			xw_ph <= xw_ph + 3'd1;
+			if (xw_ph == 3'd4) begin
+				xw_ph  <= 3'd0;
 				exc_go <= 1'b1;
 			end
 		end
@@ -2204,6 +2328,20 @@ always_ff @(posedge clk) begin
 			wb_exc      <= 8'd2;
 			wb_exc_addr <= dm_st_faddr;
 			wb_exc_fslw <= dm_st_fslw;
+			wb_exc_dob  <= dm_st_dob;
+			wb_exc_int  <= 2'd0;
+			// (68030) the store's last bus cycle ends the instruction: it
+			// completes, format $A with the write for the RTE to rerun and
+			// the next instruction's PC; otherwise format $B and the
+			// instruction runs again from the start
+			if (wb_u.last && dm_st_lastc) begin
+				wb_exc_fmtv <= 1'b1;
+				wb_exc_fmt  <= 4'hA;
+				wb_exc_pcv  <= 1'b1;
+				wb_exc_pc   <= wb_npc;
+				wb_xcommit  <= 1'b1;
+				wb_exc_int  <= 2'd1;
+			end
 		end
 		// maintenance done: WB completes next cycle.  PLPA: the physical
 		// address is its result, or its translation faulted (an access

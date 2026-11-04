@@ -47,6 +47,7 @@ module ap68060_decode
 	input  logic [31:0] qpc,
 	input  logic        q_odd,
 	input  logic        smode,
+	input  logic  [1:0] rte_alt,        // the RTE runs the $A (1) / $B (2) frame's routine
 
 	output logic  [2:0] consume,
 	output logic        d_redir_v,
@@ -616,6 +617,8 @@ always_comb begin
 				nrec.exc = 8'd11;
 			else if (a0.priv && !smode)
 				nrec.exc = 8'd8;
+			else if (a0.rt == UA_RTE && rte_alt != 2'd0)
+				nrec.rt = rte_alt[1] ? UA_RTE_BUSB : UA_RTE_BUSA;
 			else if (a0.rt == UA_TRAP)
 				nrec.exc = 8'd32 + {4'd0, opw[3:0]};
 			else if (a0.rt == UA_ILLEGAL)

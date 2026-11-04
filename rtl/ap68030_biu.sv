@@ -34,6 +34,11 @@
 //               a line in transfer order, 0 = the first)                   //
 // RESET instruction: rsto_req (pulse); RSTO for 512 clocks once no         //
 // transfer is in progress (rsto_busy until then and while asserted).      //
+// RTE of a bus fault frame whose read fault the handler completed (DF     //
+// clear): sub_arm (pulse) with the fault address and the data input       //
+// buffer; the next data read of that address (a single transfer, or the   //
+// first long word of a line read, then ended as by CIIN) takes the buffer //
+// instead of a bus cycle.  sub_clr (an exception) disarms it.             //
 //--------------------------------------------------------------------------//
 `include "ap030_defs.svh"
 module ap68030_biu
@@ -65,6 +70,11 @@ module ap68030_biu
 	input  logic              halt,
 	// RESET instruction
 	input  logic              rsto_req,
+	input  logic              sub_arm,
+	input  logic              sub_clr,
+	input  logic [31:0]       sub_a,
+	input  logic [31:0]       sub_d,         // right justified
+	input  logic  [1:0]       sub_sz,        // SIZ code (00 long, 01 byte, 10 word)
 	output logic              rsto_busy,
 	output logic              rsto_n,
 	// the MC68030 pins
@@ -100,7 +110,7 @@ module ap68030_biu
 //--------------------------------------------------------------------------
 // the transaction latched
 //--------------------------------------------------------------------------
-typedef enum logic [1:0] { S_IDLE, S_REQ, S_WAIT } st_t;
+typedef enum logic [1:0] { S_IDLE, S_REQ, S_WAIT, S_SUB } st_t;
 st_t         st;
 logic [$clog2(NC)-1:0] cl;
 busreq_t     q;
@@ -111,6 +121,14 @@ logic  [1:0] nth;               // ... its place in transfer order
 logic        first;             // the line's first transfer
 logic        lk_open;           // a locked sequence is open (RMC held)
 logic        tci;               // CIIN on the line's first long word
+logic        sub_v;             // a substitution is armed
+logic [31:0] sub_ar, sub_lanes;
+
+// a data read (TM 1 or 5) the armed substitution answers
+function automatic logic sub_hit(input busreq_t r, input logic v, input logic [31:0] a);
+	sub_hit = v && r.rd && (r.tt != TT_ACK) && (r.tm == TM_UDATA || r.tm == TM_SDATA) &&
+	          ((r.siz == SIZ_LINE) ? (r.addr[31:2] == a[31:2]) : (r.addr == a));
+endfunction
 
 wire line   = (q.siz == SIZ_LINE);
 wire ack_tt = (q.tt == TT_ACK);
@@ -195,6 +213,7 @@ always_ff @(posedge clk) begin
 		first <= 1'b0; lk_open <= 1'b0; tci <= 1'b0;
 		rclient <= '0; rdata <= '0; rbeat <= '0; errbeat <= '0;
 		rsto_n <= 1'b1; rsto_cnt <= '0; rsto_pend <= 1'b0;
+		sub_v <= 1'b0; sub_ar <= '0; sub_lanes <= '0;
 	end
 	else begin
 		// RESET instruction: RSTO once nothing is in progress
@@ -209,6 +228,14 @@ always_ff @(posedge clk) begin
 			rsto_cnt  <= 10'd512;
 		end
 		if (unlock) lk_open <= 1'b0;
+		if (sub_arm) begin
+			sub_v  <= 1'b1;
+			sub_ar <= sub_a;
+			sub_lanes <= (sub_sz == SIZ_B) ? ({24'd0, sub_d[7:0]} << (8 * (3 - sub_a[1:0]))) :
+			             (sub_sz == SIZ_W) ? (sub_a[1] ? {16'd0, sub_d[15:0]} : {sub_d[15:0], 16'd0}) :
+			             sub_d;
+		end
+		else if (sub_clr) sub_v <= 1'b0;
 
 		case (st)
 		S_IDLE: begin
@@ -229,7 +256,7 @@ always_ff @(posedge clk) begin
 					got   <= '0;
 					first <= 1'b1;
 					tci   <= 1'b0;
-					st    <= S_REQ;
+					st    <= sub_hit(breq[c0], sub_v && !sub_arm, sub_ar) ? S_SUB : S_REQ;
 				end
 			end
 		end
@@ -283,6 +310,16 @@ always_ff @(posedge clk) begin
 					st    <= S_REQ;
 				end
 			end
+		end
+		S_SUB: begin
+			// the data input buffer for the read (a line: its first long
+			// word only, not allocated)
+			rvalid  <= 1'b1; rclient <= cl; rdata <= sub_lanes;
+			rbeat   <= q.addr[3:2];
+			rtci    <= 1'b1;
+			done[cl] <= 1'b1;
+			sub_v   <= 1'b0;
+			st      <= S_IDLE;
 		end
 		default: st <= S_IDLE;
 		endcase

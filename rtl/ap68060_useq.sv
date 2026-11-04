@@ -818,6 +818,8 @@ always_comb begin
 			4'd3:    na = UA_EXC_IRQ;
 			4'd4:    na = UA_EXC_RESET;
 			4'd5:    na = UA_EXC_IRQM;
+			4'd6:    na = UA_EXC_FMTA;
+			4'd7:    na = UA_EXC_FMTB;
 			default: na = UA_EXC_FMT0;
 		endcase
 		nv = 1'b1;

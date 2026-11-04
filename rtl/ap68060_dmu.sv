@@ -100,6 +100,8 @@ module ap68060_dmu
 	output logic        iack_end,       // an interrupt acknowledge cycle ended (its
 	                                    // terminal response, after any retries)
 	output logic [31:0] st_faddr,
+	output logic [31:0] st_dob,         // 68030 frame: the failed cycle's data, right justified
+	output logic        st_lastc,       // ... and it was the store's final bus cycle
 
 	// WB maintenance: CINV/CPUSH/PFLUSH/PLPA
 	input  logic        mt_v,
@@ -169,6 +171,17 @@ module ap68060_dmu
 	output logic        sb_err,         // a buffered write or a push ended in TEA
 	output logic [31:0] sb_fslw,        // ... FSLW.SBE and/or FSLW.PBE
 	input  logic        sb_err_ack,     // ... the access error for it is taken
+	output logic [31:0] sb_fa,          // 68030: the failed buffered write (address,
+	output logic [31:0] sb_dob,         // data right justified, bytes, function code)
+	output logic  [2:0] sb_fn,
+	output logic  [2:0] sb_ffc,
+	// 68030 RTE of a $A/$B frame with DF set: the faulted write again (one
+	// aligned bus cycle) through the store buffer
+	input  logic        rr_v,
+	input  logic [31:0] rr_pa,
+	input  logic  [2:0] rr_n,
+	input  logic [31:0] rr_wd,          // left aligned
+	input  logic  [2:0] rr_fc,
 
 	// bus snooper
 	input  logic        sn_req,         // level: the snooper wants the cache
@@ -801,6 +814,7 @@ logic [31:0] e_va;                // logical address of the current part
 logic  [2:0] e_n;                 // bytes in the current part
 logic [31:0] e_acc;               // load: assembled operand; store: left aligned data
 logic        e_fromline;          // the operand comes from bo_line (inhibited fill)
+logic        e_tcr;               // the rest of a read CIIN cut short (single reads)
 logic        e_fillhit;           // ... from the line a load's own fill just installed
 logic        e_kill;              // the DC2 job's uop was discarded
 logic        sp_job;              // the DC2 job is a fast split read
@@ -925,6 +939,12 @@ endfunction
 // write, 2'b11 read-modify-write), the size, TT (MOVE16 01, else normal:
 // the 68060 reports MOVES as a normal access of its function code) and TM,
 // the function code
+// the operand size code of a bus cycle of n bytes (68030 frames: SIZ is the
+// failed cycle's)
+function automatic logic [1:0] cyc_msz(input logic [2:0] n);
+	cyc_msz = (n == 3'd1) ? SZ_B : (n == 3'd2) ? SZ_W : SZ_L;
+endfunction
+
 function automatic logic [31:0] mk_fslw(input logic [31:0] cause, input logic lk,
                                         input logic [1:0] rw, input logic [1:0] msz,
                                         input logic [2:0] fc);
@@ -1054,6 +1074,7 @@ always_ff @(posedge clk) begin
 	if (!nreset) begin
 		sb_n <= '0; sel_q <= 1'b0; own_sb <= 1'b0; sb_fly <= 1'b0; sbe_r <= 1'b0;
 		for (int i = 0; i < SBN; i++) sb[i] <= '0;
+		sb_fa <= '0; sb_dob <= '0; sb_fn <= '0; sb_ffc <= '0;
 	end
 	else begin
 		logic [2:0] n;
@@ -1067,7 +1088,13 @@ always_ff @(posedge clk) begin
 		if (sb_pop) begin
 			for (int i = 0; i < SBN - 1; i++) sb[i] <= sb[i + 1];
 			n = n - 3'd1;
-			if (bi_err) sbe_r <= 1'b1;
+			if (bi_err) begin
+				sbe_r  <= 1'b1;
+				sb_fa  <= sb[0].pa;
+				sb_dob <= sb[0].wd >> (8 * (3'd4 - sb[0].n));
+				sb_fn  <= sb[0].n;
+				sb_ffc <= sb[0].tm;
+			end
 		end
 		if (sb_push) begin
 			sbent_t e;
@@ -1078,6 +1105,20 @@ always_ff @(posedge clk) begin
 			e.tm  = bo.tm;
 			e.upa = bo.upa;
 			e.ci  = bo.ci;
+			sb[n[$clog2(SBN)-1:0]] <= e;
+			n = n + 3'd1;
+		end
+		else if (rr_v && sb_room) begin
+			// (the RTE's rerun: the buffer is empty then -- writes are
+			// not buffered on the 68030 -- and the engine idle)
+			sbent_t e;
+			e.pa  = rr_pa;
+			e.n   = rr_n;
+			e.wd  = rr_wd;
+			e.tt  = fc_tt(rr_fc);
+			e.tm  = fc_tm(rr_fc);
+			e.upa = 2'd0;
+			e.ci  = 1'b0;
 			sb[n[$clog2(SBN)-1:0]] <= e;
 			n = n + 3'd1;
 		end
@@ -1166,7 +1207,7 @@ always_ff @(posedge clk) begin
 		// their initial blocks; CINVA clears it when the software asks)
 		e_st <= E_IDLE; e_ret <= E_IDLE; e_sret <= E_IDLE; e_wret <= E_IDLE;
 		e_dc2_done <= 1'b0; e_wst_done <= 1'b0;
-		e_ldata <= '0; e_flt <= 1'b0; e_faddr <= '0; e_fslw <= '0;
+		e_ldata <= '0; e_flt <= 1'b0; e_faddr <= '0; e_fslw <= '0; e_tcr <= 1'b0;
 		e_part <= 1'b0; e_x <= '0; e_va <= '0; e_n <= '0; e_acc <= '0; e_fromline <= 1'b0; e_fillhit <= 1'b0;
 		e_breq <= 1'b0;
 		bo <= '0; bo_wd <= '0; bo_line <= '0; bo_err <= 1'b0; bo_rd <= '0;
@@ -1185,7 +1226,7 @@ always_ff @(posedge clk) begin
 		dw_set <= '0; dw_way <= '0; dw_be <= '0; dw_src <= '0; dw_word <= '0;
 		ic_inv <= 1'b0; ic_inv_scope <= '0; ic_inv_pa <= '0;
 		rrc <= 2'd0;
-		st_fault_r <= 1'b0; st_fslw <= '0; st_faddr <= '0;
+		st_fault_r <= 1'b0; st_fslw <= '0; st_faddr <= '0; st_dob <= '0; st_lastc <= 1'b0;
 		mt_pa <= '0; mt_fault <= 1'b0; mt_fslw <= '0;
 		lkend <= 1'b0;
 		iack_end <= 1'b0;
@@ -1484,6 +1525,7 @@ always_ff @(posedge clk) begin
 			// the uop was discarded (no bus operation is in flight here)
 			steal <= 1'b0;
 			e_job <= 1'b0;
+			e_tcr <= 1'b0;
 			e_st  <= E_IDLE;
 		end
 		else begin
@@ -1518,7 +1560,7 @@ always_ff @(posedge clk) begin
 				e_x.cm  <= 2'b11;
 				e_st    <= E_S_NEXT;
 			end
-			else if (rd && !e_part && (m2.r.ack == 2'd0) && (e_x.cm[1] || m2.r.lock) && dm_older) begin
+			else if (rd && !e_part && !e_tcr && (m2.r.ack == 2'd0) && (e_x.cm[1] || m2.r.lock) && dm_older) begin
 				// a serialized read (a noncachable serialized page, or a
 				// locked access) waits until every earlier instruction has
 				// completed: pending writes are on the bus first, and
@@ -1602,9 +1644,11 @@ always_ff @(posedge clk) begin
 					e_x.hit <= 1'b0;
 					e_st   <= E_PUSHV;
 				end
-				else if ((m3.r.v && m3.r.mem != M_LD) || (m4.r.v && m4.r.mem != M_LD)) begin
+				else if (!e_tcr && ((m3.r.v && m3.r.mem != M_LD) || (m4.r.v && m4.r.mem != M_LD))) begin
 					// older stores go to the bus first (program order): the
 					// engine is theirs until they are done, then retry
+					// (not once the read is under way: the rest of a read
+					// CIIN cut short)
 					steal <= 1'b0;
 					e_st  <= E_IDLE;
 				end
@@ -1641,17 +1685,19 @@ always_ff @(posedge clk) begin
 		end
 		E_S_BUSD: begin
 			// the bus read finished
+			e_tcr <= 1'b0;
 			// (an acknowledge cycle's TEA is no access error: IACK takes the
 			// spurious vector, BKPT the illegal instruction exception)
 			if (bo_err && (m2.r.ack == 2'd0)) begin
 				// MA: the fault on the second or later access of a
 				// misaligned operand (8.4.4.3), the next line's part or a
 				// later bus cycle of this one; FA stays the first byte
+				// (68030: FA the failed bus cycle's address, SIZ its size)
 				e_flt   <= 1'b1;
-				e_faddr <= m2.r.a;
+				e_faddr <= {e_va[31:4], bo_pa[3:0]};
 				// (TTR: the access is mapped by a TTR, 8.4.4 -- a bus
 				// error too; the translation's why carries it)
-				e_fslw  <= mk_fslw(FSLW_RE, m2.r.lock, m2_rw, m2.r.msz, m2.r.fc) |
+				e_fslw  <= mk_fslw(FSLW_RE, m2.r.lock, m2_rw, cyc_msz(bo_pn), m2.r.fc) |
 				           ((e_part || bo_later) ? FSLW_MA : 32'd0) | (e_x.why & FSLW_TTR);
 				e_st    <= E_S_DONE;
 			end
@@ -1784,10 +1830,14 @@ always_ff @(posedge clk) begin
 				st_rdy_r     <= 1'b1;
 				st_fault_r   <= 1'b1;
 				st_fslw    <= mk_fslw(FSLW_WE, m4.r.lock, (m4.r.mem == M_RMW) ? 2'b11 : 2'b01,
-				                      m4.r.msz, m4.r.fc) |
+				                      cyc_msz(bo_pn), m4.r.fc) |
 				              (((m4.split && e_part) || bo_later) ? FSLW_MA : 32'd0) |
 				              (e_x.why & FSLW_TTR);
-				st_faddr   <= m4.r.a;
+				// (68030 frames: the failed bus cycle -- its address, its
+				// data right justified, whether the store ends with it)
+				st_faddr   <= {e_va[31:4], bo_pa[3:0]};
+				st_dob     <= bo_wd >> (8 * (3'd4 - bo_pn));
+				st_lastc   <= (bo_left == bo_pn) && (!m4.split || e_part);
 				e_wst_done <= 1'b1;
 				e_st       <= E_IDLE;
 			end
@@ -2072,10 +2122,26 @@ always_ff @(posedge clk) begin
 				// the next line's part, or when its first long word arrived
 				// and a later one of the same line did not
 				e_flt   <= 1'b1;
-				e_faddr <= m2.r.a;
+				e_faddr <= e_va;
 				e_fslw  <= mk_fslw(FSLW_RE, 1'b0, m2_rw, m2.r.msz, m2.r.fc) |
 				           ((e_part || bo_got[e_va[3:2]]) ? FSLW_MA : 32'd0) | (e_x.why & FSLW_TTR);
 				e_st    <= E_S_DONE;
+			end
+			else if (bo_tci && m2.r.mem != M_ST && (fill_need & ~bo_got) != 4'd0 &&
+			         bo_got[e_va[3:2]]) begin
+				// CIIN on the first long word ended the line there (the
+				// 68030) and the operand goes on past it: its bytes in that
+				// long word from the line, the rest by single reads (that
+				// long word is not read again)
+				e_acc  <= (e_acc << (8 * (3'd4 - {1'b0, e_va[1:0]}))) |
+				          (bo_line[127 - 32 * e_va[3:2] -: 32] & (32'hFFFF_FFFF >> (8 * e_va[1:0])));
+				e_va   <= {e_va[31:2] + 30'd1, 2'b00};
+				e_x.pa <= {e_x.pa[31:2] + 30'd1, 2'b00};
+				e_n    <= e_n - (3'd4 - {1'b0, e_va[1:0]});
+				e_x.cm <= 2'b11;
+				e_tcr  <= 1'b1;
+				e_fromline <= 1'b0;
+				e_st   <= E_S_ACT;
 			end
 			else if (bo_tci) begin
 				// not cachable after all: the operand from the line read,
