@@ -16,29 +16,27 @@ sequential MC68030 core this repository started with: the bus controller
 
 ## Status at a glance
 
-Measured at commit `8157742` (area and timing: out-of-context fits of that RTL).
+Measured at commit `8361a50` (default build); the 8 KB / FPU build at `8157742`.
 
 | | |
 |---|---|
 | Target | Cyclone V 5CSEBA6U23I7 (MiSTer), out-of-context fit at 70 MHz (14.286 ns) |
-| Area, default build (68030 caches, coprocessor interface) | 26,082 ALMs, 18,741 registers, 227,840 block memory bits, 15 DSP blocks. The unused on-chip FPU is still synthesized in this build: leaving it out is the obvious area saving. |
+| Area, default build (68030 caches, coprocessor interface, no FPU) | 21,899 ALMs, 14,546 registers |
 | Area, 8 KB caches and on-chip FPU | 24,432 ALMs, 17,401 registers, 339,968 block memory bits, 15 DSP blocks |
-| Timing | 8 KB caches and on-chip FPU: +0.006 ns at 70 MHz (Fmax 70.0 MHz), met. Default build: -2.69 ns, Fmax 58.9 MHz, 763 failing endpoints, all on the bus interface's new paths (a new transaction's translation and 68030 cache lookup in one clock) |
+| Timing | Default build: +0.562 ns at 70 MHz, Fmax 72.9 MHz, no failing endpoint. 8 KB caches and on-chip FPU: +0.006 ns, Fmax 70.0 MHz |
 | Regression | AP68030's 18 programs, each plain and with wait states, plus Dhrystone: all 37 runs pass (default build) |
-| Dhrystone 2.1 | 0.149 DMIPS/MHz with the 68030 caches; 0.375 DMIPS/MHz with the 8 KB caches (AP68030 itself: 0.235) |
+| Dhrystone 2.1 | 0.133 DMIPS/MHz with the 68030 caches; 0.375 DMIPS/MHz with the 8 KB caches (AP68030 itself: 0.235) |
 | Corpus | The WinUAE 68030 `cputest` corpus has not been run on this core yet |
 
 **Open**:
 
-- **70 MHz** is not met yet (see Timing). The bus interface now holds the
-  PMMU's translation and the 68030 caches' lookups, which add paths the
-  060 core did not have.
 - **FPU = 1** is the on-chip FPU with the 68060's rules: the transcendental
   instructions, packed decimal, FScc/FDBcc/FTRAPcc and denormal operands
   trap as on the 68060. A 68881/68882's behaviour would need them in
   hardware.
 - **Speed with the 68030 caches**: every cache hit goes through the bus
-  interface, so the default build is slower per clock than AP68030 itself.
+  interface (grant, then the lookup the next clock), so the default build is
+  slower per clock than AP68030 itself.
   A fast path for the 256-byte caches in the data memory unit and the
   fetch unit is the next performance step.
 
@@ -50,7 +48,7 @@ ports (the ones this core has no use for are kept and tied off).
 | Parameter | Effect |
 |---|---|
 | `CACHE030` | 1 (default): the MC68030's 256-byte instruction and data caches (UM section 6: 16 lines of four long words, a valid bit per long word, logical tags with the function code, CACR EI/FI/IBE/ED/FD/DBE/WA, CI/CEI/CD/CED with CAAR), at the bus interface; the pipeline's own caches are off. 0: the pipeline's 8 KB four-way caches under the 68030's CACR (faster; see below). |
-| `FPU` | 0 (default): no FPU; F-line instructions with CpID 1-7 run the coprocessor interface (UM section 10) on the bus, so an external 68881/68882 works and without one they take the F-line exception. 1: the on-chip FPU (68060 rules, see Open). |
+| `FPU` | 0 (default): no FPU (none is synthesized); F-line instructions with CpID 1-7 run the coprocessor interface (UM section 10) on the bus, so an external 68881/68882 works and without one they take the F-line exception. 1: the on-chip FPU (68060 rules, see Open). |
 
 With `CACHE030 = 0` the caches are bigger but not the 68030's: aliases of
 one physical line do not evict each other, a snoop invalidates by address
