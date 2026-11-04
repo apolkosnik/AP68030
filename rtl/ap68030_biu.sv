@@ -69,6 +69,8 @@ module ap68030_biu
 	output logic [NC-1:0]     done,
 	output logic [NC-1:0]     err,
 	output logic              errm,          // with err: the PMMU denied it (no bus cycle)
+	output logic              c2w_v,         // pulse: a write of client 2 completed, at c2w_pa
+	output logic [31:0]       c2w_pa,        // (physical: the pipeline's caches snoop it)
 	output logic              rvalid,
 	output logic [$clog2(NC)-1:0] rclient,
 	output logic [31:0]       rdata,
@@ -372,7 +374,7 @@ logic       rsto_pend;
 assign rsto_busy = !rsto_n || rsto_pend;
 
 always_ff @(posedge clk) begin
-	gnt <= '0; done <= '0; err <= '0; errm <= 1'b0;
+	gnt <= '0; done <= '0; err <= '0; errm <= 1'b0; c2w_v <= 1'b0;
 	rvalid <= 1'b0; ravec <= 1'b0; rtci <= 1'b0;
 	dc_iline <= 1'b0; ic_iline <= 1'b0;
 	walk_req <= 1'b0; tr_use <= 1'b0; mmu_opreq <= 1'b0; mmu_regwe <= 1'b0;
@@ -498,6 +500,7 @@ always_ff @(posedge clk) begin
 					end
 					if (!line) begin
 						done[cl] <= 1'b1;
+						if (cl == 2 && !q.rd && q.tm != 3'd7) begin c2w_v <= 1'b1; c2w_pa <= q_pa; end
 						st <= S_IDLE;
 					end
 					else begin

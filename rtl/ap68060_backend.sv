@@ -1677,7 +1677,11 @@ wire wb_reset    = (wb_u.op == OP_MISC) && (wb_u.cond == 4'd1);
 // (MISC 12 after a MOVEC to CACR: its CI/CEI/CD/CED bits clear the caches)
 wire wb_cclr     = (wb_u.op == OP_MISC) && (wb_u.cond == 4'd12) && (wb_u.imm_b[7:0] == 8'h02) &&
                    ((wb_res & 32'h0000_0C0C) != 32'd0);
-wire wb_mt       = ((wb_u.op == OP_MISC) && (wb_u.cond >= 4'd3) && (wb_u.cond <= 4'd5)) || wb_cclr;
+// (and after a PMOVE to TC: the pipeline's caches -- the 8 KB ones, which
+// cannot tell function codes apart -- are cleared when the translation
+// changes; see ap68030.sv)
+wire wb_tcinv;
+wire wb_mt       = ((wb_u.op == OP_MISC) && (wb_u.cond >= 4'd3) && (wb_u.cond <= 4'd5)) || wb_cclr || wb_tcinv;
 logic mt_seen;                // the DMU finished this WB uop's maintenance
 // the PMMU's instruction at WB (MISC 14): its operands from EX -- A the
 // address or the register's (second) long word, B the extension word, the
@@ -1718,6 +1722,7 @@ assign mm_level  = mx_ext[12:10];
 assign mm_fc     = (mx_ext[4:3] == 2'b10) ? mx_ext[2:0] : (mx_ext[4:3] == 2'b01) ? mx_hi[2:0] :
                    mx_ext[0] ? dfc_r : sfc_r;
 assign mm_fcmask = mx_ext[7:5];
+assign wb_tcinv  = wb_mm && mm_reg && (mm_sel == 3'd0) && mm_seen && !wb_is_exc;
 // the store buffer empties before exception processing and before a
 // synchronizing instruction (MC68060UM 5.10, 8.4.6): WB waits with an
 // exception, a serializing uop, or an instruction's last uop when a trace
@@ -1733,14 +1738,15 @@ assign wb_hold = wb_v && (halted || (!wb_is_exc &&
                   (wb_mt && !mt_seen) || (wb_mm && !mm_seen) || (wb_cpi && !cp_seen))) || sb_wait);
 
 assign mt_v      = wb_v && wb_mt && !wb_is_exc && !mt_seen;
-assign mt_op     = wb_cclr ? 3'd1 :
+assign mt_op     = (wb_cclr || wb_tcinv) ? 3'd1 :
                    (wb_u.cond == 4'd3) ? (wb_u.imm_b[5] ? 3'd2 : 3'd1) :
                    (wb_u.cond == 4'd4) ? 3'd3 : 3'd4;
-assign mt_scope  = wb_cclr ? 2'd3 :
+assign mt_scope  = (wb_cclr || wb_tcinv) ? 2'd3 :
                    (wb_u.cond == 4'd3) ? wb_u.imm_b[4:3] :
                    (wb_u.cond == 4'd4) ? (wb_u.imm_b[4] ? 2'd3 : 2'd2) : 2'd2;
 // (bit 1 the instruction cache, bit 0 the data cache)
-assign mt_caches = wb_cclr ? {wb_res[3] || wb_res[2], wb_res[11] || wb_res[10]} : wb_u.imm_b[7:6];
+assign mt_caches = wb_tcinv ? 2'b11 :
+                   wb_cclr ? {wb_res[3] || wb_res[2], wb_res[11] || wb_res[10]} : wb_u.imm_b[7:6];
 assign mt_addr   = wb_res;
 assign mt_fc     = dfc_r;
 assign mt_ng     = (wb_u.cond == 4'd4) && !wb_u.imm_b[3];

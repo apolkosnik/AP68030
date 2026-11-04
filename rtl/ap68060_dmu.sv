@@ -187,6 +187,8 @@ module ap68060_dmu
 	input  logic  [2:0] rr_fc,
 
 	// bus snooper
+	input  logic        xs_v,           // another master wrote xs_pa (the raw snoop port)
+	input  logic [31:0] xs_pa,
 	input  logic        sn_req,         // level: the snooper wants the cache
 	input  logic [31:0] sn_pa,
 	output logic        sn_look,        // pulse: sn_hit/sn_dirty/sn_line valid
@@ -864,6 +866,10 @@ logic  [6:0] f_set;
 always_comb ld_ra = lv_ra;
 logic  [1:0] f_way;
 logic [20:0] f_tag;
+logic        f_snp;               // a snoop named the line being filled: not allocated
+// (... up to and including the install's clock: after it, the snooper's
+// copy of the tags has the line)
+wire         f_snp_n = f_snp || (xs_v && xs_pa[31:4] == {f_tag, f_set});
 logic        pv_v;                // push buffer holds a dirty line
 logic [127:0] pv_line;
 logic [27:0] pv_lpa;              // its line address
@@ -1025,6 +1031,7 @@ typedef struct packed {
 } sbent_t;
 logic        sbe_r, pbe_r;        // (below)
 localparam int SBN = 1;           // store buffer entries (the 68030's one write pending)
+localparam int SBW = (SBN > 1) ? $clog2(SBN) : 1;   // (its index's width)
 sbent_t      sb [SBN];
 logic  [2:0] sb_n;
 logic        sel_q;               // the BIU saw the store buffer's request last cycle
@@ -1118,7 +1125,7 @@ always_ff @(posedge clk) begin
 			e.tm  = bo.tm;
 			e.upa = bo.upa;
 			e.ci  = bo.ci;
-			sb[n[$clog2(SBN)-1:0]] <= e;
+			sb[n[SBW-1:0]] <= e;
 			n = n + 3'd1;
 		end
 		else if (rr_v && sb_room) begin
@@ -1132,7 +1139,7 @@ always_ff @(posedge clk) begin
 			e.tm  = fc_tm(rr_fc);
 			e.upa = 2'd0;
 			e.ci  = 1'b0;
-			sb[n[$clog2(SBN)-1:0]] <= e;
+			sb[n[SBW-1:0]] <= e;
 			n = n + 3'd1;
 		end
 		sb_n <= n;
@@ -1256,7 +1263,7 @@ always_ff @(posedge clk) begin
 		wfs_p1 <= 1'b0;
 		e_job <= 1'b0;
 		m1_stale <= 1'b0;
-		sn_ph <= SN_IDLE; sn_src <= '0; sn_way <= '0; bo_cancel <= 1'b0; bo_later <= 1'b0; bo_ciin <= 1'b0; pbe_r <= 1'b0;
+		sn_ph <= SN_IDLE; f_snp <= 1'b0; sn_src <= '0; sn_way <= '0; bo_cancel <= 1'b0; bo_later <= 1'b0; bo_ciin <= 1'b0; pbe_r <= 1'b0;
 		bo_ingnt <= 1'b0; sn_pvm <= 1'b0; sn_bom <= 1'b0;
 		sn_look <= 1'b0; sn_hit <= 1'b0; sn_dirty <= 1'b0;
 		clr_i   <= '0;
@@ -2094,6 +2101,7 @@ always_ff @(posedge clk) begin
 			end
 			vp_set = f_set; vp_wm[f_way] = 1'b1;
 			vp_lwe = 1'b1; vp_lv = 1'b0; vp_dwe = 1'b1; vp_dv = 1'b0;
+			f_snp  <= 1'b0;
 			bo.line <= 1'b1; bo.rd <= 1'b1; bo.tt <= TT_NORMAL;
 			bo.tm <= m2.r.smode ? TM_SDATA : TM_UDATA;
 			bo.upa <= e_x.upa; bo.ci <= 1'b0; bo.lock <= 1'b0; bo.locke <= 1'b0;
@@ -2104,7 +2112,10 @@ always_ff @(posedge clk) begin
 			e_st    <= E_BUS;
 		end
 		E_FILL_INS: begin
-			if (!bo_err && !bo_tci) begin
+			// (another master wrote the line while it was read -- its snoop
+			// found nothing to invalidate yet: the line is not allocated, the
+			// access takes what was read, as with TCI)
+			if (!bo_err && !bo_tci && !f_snp_n) begin
 				dw      <= 1'b1;
 				dw_set  <= f_set;
 				dw_way  <= f_way;
@@ -2165,7 +2176,7 @@ always_ff @(posedge clk) begin
 				e_fromline <= 1'b0;
 				e_st   <= E_S_ACT;
 			end
-			else if (bo_tci) begin
+			else if (bo_tci || f_snp_n) begin
 				// not cachable after all: the operand from the line read,
 				// a store of this page writes through
 				e_fromline <= (m2.r.mem != M_ST);
@@ -2562,6 +2573,9 @@ always_ff @(posedge clk) begin
 		//--------------------------------------------------------------
 		if (sb_err_ack) pbe_r <= 1'b0;
 		sn_look <= 1'b0;
+		// (the snooper's tag copy has no valid line for a fill under way, so
+		// it drops that snoop: the port itself is compared)
+		if (xs_v && xs_pa[31:4] == {f_tag, f_set}) f_snp <= 1'b1;
 		case (sn_ph)
 		SN_IDLE: if (sn_req) sn_ph <= SN_A;
 		         else if (sf_req) sn_ph <= SN_F;

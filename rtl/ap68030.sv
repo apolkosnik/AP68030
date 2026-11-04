@@ -192,11 +192,26 @@ logic  [3:0] dv_wm;
 logic [27:0] pq0_l, pq1_l;
 logic [31:0] sn_ic_pa;
 
+// the snooped writes: another master's (the snoop port), and the
+// coprocessor interface's own (it writes past the pipeline's caches); one
+// of the latter that meets the former waits a clock
+logic        c2w_v, cwp_v, xs_v;
+logic [31:0] c2w_pa, cwp_pa, xs_pa;
+always_ff @(posedge clk) begin
+	if (!nreset) cwp_v <= 1'b0;
+	else if (snoop_we && (c2w_v || cwp_v)) begin
+		cwp_v  <= 1'b1;
+		cwp_pa <= c2w_v ? c2w_pa : cwp_pa;
+	end
+	else cwp_v <= 1'b0;
+end
+assign xs_v  = snoop_we || c2w_v || cwp_v;
+assign xs_pa = snoop_we ? snoop_addr : cwp_v ? cwp_pa : c2w_pa;
 ap68060_snoop snoop (
 	// (the snoop port: another master wrote snoop_addr -- presented to the
 	// snooper as a snooped transfer of an alternate master)
 	.clk(clk), .nreset(nreset), .bclk_en(1'b1), .own(1'b0),
-	.a_i(snoop_addr), .ts_n_i(!snoop_we), .tt_i(2'b00), .snoop_n(!snoop_we),
+	.a_i(xs_pa), .ts_n_i(!xs_v), .tt_i(2'b00), .snoop_n(!xs_v),
 	.dc_req(sn_req), .dc_pa(sn_pa), .dc_look(sn_look), .dc_hit(sn_hit),
 	.dc_inv(sn_inv), .dc_ovf(sn_ovf), .busy(sn_busy),
 	.sf_req(sf_req), .sf_set(sf_set), .sf_way(sf_way), .sf_more(sf_more), .sf_ack(sf_ack),
@@ -277,7 +292,11 @@ logic        uo_rdy;
 wire [31:0] cacr6;
 // (ESB, bit 29, always: the 68030 posts every write -- its one-entry
 // write buffer is the store buffer with one entry)
-assign cacr6 = {cacr[8] && !CACHE030, cacr[9], 1'b1, 5'd0, 1'b1, 7'd0, cacr[0] && !CACHE030, cacr[1], 14'd0};
+// (CACHE030=0: the 8 KB caches are tagged by the logical address alone and
+// cannot keep function codes apart, so they are off while the PMMU
+// translates -- TC.E without MMUDIS --; a PMOVE to TC clears them)
+wire   pc_on = !CACHE030 && !(mmu_tc[31] && !mdis);
+assign cacr6 = {cacr[8] && pc_on, cacr[9], 1'b1, 5'd0, 1'b1, 7'd0, cacr[0] && pc_on, cacr[1], 14'd0};
 
 ap68060_backend #(.FPU_PIPE(FPU_PIPE), .EARLY_RES(EARLY_RES), .SKID(SKID),
                   .PCR_REV(PCR_REV), .CPIF(!FPU)) be (
@@ -357,6 +376,7 @@ ap68060_dmu #(.DC1_ATC(DC1_ATC)) dmu (
 	.sb_fa(sb_fa), .sb_dob(sb_dob), .sb_fn(sb_fn), .sb_ffc(sb_ffc), .sb_wait(sb_wait), .bi_errm(b_errm), .sb_fm(sb_fm),
 	.rr_v(rr_v), .rr_pa(rr_pa), .rr_n(rr_n), .rr_wd(rr_wd), .rr_fc(rr_fc),
 	.b_ravec(b_ravec), .b_rtci(b_rtci),
+	.xs_v(xs_v), .xs_pa(xs_pa),
 	.sn_req(sn_req), .sn_pa(sn_pa), .sn_look(sn_look), .sn_hit(sn_hit),
 	.sn_dirty(sn_dirty), .sn_line(sn_line), .sn_inv(sn_inv), .sn_act(sn_act), .sn_wr(sn_wr),
 	.sn_wbe(sn_wbe), .sn_wword(sn_wword),
@@ -469,7 +489,7 @@ ap68060_useq useq (
 ap68030_biu #(.NC(NC), .C030(CACHE030)) biu (
 	.clk(clk), .nreset(nreset),
 	.req(b_req & ~{1'b0, be_fstop || rsto_busy, 1'b0}), .breq(b_breq), .wdata(b_wdata),
-	.gnt(b_gnt), .done(b_done), .err(b_err), .errm(b_errm),
+	.gnt(b_gnt), .done(b_done), .err(b_err), .errm(b_errm), .c2w_v(c2w_v), .c2w_pa(c2w_pa),
 	.rvalid(b_rvalid), .rclient(b_rclient), .rdata(b_rdata), .rbeat(b_rbeat),
 	.ravec(b_ravec), .rtci(b_rtci), .errbeat(b_errbeat), .idle(b_idle), .own(b_own),
 	.unlock(lk_abandon), .sn_busy(sn_busy || sn_act), .halt(dbg_halted),
