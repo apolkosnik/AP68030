@@ -413,8 +413,9 @@ R('BF_MOD',
   _BFSETUP,
   U(op='BF', cond='BFR', a='X1DL', b='EA0', d='EA0', ccr='NZVC', last=1))
 
-# CAS Dc,Du,<ea>: a locked read-modify-write.  The 68040 always writes:
-# Du on a match, the value read on a mismatch (then Dc = that value).
+# CAS Dc,Du,<ea>: a locked read-modify-write.  The 68030 writes Du on a
+# match only; a mismatch (Dc = the value read) ends the locked sequence
+# without a write (the back end kills the store, RMC is negated).
 R('CAS',
   U(op='LATCH', sz='L', a='X1DH'),
   U(op='CAS', a='X1DU', b='EA0', d='X1DH', mem='RMW', ag='EA0', lock=1, locke=1,
@@ -471,9 +472,9 @@ R('RTR',
   U(op='CCRLOG', cond=3, a='T1', b='T2', ag='ADDC', agb='SP', agw='SP', const=6,
     ccr='XNZVC', br='B', last=1))
 # CAS2: two locked reads, the compare leaves eq in EX.  The 68030's order
-# (WinUAE's model, visible when the operands overlap): operand 2 is
-# written first, only on a match, then operand 1 always (Du1, or on a
-# mismatch the value read back, with LOCKE: the locked sequence ends);
+# (WinUAE's model, visible when the operands overlap): on a match operand
+# 2 is written first, then operand 1 (LOCKE: the locked sequence ends); a
+# mismatch writes neither (the back end kills both stores, RMC negated);
 # on a mismatch Dc2 and then Dc1 take the values read (one register for
 # both receives operand 1)
 R('CAS2',

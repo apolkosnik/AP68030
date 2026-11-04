@@ -209,9 +209,12 @@ assign own   = !b_granted;
 //--------------------------------------------------------------------------
 // the client a new transaction comes from (0 = highest priority)
 logic [$clog2(NC)-1:0] csel;
+// (only the data client while a locked sequence is open: no other cycle,
+// an instruction fetch's, runs inside the indivisible operation, UM 7.3.3)
+wire [NC-1:0] req_ok = lk_open ? (req & {{(NC-1){1'b0}}, 1'b1}) : req;
 always_comb begin
 	csel = '0;
-	for (int c = NC - 1; c >= 0; c--) if (req[c]) csel = c[$clog2(NC)-1:0];
+	for (int c = NC - 1; c >= 0; c--) if (req_ok[c]) csel = c[$clog2(NC)-1:0];
 end
 busreq_t     rs;
 assign rs = breq[csel];
@@ -235,7 +238,7 @@ wire  [3:0]  rs_be  = (rs.siz == SIZ_B) ? (4'b1000 >> rs.addr[1:0]) :
 // burst's fill strobes still belong to the last one)
 // (and not in a fill strobe's clock: the cache's one tag comparator is the
 // fill's then)
-wire         c_go   = (st == S_IDLE) && !sn_busy && !rsto_busy && !rsto_req && !halt && (|req) &&
+wire         c_go   = (st == S_IDLE) && !sn_busy && !rsto_busy && !rsto_req && !halt && (|req_ok) &&
                       (!C030 || (b_idle && !b_fill));
 wire         c_wr   = C030 && c_go && rs_d && !rs.rd && !sub_hit(rs, sub_v && !sub_arm, sub_ar);
 

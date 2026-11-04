@@ -1322,12 +1322,15 @@ logic ex_stkill;
 always_comb begin
 	ex_stkill = 1'b0;
 	case (ex_u.op)
-		OP_CAS:  ex_st = cas_eq ? ex_av : ex_bv;
-		// CAS2: the first write only on a match, the second always (Du2,
-		// or on a mismatch the value it read)
+		// CAS, CAS2 (the 68030): the writes only on a match; a mismatch
+		// ends the locked sequence without one (RMC negated, lk_abandon)
+		OP_CAS: begin
+			ex_st     = ex_av;
+			ex_stkill = !cas_eq;
+		end
 		OP_CAS2W: begin
-			ex_st     = (ex_u.cond[0] && !cas2_eq) ? ex_bv : ex_av;
-			ex_stkill = !ex_u.cond[0] && !cas2_eq;
+			ex_st     = ex_av;
+			ex_stkill = !cas2_eq;
 		end
 		default: ex_st = ex_res;
 	endcase
@@ -1548,7 +1551,8 @@ wire x_go        = ((adv_wb && wb_is_exc && !wb_refetch) || take_trace || take_i
 // exception (L and LE go to SL and SLE) or a MOVEC clearing BUSCR.L ends it
 // (MC68060UM 7.4) -- not a pipeline flush, a NOP's included
 assign lk_abandon = x_go || dbl_fault ||
-                    (wb_commit && wb_u.op == OP_SPW && wb_u.imm_b[7:0] == 8'h08 && !wb_res[31]);
+                    (wb_commit && wb_u.op == OP_SPW && wb_u.imm_b[7:0] == 8'h08 && !wb_res[31]) ||
+                    (wb_commit && wb_u.mlocke && (wb_u.mem == M_RMW || wb_u.mem == M_ST) && !wb_st);
 
 // register file write ports.  Front: the AG address updates and the EX
 // result.  Back: the WB commit (a result beats an address update), the
