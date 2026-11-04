@@ -5,10 +5,11 @@
 // ap040_muldiv.v, which the cputest corpus validated)                       //
 //                                                                          //
 // MUL: 32x32 -> 64, signed or unsigned, one registered DSP product        //
-// DIV: 32/32 -> q32,r32 restoring, 2 bits per cycle (the 68060 has no     //
-//      64-bit dividend: those forms trap); ovf for the one signed quotient //
-//      that does not fit, -2^31 / -1.  Signed quotients truncate toward    //
-//      zero, the remainder takes the dividend's sign.                       //
+// DIV: 64/32 -> q32,r32 restoring, 2 bits per cycle (the 68030's         //
+//      DIVx.L with a 64-bit dividend; a 32-bit one comes extended); ovf   //
+//      when the quotient does not fit 32 bits (signed: the range).  Signed //
+//      quotients truncate toward zero, the remainder takes the dividend's  //
+//      sign.                                                               //
 // kill abandons a running operation (pipeline flush).                       //
 //--------------------------------------------------------------------------//
 
@@ -22,7 +23,8 @@ module ap68060_muldiv
 	input             is_div,
 	input             sign_op,
 	input      [31:0] op_a,        // multiplier / divisor
-	input      [31:0] op_lo,       // multiplicand / dividend
+	input      [31:0] op_hi,       // dividend high (div only)
+	input      [31:0] op_lo,       // multiplicand / dividend low
 
 	output            busy,
 	output reg        done,        // one cycle pulse
@@ -40,10 +42,13 @@ reg [31:0] den;                   // divisor / multiplier (absolute)
 reg [31:0] mcand;                 // multiplicand (absolute)
 reg [63:0] prod;                  // registered DSP product
 reg [64:0] acc;                   // divide: remainder [64:32], dividend/quotient [31:0]
+reg        ovf_hi;                // divide: the dividend's high half >= the divisor
+reg        first;                 // divide: the first step's cycle
 
 // absolute values for signed operations
 wire [31:0] abs_a  = (sign_op && op_a[31]) ? (32'd0 - op_a) : op_a;
-wire [31:0] abs_m  = (sign_op && op_lo[31]) ? (32'd0 - op_lo) : op_lo;   // also |dividend|
+wire [31:0] abs_m  = (sign_op && op_lo[31]) ? (32'd0 - op_lo) : op_lo;
+wire [63:0] abs_d  = (sign_op && op_hi[31]) ? (64'd0 - {op_hi, op_lo}) : {op_hi, op_lo};   // |dividend|
 
 // divide: DSTEPS cascaded restoring steps per cycle (2: 32 bits in 16
 // rounds, the 68060's own DIVU.L takes 38 clocks),
@@ -82,6 +87,8 @@ always @(posedge clk) begin
 		mcand   <= 0;
 		prod    <= 0;
 		acc     <= 0;
+		ovf_hi  <= 0;
+		first   <= 0;
 		res_hi  <= 0;
 		res_lo  <= 0;
 		ovf     <= 0;
@@ -99,10 +106,11 @@ always @(posedge clk) begin
 			ovf     <= 0;
 			if (is_div) begin
 				den   <= abs_a;
-				acc   <= {33'd0, abs_m};
+				acc   <= {1'b0, abs_d};
 				count <= 7'(32 / DSTEPS);
-				neg_q <= sign_op && (op_lo[31] ^ op_a[31]);
-				neg_r <= sign_op && op_lo[31];
+				first <= 1'b1;
+				neg_q <= sign_op && (op_hi[31] ^ op_a[31]);
+				neg_r <= sign_op && op_hi[31];
 			end
 			else begin
 				den   <= abs_a;
@@ -117,6 +125,9 @@ always @(posedge clk) begin
 				count <= count - 7'd1;
 				if (div_r) begin
 					acc <= div4;
+					// (the unsigned quotient needs more than 32 bits)
+					if (first) ovf_hi <= (acc[63:32] >= den);
+					first <= 1'b0;
 				end
 				else begin
 					// one registered 32x32 DSP-tree product, exactly the
@@ -130,7 +141,8 @@ always @(posedge clk) begin
 				if (div_r) begin
 					res_lo <= neg_q ? (32'd0 - q_raw[31:0]) : q_raw[31:0];
 					res_hi <= neg_r ? (32'd0 - r_raw) : r_raw;
-					ovf    <= sign_op & !neg_q & q_raw[31];
+					ovf    <= ovf_hi || (sign_op && (neg_q ? (q_raw[31] && q_raw[30:0] != 31'd0)
+					                                        : q_raw[31]));
 				end
 				else begin
 					res_lo <= neg_q ? (32'd0 - q_raw[31:0]) : q_raw[31:0];

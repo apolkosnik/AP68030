@@ -251,12 +251,18 @@ R('UNPK_M',
 # multiply / divide (word forms); the signed variant is the entry cond
 R('MULW', U(op='EOP', cond='EC', a='EA0', b='DX', d='DX', ccr='NZVC', last=1))
 R('DIVW', U(op='EOP', cond='EC', a='EA0', b='DX', d='DX', ccr='NZVC', last=1))
-# long forms: ext word Dl/Dq = 14:12, Dr = 2:0, bit 11 signed.  The 68060
-# has only the 32-bit forms: bit 10 (a 64-bit product or dividend) is the
-# unimplemented integer instruction exception, raised by D1.  DIVx.L
-# writes Dr then Dq (a shared register keeps the quotient).
-R('MULL', U(op='MUL', cond='X1', sz='L', a='EA0', b='X1DL', d='X1DL', ccr='NZVC', last=1))
+# long forms: ext word Dl/Dq = 14:12, Dh/Dr = 2:0, bit 11 signed, bit 10
+# 64-bit.  MULx.L 64 writes Dh then Dl, DIVx.L writes Dr then Dq (a shared
+# register keeps low / quotient); the 64-bit dividend's high half is Dr,
+# latched first (MDHI).
+R('MULL',
+  U(jc='EXT10', jt='MULL.2'),
+  U(op='MUL', cond='X1', sz='L', a='EA0', b='X1DL', d='X1DL', ccr='NZVC', last=1),
+  U(op='MUL', cond='X1', sz='L', a='EA0', b='X1DL', ccr='NZVC'),
+  U(op='MDRES', cond=0, d='X1DH'),
+  U(op='MDRES', cond=1, d='X1DL', last=1))
 R('DIVL',
+  U(op='MDHI', a='X1DH'),
   U(op='DIV', cond='X1', sz='L', a='EA0', b='X1DL', ccr='NZVC'),
   U(op='MDRES', cond=0, d='X1DH'),
   U(op='MDRES', cond=1, d='X1DL', last=1))
@@ -426,6 +432,55 @@ R('RTR',
   U(op='MOV', sz='L', msz='L', a='LD', d='T2', ag='BASED', agb='SP', const=2),
   U(op='CCRLOG', cond=3, a='T1', b='T2', ag='ADDC', agb='SP', agw='SP', const=6,
     ccr='XNZVC', br='B', last=1))
+# CAS2: two locked reads, the compare leaves eq in EX; the first write
+# only on a match, the second always (Du2 or the second value read, with
+# LOCKE); on a mismatch Dc1/Dc2 take the values read
+R('CAS2',
+  U(op='MOV', a='LD', d='T0', ag='BASED', agb='X1R', lock=1),
+  U(op='MOV', a='LD', d='T1', ag='BASED', agb='X2R', lock=1),
+  U(op='CAS2C', cond=0, a='X1DH', b='T0', ccr='NZVC'),
+  U(op='CAS2C', cond=1, a='X2DC', b='T1', ccr='NZVC'),
+  U(op='CAS2W', cond=0, a='X1DU', mem='ST', ag='BASED', agb='X1R', lock=1),
+  U(op='CAS2W', cond=1, a='X2DU', b='T1', mem='ST', ag='BASED', agb='X2R', lock=1, locke=1),
+  U(op='CAS2R', a='T0', b='X1DH', d='X1DH'),
+  U(op='CAS2R', a='T1', b='X2DC', d='X2DC', last=1))
+# CHK2/CMP2 <ea>,Rn: bounds at EA and EA + size; cond 'CHK2' carries
+# {Rn is a data register, CHK2}
+R('CHK2',
+  U(ag='LEA0', agw='T1'),
+  U(op='MOV', sz='L', a='LD', d='T0', ag='BASED', agb='T1', const=0),
+  U(op='MOV', sz='L', a='LD', d='T2', ag='BASED', agb='T1', dsel='SZB'),
+  U(op='LATCH', sz='L', a='T0'),
+  U(op='CHK2B', cond='CHK2', a='T2', b='X1R', ccr='ZC', last=1))
+# MOVEP: bytes at d16(Ay) + 0, 2 (, 4, 6), most significant first
+def _mpb(k, **kw):
+    return U(op='MOV', sz='B', msz='B', ag='BASED', agb='AY', dsel='IMMC',
+             const=2 * k, **kw)
+R('MOVEP_MR',
+  _mpb(0, a='LD', b='ZERO', d='T0'),
+  U(op='LSL', sz='L', a='CONST', const=8, b='T0', d='T0'),
+  _mpb(1, a='LD', b='T0', d='T0'),
+  U(jc='SZ_L', jt='MOVEP_MR.5'),
+  U(op='MOV', sz='W', a='T0', b='DX', d='DX', last=1),
+  U(op='LSL', sz='L', a='CONST', const=8, b='T0', d='T0'),
+  _mpb(2, a='LD', b='T0', d='T0'),
+  U(op='LSL', sz='L', a='CONST', const=8, b='T0', d='T0'),
+  _mpb(3, a='LD', b='T0', d='T0'),
+  U(op='MOV', sz='L', a='T0', d='DX', last=1))
+R('MOVEP_RM',
+  U(jc='SZ_L', jt='MOVEP_RM.4'),
+  U(op='LSR', sz='L', a='CONST', const=8, b='DX', d='T0'),
+  _mpb(0, a='T0', mem='ST'),
+  _mpb(1, a='DX', mem='ST', last=1),
+  U(op='LSR', sz='L', a='CONST', const=24, b='DX', d='T0'),
+  _mpb(0, a='T0', mem='ST'),
+  U(op='LSR', sz='L', a='CONST', const=16, b='DX', d='T0'),
+  _mpb(1, a='T0', mem='ST'),
+  U(op='LSR', sz='L', a='CONST', const=8, b='DX', d='T0'),
+  _mpb(2, a='T0', mem='ST'),
+  _mpb(3, a='DX', mem='ST', last=1))
+# the MMU instructions: for now the F-line exception (D1), until the PMMU
+R('PMMU', U(last=1))
 
 # MOVES: ext bit 11 = register to memory (DFC), else memory to register
 # (SFC); an address register takes the operand sign-extended to 32 bits
@@ -812,7 +867,7 @@ def emit():
         for n, i in JC.items():
             f.write('localparam logic [5:0] JC_%s = 6\'d%d;\n' % (n, i))
         for n in ['EXC_FMT0', 'EXC_FMT2', 'EXC_FMT4', 'EXC_RESET', 'EXC_IRQ',
-                  'DEC_EXC', 'UNIMPL', 'LPSTOP', 'BCC', 'BSR', 'DBCC', 'FBCC', 'FDBCC', 'FPU_GEN',
+                  'DEC_EXC', 'UNIMPL', 'LPSTOP', 'PMMU', 'BCC', 'BSR', 'DBCC', 'FBCC', 'FDBCC', 'FPU_GEN',
                   'TRAP', 'BKPT', 'ILLEGAL', 'MOVEM_RM', 'MOVEM_MR',
                   'MOVEC_RD', 'MOVEC_WR', 'JSR', 'JSR_K', 'JMP', 'RTS',
                   'FPU_K_IND', 'FPU_K_IN1', 'FPU_K_IN2', 'FPU_K_IN4', 'FPU_K_IN8',

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Exhaustive check of isa.py against WinUAE's 68040 opcode table."""
+"""Exhaustive check of isa.py against WinUAE's 68030 opcode table."""
 import sys
 from isa import lookup, T
-ORACLE = sys.argv[1] if len(sys.argv) > 1 else '/home/adam/ap68060-60/tools-oracle/op040.txt'
+ORACLE = sys.argv[1] if len(sys.argv) > 1 else __import__('os').path.join(__import__('os').path.dirname(__file__), 'oracle', 'op030.txt')
 SZ = {0: 'B', 1: 'W', 2: 'L'}
 bad = 0
 names = {}
@@ -23,7 +23,7 @@ for line in open(ORACLE):
     if valid:
         if plev == 2 and not e.priv:
             bad += 1; print('%04x %s: oracle privileged' % (op, name))
-        # MOVEC: table68k leaves privilege to the handler; the 040 traps
+        # MOVEC: table68k leaves privilege to the handler; the 030 traps
         if plev in (0, 1) and e.priv and name not in ('MVSR2', 'MOVEC2', 'MOVE2C'):
             bad += 1; print('%04x %s: oracle not privileged' % (op, name))
 print('mismatches:', bad)

@@ -525,12 +525,8 @@ end
 // memory request to the DMU, issued as the uop leaves AG
 logic s_bit;
 assign s_bit      = sr_r[13];
-// CAS with a misaligned operand (a word at an odd address, a long not at a
-// multiple of four) is the 68060's unimplemented integer instruction
-// exception (vector 61, WinUAE gencpu): no access is made
-wire        ag_casmis = (ag_u.op == OP_CAS) && (ag_u.mem != M_NONE) &&
-                        ((ag_u.msz == SZ_W && ag_maddr[0]) ||
-                         (ag_u.msz == SZ_L && ag_maddr[1:0] != 2'd0));
+// (a misaligned CAS operand runs on the 68030: no vector 61)
+wire        ag_casmis = 1'b0;
 assign dm_req     = adv_ag && (ag_u.mem != M_NONE) && (ag_u.exc == 8'd0) && !ag_cancel && !ag_snref &&
                     !ag_casmis;
 assign dm_va      = ag_maddr;
@@ -628,11 +624,17 @@ wire [31:0] md_a    = (ex_u.sz == SZ_W) ?
                       (md_sign ? {{16{ex_av[15]}}, ex_av[15:0]} : {16'd0, ex_av[15:0]}) : ex_av;
 wire [31:0] md_blo  = (ex_u.op == OP_MUL && ex_u.sz == SZ_W) ?
                       (md_sign ? {{16{ex_bv[15]}}, ex_bv[15:0]} : {16'd0, ex_bv[15:0]}) : ex_bv;
+// the dividend's high half: DIVx.L with a 64-bit dividend (ext bit 10 =
+// cond[1]) takes Dr, latched by the MDHI uop before it; a 32-bit one is
+// the low half sign- or zero-extended
+logic [31:0] md_hiin;
+wire  [31:0] md_bhi = (ex_u.op == OP_DIV && ex_u.sz == SZ_L && ex_u.cond[1]) ? md_hiin :
+                      (md_sign ? {32{md_blo[31]}} : 32'd0);
 
 ap68060_muldiv md (
 	.clk(clk), .nreset(nreset), .kill(kill_now),
 	.start(ex_md_start), .is_div(ex_u.op == OP_DIV), .sign_op(md_sign),
-	.op_a(md_a), .op_lo(md_blo),
+	.op_a(md_a), .op_hi(md_bhi), .op_lo(md_blo),
 	.busy(md_busy), .done(md_done), .res_hi(md_hi), .res_lo(md_lo), .ovf(md_ovf)
 );
 
@@ -840,7 +842,7 @@ end
 logic [31:0] ex_res;
 logic  [4:0] ex_flags;
 logic        ex_dkill;        // suppress the register write
-logic  [3:0] ex_kc;           // EX's uop is FPU, DIV, MDRES, DBcc (the ones that can)
+logic  [4:0] ex_kc;           // EX's uop is FPU, DIV, MDRES, DBcc, CAS2R (the ones that can)
 logic        ex_dkill_chk;    // (simulation: the case form)
 // synthesis translate_off
 always_ff @(posedge clk)
@@ -884,7 +886,7 @@ endfunction
 function automatic logic is_slow(input logic [6:0] op);
 	case (op)
 		OP_ASL, OP_ASR, OP_LSL, OP_LSR, OP_ROL, OP_ROR, OP_ROXL, OP_ROXR,
-		OP_ABCD, OP_SBCD, OP_NBCD, OP_PACK, OP_UNPK, OP_BF,
+		OP_ABCD, OP_SBCD, OP_NBCD, OP_PACK, OP_UNPK, OP_BF, OP_CHK2B,
 		OP_SPR, OP_SRLOG, OP_RTE, OP_RTEF, OP_IACKV, OP_MISC: is_slow = 1'b1;
 		default: is_slow = 1'b0;
 	endcase
@@ -985,6 +987,15 @@ always_comb begin
 			xf.flags = alu_flags;
 			xf.res   = ex_bv;
 		end
+		OP_CAS2C: begin
+			if (!ex_u.cond[0] || cas2_eq) xf.flags = cmp_flags;
+			else xf.flags = ccr_f;
+		end
+		OP_CAS2R: begin
+			xf.res   = (ex_av & ex_szm) | (ex_bv & ~ex_szm);
+			xf.dkill = cas2_eq;
+		end
+		OP_MDHI:  xf.res = ex_av;
 		default: ;
 	endcase
 	// control transfers
@@ -1083,6 +1094,25 @@ always_comb begin
 			xs.res   = bf_res;
 			xs.flags = bf_flags;
 		end
+		OP_CHK2B: begin
+			// WinUAE i_CHK2: signed compares of the sign-extended bounds
+			// (lower in ex_latch, upper in A) with B, which is sign-extended
+			// only when it is a data register (cond[1]); N and V are kept
+			logic signed [31:0] lo, up, rg;
+			logic z, c;
+			case (ex_u.sz)
+				SZ_B: begin lo = {{24{ex_latch[7]}}, ex_latch[7:0]}; up = {{24{ex_av[7]}}, ex_av[7:0]};
+				            rg = ex_u.cond[1] ? {{24{ex_bv[7]}}, ex_bv[7:0]} : ex_bv; end
+				SZ_W: begin lo = {{16{ex_latch[15]}}, ex_latch[15:0]}; up = {{16{ex_av[15]}}, ex_av[15:0]};
+				            rg = ex_u.cond[1] ? {{16{ex_bv[15]}}, ex_bv[15:0]} : ex_bv; end
+				default: begin lo = ex_latch; up = ex_av; rg = ex_bv; end
+			endcase
+			z = (up == rg) || (lo == rg);
+			c = !z && ((lo <= up) ? ((rg < lo) || (rg > up)) : ((rg > up) && (rg < lo)));
+			xs.res   = ex_bv;
+			xs.flags = {ccr_f[4], ccr_f[3], z, ccr_f[1], c};
+			if (ex_u.cond[0] && c) xs.xvec = 8'd6;
+		end
 		default: ;
 	endcase
 end
@@ -1103,7 +1133,7 @@ always_comb begin
 	// the way to the forwarding enable; the others never kill, slow ones
 	// included)
 	ex_dkill  = (ex_kc[0] && fp_dkill) || (ex_kc[1] && md_dkill) ||
-	            (ex_kc[2] && md_ovfl) || (ex_kc[3] && alu_cc);
+	            (ex_kc[2] && md_ovfl) || (ex_kc[3] && alu_cc) || (ex_kc[4] && cas2_eq);
 	// synthesis translate_off
 	ex_dkill_chk = x.dkill;
 	// synthesis translate_on
@@ -1125,6 +1155,16 @@ ap68060_alu cas_alu (
 	.res(cas_res), .flags_out(cas_flags), .cc_true(cas_cc), .trap(cas_tr)
 );
 wire cas_eq = cas_flags[2];
+// CAS2: compare B - A (Dc with the value read), both pairs equal so far
+logic [31:0] cmp_res;
+logic  [4:0] cmp_flags;
+logic        cmp_cc, cmp_tr;
+ap68060_alu cmp_alu (
+	.op(OP_CMP), .sz(ex_u.sz), .cond(4'd0),
+	.a(ex_av), .b(ex_bv), .ea(32'd0), .flags_in(ccr_f),
+	.res(cmp_res), .flags_out(cmp_flags), .cc_true(cmp_cc), .trap(cmp_tr)
+);
+logic        cas2_eq;
 
 wire  [31:0] ex_szm = (ex_u.sz == SZ_B) ? 32'h0000_00FF :
                       (ex_u.sz == SZ_W) ? 32'h0000_FFFF : 32'hFFFF_FFFF;
@@ -1135,6 +1175,12 @@ always_comb begin
 	ex_stkill = 1'b0;
 	case (ex_u.op)
 		OP_CAS:  ex_st = cas_eq ? ex_av : ex_bv;
+		// CAS2: the first write only on a match, the second always (Du2,
+		// or on a mismatch the value it read)
+		OP_CAS2W: begin
+			ex_st     = (ex_u.cond[0] && !cas2_eq) ? ex_bv : ex_av;
+			ex_stkill = !ex_u.cond[0] && !cas2_eq;
+		end
 		default: ex_st = ex_res;
 	endcase
 	// an FPU store whose result is not written (an enabled integer
@@ -1537,6 +1583,8 @@ always_ff @(posedge clk) begin
 		md_rem  <= 32'd0;
 		md_lol  <= 32'd0;
 		md_ovfl <= 1'b0;
+		md_hiin <= 32'd0;
+		cas2_eq <= 1'b0;
 		ex_latch <= 32'd0;
 		bf_off   <= 32'd0;
 		bf_w     <= 6'd32;
@@ -1671,8 +1719,8 @@ always_ff @(posedge clk) begin
 		if (adv_dc2) begin
 			ex_u     <= dc2_u;
 			ex_npc   <= dc2_u.pc + {27'd0, dc2_u.ilen, 1'b0};
-			ex_kc    <= {dc2_u.op == OP_DBCC, dc2_u.op == OP_MDRES, dc2_u.op == OP_DIV,
-			             dc2_u.op == OP_FPU};
+			ex_kc    <= {dc2_u.op == OP_CAS2R, dc2_u.op == OP_DBCC, dc2_u.op == OP_MDRES,
+			             dc2_u.op == OP_DIV, dc2_u.op == OP_FPU};
 			ex_ee    <= dc2_ee;
 			ex_er    <= dc2_er;
 			ex_a     <= (exw_v && dc2_u.a_src == OS_REG && dc2_u.a_reg == exw_reg) ? exw_val : dc2_a;
@@ -1855,6 +1903,9 @@ always_ff @(posedge clk) begin
 		end
 		// overflow of the uop leaving EX (word forms check 16 bits)
 		if (adv_ex && (ex_u.op == OP_DIV || ex_u.op == OP_MUL)) md_ovfl <= (ex_u.op == OP_DIV) && md_dkill;
+		if (adv_ex && ex_u.op == OP_MDHI) md_hiin <= ex_av;
+		if (adv_ex && ex_u.op == OP_CAS2C)
+			cas2_eq <= ex_u.cond[0] ? (cas2_eq && cmp_flags[2]) : cmp_flags[2];
 		if (!stall_wb) wb_v <= adv_ex;
 
 		//------------------------------------------------------------------

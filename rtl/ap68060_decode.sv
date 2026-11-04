@@ -227,9 +227,9 @@ endfunction
 
 // the 68060's control registers: SFC DFC CACR TC ITT0 ITT1 DTT0 DTT1 BUSCR
 // ($000-$008), USP VBR ($800 $801), URP SRP PCR ($806-$808)
+// the 68030's control registers: SFC, DFC, CACR, USP, VBR, CAAR, MSP, ISP
 function automatic logic movec_ok(input logic [11:0] r);
-	movec_ok = (r <= 12'h008) || (r == 12'h800) || (r == 12'h801) ||
-	           (r == 12'h806) || (r == 12'h807) || (r == 12'h808);
+	movec_ok = (r <= 12'h002) || (r >= 12'h800 && r <= 12'h804);
 endfunction
 
 function automatic logic has_ext(input logic [3:0] i);
@@ -605,28 +605,20 @@ always_comb begin
 		end
 
 		if (pd0.legal) begin
-			// (68060, WinUAE's order: a control register number the 68060
-			// does not have is an illegal instruction in either mode, and
-			// LPSTOP checks its extension word before the privilege)
+			// (WinUAE's order: a control register number the 68030 does not
+			// have is an illegal instruction in either mode; a STOP whose
+			// new SR leaves supervisor mode stops in user mode, 68020-68040)
 			if ((a0.rt == UA_MOVEC_RD || a0.rt == UA_MOVEC_WR) && !movec_ok(win[1][11:0]))
 				nrec.exc = 8'd4;
-			else if (a0.rt == UA_LPSTOP && win[1] != 16'h01C0)
+			// the MMU instructions: F-line until the PMMU is in (phase 4)
+			else if (a0.rt == UA_PMMU)
 				nrec.exc = 8'd11;
 			else if (a0.priv && !smode)
-				nrec.exc = 8'd8;
-			// STOP and LPSTOP whose new SR leaves supervisor mode: privilege
-			// violation at once (the 68060)
-			else if ((opw == 16'h4E72 || a0.rt == UA_LPSTOP) && !nrec.imm[13])
 				nrec.exc = 8'd8;
 			else if (a0.rt == UA_TRAP)
 				nrec.exc = 8'd32 + {4'd0, opw[3:0]};
 			else if (a0.rt == UA_ILLEGAL)
 				nrec.exc = 8'd4;
-			// unimplemented integer instructions: MOVEP, CHK2/CMP2, CAS2, and
-			// MULx.L / DIVx.L with a 64-bit product or dividend (ext bit 10)
-			else if (a0.rt == UA_UNIMPL ||
-			         ((opw[15:7] == 9'b0100_1100_0) && win[1][10]))
-				nrec.exc = 8'd61;
 		end
 		if (flt) nrec.exc = f_code;
 		if (nrec.exc != 8'd0) begin
