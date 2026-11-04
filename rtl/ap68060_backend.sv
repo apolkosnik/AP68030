@@ -62,6 +62,8 @@ module ap68060_backend
 	output logic [31:0] cacr,
 	output logic [31:0] caar,
 	output logic  [3:0] cclr30,         // pulse: a MOVEC to CACR with CD, CED, CI, CEI
+	output logic        nmi_rt,         // a level 7 interrupt's routine runs ...
+	output logic [31:0] nmi_va,         // ... its autovector's address
 	output logic        bc_clr,         // MOVEC to CACR with CABC or CUBC: clear the branch cache
 	output logic        bk_ov,          // pulse: the BKPT at bk_pc is replaced by the opcode bk_w (68030)
 	output logic [31:0] bk_pc,
@@ -1458,6 +1460,9 @@ logic [31:0] stop_pc;         // the instruction after STOP
 logic        rst_issued;      // RESET instruction: RSTO requested
 logic        wb_stv;          // WB: a store, and no exception
 logic        xstk;            // an exception routine runs (entry to its last uop)
+// (the system option nmi_vec_nocache: that vector is read past the cache)
+assign nmi_rt = xstk && (exc_kind == EK_IRQ || exc_kind == EK_IRQM) && irq_lvl_r == 3'd7;
+assign nmi_va = vbr_r + 32'h0000_007C;
 logic        xr_dbl;          // ... and it is an access error's, an address
                               // error's or reset's (a fault in it: halt)
 logic        x_first;         // the routine is done, its handler's first

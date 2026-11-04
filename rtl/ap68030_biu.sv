@@ -93,6 +93,8 @@ module ap68030_biu
 	input  logic  [7:2]       caar_idx,
 	input  logic              snoop_we,
 	input  logic [31:0]       snoop_addr,
+	input  logic              nc_v,          // a read of nc_a goes past the data cache
+	input  logic [31:0]       nc_a,          // (the level 7 autovector, nmi_vec_nocache)
 	output logic              rsto_busy,
 	output logic              rsto_n,
 	// the MC68030 pins
@@ -213,7 +215,8 @@ always_comb begin
 end
 busreq_t     rs;
 assign rs = breq[csel];
-wire         rs_d   = (csel == '0) && (rs.tt != TT_ACK) && (rs.tm != 3'd7) && (rs.siz != SIZ_LINE);
+wire         rs_d   = (csel == '0) && (rs.tt != TT_ACK) && (rs.tm != 3'd7) && (rs.siz != SIZ_LINE) &&
+                      !(nc_v && rs.rd && rs.addr == nc_a);
 wire         rs_i   = (csel != '0) && (rs.siz != SIZ_LINE);
 wire         ic_on  = cacr30[0], ic_fok = cacr30[0] && !cacr30[1];
 wire         dc_on  = cacr30[8], dc_fok = cacr30[8] && !cacr30[9];
@@ -221,6 +224,7 @@ logic        ic_tag_hit, ic_hit, ic_empty, dc_tag_hit, dc_hit, dc_empty;
 logic [31:0] ic_q, dc_q;
 logic        cfill_d, cfill_i;     // the transaction's fill strobes go to that cache
 logic        hit_i;                // S_HIT: from the instruction cache
+logic        dc_iline, ic_iline;   // a burst's first cycle ended in a bus error: the line invalid
 // a read hit (a locked read never: it is always a bus cycle)
 wire         c_dhit = C030 && rs_d && rs.rd && !rs.lock && dc_on && dc_hit;
 wire         c_ihit = C030 && rs_i && rs.rd && ic_on && ic_hit;
@@ -229,30 +233,36 @@ wire  [3:0]  rs_be  = (rs.siz == SIZ_B) ? (4'b1000 >> rs.addr[1:0]) :
                       (rs.siz == SIZ_W) ? (rs.addr[1] ? 4'b0011 : 4'b1100) : 4'b1111;
 // a new transaction starts this clock (C030: once the bus is idle -- a
 // burst's fill strobes still belong to the last one)
+// (and not in a fill strobe's clock: the cache's one tag comparator is the
+// fill's then)
 wire         c_go   = (st == S_IDLE) && !sn_busy && !rsto_busy && !rsto_req && !halt && (|req) &&
-                      (!C030 || b_idle);
+                      (!C030 || (b_idle && !b_fill));
 wire         c_wr   = C030 && c_go && rs_d && !rs.rd && !sub_hit(rs, sub_v && !sub_arm, sub_ar);
 
 wire         fill_d = C030 && b_fill && cfill_d;
 wire         fill_i = C030 && b_fill && cfill_i;
 ap030_cache #(.FC_BITS(1)) icache (
-	.clk(clk), .rst(!nreset),
+	.clk(clk), .ce(1'b1), .rst(!nreset),
 	.lk_la(rs.addr), .lk_fc(rs.tm), .lk_tag_hit(ic_tag_hit), .lk_hit(ic_hit),
 	.lk_line_empty(ic_empty), .lk_data(ic_q),
 	.fi_we(fill_i), .fi_addr({q.addr[31:4], b_fill_addr[3:2]}), .fi_fc(q.tm), .fi_data(b_fill_data),
 	.wr_we(1'b0), .wr_la(32'd0), .wr_fc(3'd0), .wr_be(4'd0), .wr_data(32'd0),
 	.wr_wa(1'b0), .wr_allow_fill(1'b0),
-	.inv_we(1'b0), .inv_la(32'd0), .snp_we(1'b0), .snp_la(32'd0),
+	.inv_we(1'b0), .inv_la(32'd0), .inv_line(ic_iline), .inv_line_idx(q.addr[7:4]),
+	.snp_we(1'b0), .snp_la(32'd0), .fw_start(1'b0), .fw_line(4'd0),
 	.clr_all(cclr[1]), .clr_entry(cclr[0]), .clr_index(caar_idx)
 );
 ap030_cache #(.FC_BITS(3)) dcache (
-	.clk(clk), .rst(!nreset),
+	.clk(clk), .ce(1'b1), .rst(!nreset),
 	.lk_la(rs.addr), .lk_fc(rs.tm), .lk_tag_hit(dc_tag_hit), .lk_hit(dc_hit),
 	.lk_line_empty(dc_empty), .lk_data(dc_q),
 	.fi_we(fill_d), .fi_addr({q.addr[31:4], b_fill_addr[3:2]}), .fi_fc(q.tm), .fi_data(b_fill_data),
 	.wr_we(c_wr), .wr_la(rs.addr), .wr_fc(rs.tm), .wr_be(rs_be), .wr_data(wdata[csel][31:0]),
 	.wr_wa(cacr30[13]), .wr_allow_fill(dc_fok),
-	.inv_we(1'b0), .inv_la(32'd0), .snp_we(snoop_we), .snp_la(snoop_addr),
+	.inv_we(1'b0), .inv_la(32'd0), .inv_line(dc_iline), .inv_line_idx(q.addr[7:4]),
+	// (a snoop between the bus read and its fills clears them again)
+	.snp_we(snoop_we), .snp_la(snoop_addr),
+	.fw_start(C030 && b_req && b_ack && cfill_d), .fw_line(q.addr[7:4]),
 	.clr_all(cclr[3]), .clr_entry(cclr[2]), .clr_index(caar_idx)
 );
 
@@ -282,6 +292,7 @@ assign rsto_busy = !rsto_n || rsto_pend;
 always_ff @(posedge clk) begin
 	gnt <= '0; done <= '0; err <= '0;
 	rvalid <= 1'b0; ravec <= 1'b0; rtci <= 1'b0;
+	dc_iline <= 1'b0; ic_iline <= 1'b0;
 	if (!nreset) begin
 		st <= S_IDLE; cl <= '0; q <= '0; qw <= '0; got <= '0; k <= '0; nth <= '0;
 		first <= 1'b0; lk_open <= 1'b0; tci <= 1'b0;
@@ -289,6 +300,7 @@ always_ff @(posedge clk) begin
 		rsto_n <= 1'b1; rsto_cnt <= '0; rsto_pend <= 1'b0;
 		sub_v <= 1'b0; sub_ar <= '0; sub_lanes <= '0;
 		cfill_d <= 1'b0; cfill_i <= 1'b0; q_cache <= 1'b0; q_cbreq <= 1'b0; hit_i <= 1'b0;
+		dc_iline <= 1'b0; ic_iline <= 1'b0;
 	end
 	else begin
 		// RESET instruction: RSTO once nothing is in progress
@@ -352,6 +364,10 @@ always_ff @(posedge clk) begin
 			if (b_done) begin
 				if (b_berr) begin
 					err[cl] <= 1'b1; errbeat <= nth;
+					// (C030, UM 6.1.3.2, 7.5.1: on the first cycle of a burst
+					// the whole line is left invalid)
+					if (q_cbreq && cfill_d) dc_iline <= 1'b1;
+					if (q_cbreq && cfill_i) ic_iline <= 1'b1;
 					if (q.lock) lk_open <= 1'b0;
 					st <= S_IDLE;
 				end

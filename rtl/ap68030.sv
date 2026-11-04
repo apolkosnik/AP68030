@@ -217,6 +217,8 @@ logic        ucond_v, ucond;
 logic [15:0] sr;
 logic [31:0] vbr, cacr, caar;
 logic  [3:0] cclr30;
+logic        nmi_rt;
+logic [31:0] nmi_va;
 logic        bk_ov;
 logic [31:0] bk_pc;
 logic [15:0] bk_w;
@@ -275,7 +277,7 @@ ap68060_backend #(.FPU_PIPE(FPU_PIPE), .EARLY_RES(EARLY_RES), .SKID(SKID),
 	.ras_rv(ras_rv), .ras_rtp(ras_rtp), .ras_rn(ras_rn),
 	.exc_go(exc_go), .exc_kind(exc_kind), .exc_ssp(exc_ssp),
 	.ucond_v(ucond_v), .ucond(ucond),
-	.sr(sr), .vbr(vbr), .cacr(cacr), .caar(caar), .cclr30(cclr30), .bc_clr(bc_clr), .bk_ov(bk_ov), .bk_pc(bk_pc), .bk_w(bk_w), .sfc(sfc), .dfc(dfc),
+	.sr(sr), .vbr(vbr), .cacr(cacr), .caar(caar), .cclr30(cclr30), .nmi_rt(nmi_rt), .nmi_va(nmi_va), .bc_clr(bc_clr), .bk_ov(bk_ov), .bk_pc(bk_pc), .bk_w(bk_w), .sfc(sfc), .dfc(dfc),
 	.dm_req(dm_req), .dm_va(dm_va), .dm_mem(dm_mem), .dm_msz(dm_msz),
 	.dm_fc(dm_fc), .dm_lock(dm_lock), .dm_locke(dm_locke), .dm_super(dm_super), .dm_noalloc(dm_noalloc), .dm_ack(dm_ack), .dm_older(dm_older),
 	.bht_we(bht_we), .bht_wa(bht_wa), .bht_dis(bht_dis),
@@ -457,6 +459,7 @@ ap68030_biu #(.NC(NC), .C030(CACHE030)) biu (
 	.rsto_req(rsto_req), .rsto_busy(rsto_busy), .rsto_n(rsto_n),
 	.sub_arm(sub_arm), .sub_clr(sub_clr), .sub_a(sub_a), .sub_d(sub_d), .sub_sz(sub_sz),
 	.cacr30(cacr), .cclr(cclr30), .caar_idx(caar[7:2]), .snoop_we(snoop_we), .snoop_addr(snoop_addr),
+	.nc_v(nmi_rt && nmi_vec_nocache), .nc_a(nmi_va),
 	.a_o(a), .fc_o(fc), .siz_o(siz), .rw_o(rw), .rmc_n_o(rmc_n),
 	.as_n_o(as_n), .ds_n_o(ds_n), .dben_n_o(dben_n), .ecs_n_o(ecs_n), .ocs_n_o(ocs_n),
 	.ciout_n_o(ciout_n), .cbreq_n_o(cbreq_n), .bus_oe(bus_oe),
