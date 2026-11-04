@@ -28,7 +28,8 @@ module ap68060_backend
 	parameter bit         FPU_PIPE  = 1,
 	parameter bit         EARLY_RES = 1,
 	parameter bit         SKID      = 1,      // the skid register in front of AG
-	parameter logic [7:0] PCR_REV   = 8'h06       // PCR revision number (bits 15-8)
+	parameter logic [7:0] PCR_REV   = 8'h06,      // PCR revision number (bits 15-8)
+	parameter bit         CPIF      = 0           // the coprocessor interface (no on-chip FPU)
 )(
 	input  logic        clk,
 	input  logic        nreset,
@@ -79,6 +80,15 @@ module ap68060_backend
 	input  logic [31:0] mm_desc,
 	input  logic [31:0] mmu_tc, mmu_srp_hi, mmu_srp_lo, mmu_crp_hi, mmu_crp_lo, mmu_tt0, mmu_tt1,
 	input  logic [15:0] mmu_sr,
+	// the coprocessor interface's bus requester (CPIF)
+	output logic        cp_req,
+	output busreq_t     cp_breq,
+	output logic [127:0] cp_wdata,
+	input  logic        cp_gnt,
+	input  logic        cp_done,
+	input  logic        cp_err,
+	input  logic        cp_rvalid,
+	input  logic [31:0] cp_rdata,
 	output logic        nmi_rt,         // a level 7 interrupt's routine runs ...
 	output logic [31:0] nmi_va,         // ... its autovector's address
 	output logic        bc_clr,         // MOVEC to CACR with CABC or CUBC: clear the branch cache
@@ -212,6 +222,8 @@ localparam logic [3:0] EK_RESET = 4'd4;   // reset: SSP/PC from 0/4
 localparam logic [3:0] EK_IRQM  = 4'd5;   // interrupt with M set: format $0 on the MSP, throwaway $1 on the ISP
 localparam logic [3:0] EK_FMTA  = 4'd6;   // format $A: short bus cycle fault
 localparam logic [3:0] EK_FMTB  = 4'd7;   // format $B: long bus cycle fault, address error
+localparam logic [3:0] EK_FMT9  = 4'd8;   // format $9: coprocessor mid-instruction
+localparam logic [3:0] EK_IRQ9  = 4'd9;   // an interrupt in a coprocessor dialogue ($9)
 
 //--------------------------------------------------------------------------
 // pipeline registers
@@ -445,7 +457,15 @@ wire [31:0] dc2_capv = dc2_u.a_sxw ? {{16{dm_ldata_al[15]}}, dm_ldata_al[15:0]} 
 assign ag_hold = ag_interlock;
 
 ap68060_rf #(.NR(5)) rff (.clk(clk), .we(fwe), .wa(fwa), .wd(fwd), .ra(rra), .rd(frd));
-ap68060_rf #(.NR(5), .NW(2)) rfb (.clk(clk), .we(bwe), .wa(bwa), .wd(bwd), .ra(rra), .rd(brd));
+// (a sixth read port: the coprocessor interface's)
+logic  [4:0] rra_b [6];
+logic [31:0] brd_b [6];
+logic  [4:0] cp_rra;
+always_comb begin
+	for (int i = 0; i < 5; i++) begin rra_b[i] = rra[i]; brd[i] = brd_b[i]; end
+	rra_b[5] = cp_rra;
+end
+ap68060_rf #(.NR(6), .NW(2)) rfb (.clk(clk), .we(bwe), .wa(bwa), .wd(bwd), .ra(rra_b), .rd(brd_b));
 // AG's base and index are read as the uop enters AG (ports 0/1 address
 // the incoming uop) and kept in registers, so AG's address adders, and the
 // data cache's set index after them, start from flip-flops
@@ -1229,7 +1249,9 @@ always_comb begin
 			else case (ex_av[15:12])
 				4'h0, 4'h1: xs.res = 32'd8;
 				4'h2:       xs.res = 32'd12;
-				4'h9:       xs.res = 32'd20;
+				// (CPIF: a $9 frame's plain RTE runs again as RTE_CP9, which
+				// resumes the coprocessor dialogue)
+				4'h9:       xs.res = (CPIF && !ex_u.cond[1]) ? 32'd0 : 32'd20;
 				// $A/$B: the plain RTE (cond 0) leaves the frame in place
 				// and runs again as the frame's routine (rte_bx, rte_alt)
 				4'hA:       xs.res = (ex_u.cond[1]) ? 32'd32 : 32'd0;
@@ -1609,6 +1631,10 @@ always_comb begin
 		bwa[1] = wb_u.upd2_reg; bwd[1] = wb_upd2_val;
 	end
 	bwe[2] = 1'b0; bwa[2] = '0; bwd[2] = '0;
+	// (the coprocessor interface writes a register while its uop waits at WB)
+	if (cp_rwe) begin
+		bwe[1] = 1'b1; bwa[1] = cp_rwa; bwd[1] = cp_rwd;
+	end
 	case (xw_ph)
 		3'd1: begin
 			bwe = 3'b011;
@@ -1650,6 +1676,21 @@ logic mt_seen;                // the DMU finished this WB uop's maintenance
 // address or the register's (second) long word, B the extension word, the
 // latch the first long word or the Dn of the FC field
 wire  wb_mm      = (wb_u.op == OP_MISC) && (wb_u.cond == 4'd14);
+// the coprocessor interface's instruction at WB (MISC 15): the engine runs
+// it (start: the operation word; resume: a $9 frame's state from RTE)
+wire  wb_cpi     = CPIF && (wb_u.op == OP_MISC) && (wb_u.cond == 4'd15);
+logic cp_iss, cp_seen, cp_busy, cp_fin, cp_srwe, cp_xreq, cp_xirq, cp_rwe, cp_cwe;
+logic [31:0] cp_npc, cp_xpc, cp_xia, cp_xint, cp_xea, cp_xfslw, cp_rwd, cp_cwv;
+logic [15:0] cp_srwv;
+logic  [7:0] cp_xvec, cp_cwsel;
+logic  [3:0] cp_xfmt;
+logic  [4:0] cp_rwa;
+logic        cpr_res;                // MISC 15 in EX: a resume
+logic [31:0] cpr_a, cpr_b, cpr_ia, cpr_pc, ex_l1, ex_l2;
+logic [15:0] cpr_sr;
+logic        cp9_v;                  // an interrupt let in by the dialogue: format $9
+logic [31:0] cp9_ia, cp9_int, cp9_ea, wb_exc_ea;
+wire  cp_go      = wb_v && wb_cpi && !wb_is_exc && !cp_iss && !cp_seen && sb_empty && !cp_busy;
 logic mm_seen, mm_iss;
 logic [31:0] mx_lo, mx_hi;
 logic [15:0] mx_ext;
@@ -1681,7 +1722,7 @@ wire sb_wait = !sb_empty && (wb_is_exc || wb_u.ser || (wb_u.last && (irq_pend ||
 assign wb_hold = wb_v && (halted || (!wb_is_exc &&
                  ((wb_st && !dm_st_rdy) || (wb_st && dm_st_fault) ||
                   (wb_reset && (!rst_issued || rsto_busy)) ||
-                  (wb_mt && !mt_seen) || (wb_mm && !mm_seen))) || sb_wait);
+                  (wb_mt && !mt_seen) || (wb_mm && !mm_seen) || (wb_cpi && !cp_seen))) || sb_wait);
 
 assign mt_v      = wb_v && wb_mt && !wb_is_exc && !mt_seen;
 assign mt_op     = wb_cclr ? 3'd1 :
@@ -1750,6 +1791,8 @@ always_comb begin
 	else if (take_irq) begin
 		x_vec  = 8'd24 + {5'd0, irq_lvl};   // replaced by the IACK result
 		x_pc   = (stopped && !wb_v) ? stop_pc : wb_next;
+		// (an interrupt the coprocessor dialogue let in: its $9 frame's words)
+		if (cp9_v) begin x_addr = cp9_ia; x_dob = cp9_int; end
 	end
 	else begin
 		// trace: format $2, PC = where execution continues, address = the
@@ -1764,7 +1807,8 @@ always_comb begin
 	x_fmt  = (x_vec == 8'd2 || x_vec == 8'd3) ? 4'hB :
 	         (x_vec == 8'd5 || x_vec == 8'd6 || x_vec == 8'd7 || x_vec == 8'd9) ? 4'h2 : 4'h0;
 	if (adv_wb && wb_is_exc && wb_exc_fmtv) x_fmt = wb_exc_fmt;
-	x_kind = take_irq && !(adv_wb && wb_is_exc) ? (cur[12] ? EK_IRQM : EK_IRQ) :
+	x_kind = take_irq && !(adv_wb && wb_is_exc) ? (cp9_v ? EK_IRQ9 : cur[12] ? EK_IRQM : EK_IRQ) :
+	         (x_fmt == 4'h9) ? EK_FMT9 :
 	         (x_fmt == 4'hB) ? EK_FMTB : (x_fmt == 4'hA) ? EK_FMTA :
 	         (x_fmt == 4'h4) ? EK_FMT4 : (x_fmt == 4'h2 || x_fmt == 4'h3) ? EK_FMT2 : EK_FMT0;
 	// the special status word of a $A/$B frame (T13): an address error RC
@@ -1908,6 +1952,9 @@ always_ff @(posedge clk) begin
 		mt_seen <= 1'b0;
 		mm_seen <= 1'b0; mm_iss <= 1'b0;
 		mx_lo <= '0; mx_hi <= '0; mx_ext <= '0;
+		cp_iss <= 1'b0; cp_seen <= 1'b0; cpr_res <= 1'b0; cpr_a <= '0; cpr_b <= '0; cpr_ia <= '0;
+		cpr_pc <= '0; cpr_sr <= '0; ex_l1 <= '0; ex_l2 <= '0;
+		cp9_v <= 1'b0; cp9_ia <= '0; cp9_int <= '0; cp9_ea <= '0; wb_exc_ea <= '0;
 		wb_cof  <= 1'b0;
 		halted  <= 1'b0;
 		rst_seq <= 1'b1;
@@ -2224,7 +2271,7 @@ always_ff @(posedge clk) begin
 		if (adv_ex && ex_u.op == OP_RTEF && !ex_u.cond[0]) begin
 			rte_fmt1 <= (ex_av[15:12] == 4'h1);
 			rte_bx   <= ex_u.cond[1] ? 2'd0 : (ex_av[15:12] == 4'hA) ? 2'd1 :
-			            (ex_av[15:12] == 4'hB) ? 2'd2 : 2'd0;
+			            (ex_av[15:12] == 4'hB) ? 2'd2 : (CPIF && ex_av[15:12] == 4'h9) ? 2'd3 : 2'd0;
 		end
 		// RTE of a $A/$B frame: its words (MISC 6: FA, SSW; 13: DIB; 7: DOB
 		// and the internal word, then the action at WB)
@@ -2233,6 +2280,12 @@ always_ff @(posedge clk) begin
 		end
 		if (adv_ex && ex_u.op == OP_MISC && ex_u.cond == 4'd13) begin
 			rb_dib <= ex_av; rb_baddr <= ex_bv;
+		end
+		if (adv_ex && ex_u.op == OP_LATCH) begin ex_l1 <= ex_latch; ex_l2 <= ex_l1; end
+		if (adv_ex && ex_u.op == OP_MISC && ex_u.cond == 4'd15) begin
+			cpr_res <= (ex_u.sz == SZ_L);
+			cpr_a   <= ex_av; cpr_b <= ex_bv;
+			cpr_ia  <= ex_latch; cpr_pc <= ex_l1; cpr_sr <= ex_l2[15:0];
 		end
 		if (adv_ex && ex_u.op == OP_MISC && ex_u.cond == 4'd14) begin
 			mx_lo <= ex_av; mx_ext <= ex_bv[15:0]; mx_hi <= ex_latch;
@@ -2382,7 +2435,9 @@ always_ff @(posedge clk) begin
 			xw_ph    <= 3'd1;          // T8-T13, T6-T7 first, then exc_go
 			xi_dob   <= x_dob;
 			xi_int   <= x_int;
-			xi_baddr <= wb_npc + 32'd2;
+			// (format $9: the evaluated EA there)
+			xi_baddr <= (x_kind == EK_IRQ9) ? cp9_ea : (x_kind == EK_FMT9) ? wb_exc_ea : (wb_npc + 32'd2);
+			cp9_v    <= 1'b0;
 			rte_alt  <= 2'd0;
 			// a new bus fault frame: a completion the last RTE armed is void
 			if (x_kind == EK_FMTA || x_kind == EK_FMTB) sub_clr <= 1'b1;
@@ -2496,6 +2551,61 @@ always_ff @(posedge clk) begin
 			end
 		end
 		if (adv_wb) begin mm_seen <= 1'b0; mm_iss <= 1'b0; end
+		// the coprocessor interface: started (a resume restores the frame's
+		// SR first), then done -- the next PC --, an exception, or an
+		// interrupt it lets in ($0: the instruction again; $9: suspended)
+		if (cp_go) begin
+			cp_iss <= 1'b1;
+			if (cpr_res) begin
+				sr_r   <= {cpr_sr[15:5] & SR_MASK[15:5], 5'd0};
+				ccr_b  <= cpr_sr[4:0];
+				ccr_f  <= cpr_sr[4:0];
+				wb_ccr <= cpr_sr[4:0];
+			end
+		end
+		if (cp_srwe) begin
+			sr_r   <= {cp_srwv[15:5] & SR_MASK[15:5], 5'd0};
+			ccr_b  <= cp_srwv[4:0];
+			ccr_f  <= cp_srwv[4:0];
+			wb_ccr <= cp_srwv[4:0];
+		end
+		if (cp_cwe) begin
+			case (cp_cwsel)
+				8'h00: sfc_r  <= cp_cwv[2:0];
+				8'h01: dfc_r  <= cp_cwv[2:0];
+				8'h02: begin cacr_r <= cp_cwv & 32'h0000_3313; cclr30 <= {cp_cwv[11], cp_cwv[10], cp_cwv[3], cp_cwv[2]}; end
+				8'h11: vbr_r  <= cp_cwv;
+				8'h12: caar_r <= cp_cwv;
+				default: ;
+			endcase
+		end
+		if (wb_v && wb_cpi && cp_fin) begin
+			cp_seen     <= 1'b1;
+			wb_redir_pc <= cp_npc;
+		end
+		if (wb_v && wb_cpi && cp_xirq) begin
+			cp_seen     <= 1'b1;
+			wb_redir_pc <= cp_xpc;
+			if (cp_xfmt == 4'h9) begin
+				cp9_v <= 1'b1; cp9_ia <= cp_xia; cp9_int <= cp_xint; cp9_ea <= cp_xea;
+			end
+		end
+		if (wb_v && wb_cpi && cp_xreq && wb_exc == 8'd0) begin
+			cp_seen     <= 1'b1;
+			wb_stv      <= 1'b0;
+			wb_ok       <= 1'b0;
+			wb_exc      <= cp_xvec;
+			wb_exc_fmtv <= 1'b1;
+			wb_exc_fmt  <= cp_xfmt;
+			wb_exc_pcv  <= 1'b1;
+			wb_exc_pc   <= cp_xpc;
+			wb_exc_addr <= cp_xia;
+			wb_exc_fslw <= cp_xfslw;
+			wb_exc_dob  <= cp_xint;
+			wb_exc_ea   <= cp_xea;
+			wb_exc_int  <= 3'd0;
+		end
+		if (adv_wb) begin cp_iss <= 1'b0; cp_seen <= 1'b0; end
 		// the locked sequence BUSCR opened ends with its LOCKE write
 		if (dm_lkend) bus_lkdone <= 1'b1;
 		if (adv_wb) mt_seen <= 1'b0;
@@ -2706,5 +2816,35 @@ always_ff @(posedge clk) begin
 		stale_b <= 1'b0; stale_x <= 1'b0;
 	end
 end
+
+
+//--------------------------------------------------------------------------
+// the coprocessor interface (CPIF: the build without the on-chip FPU)
+//--------------------------------------------------------------------------
+generate if (CPIF) begin : g_cpif
+	ap68030_cpif cpif (
+		.clk(clk), .nreset(nreset),
+		.start(cp_go && !cpr_res), .resume(cp_go && cpr_res),
+		.op(cpr_a[15:0]), .pc_i(cpr_res ? cpr_ia : wb_u.pc),
+		.rs_pc(cpr_pc), .rs_int(cpr_a), .rs_ea(cpr_b),
+		.sr(cp_go && cpr_res ? cpr_sr : {sr_r[15:5], wb_ccr}), .irq_pend(irq_pend),
+		.fin(cp_fin), .npc(cp_npc), .sr_we(cp_srwe), .sr_wv(cp_srwv),
+		.xreq(cp_xreq), .xirq(cp_xirq), .xvec(cp_xvec), .xfmt(cp_xfmt), .xpc(cp_xpc), .xia(cp_xia),
+		.xint(cp_xint), .xea(cp_xea), .xfslw(cp_xfslw), .busy(cp_busy),
+		.rra(cp_rra), .rrd(brd_b[5]), .rwe(cp_rwe), .rwa(cp_rwa), .rwd(cp_rwd),
+		.c_sfc(sfc_r), .c_dfc(dfc_r), .c_cacr(cacr_r), .c_vbr(vbr_r), .c_caar(caar_r),
+		.cw_we(cp_cwe), .cw_sel(cp_cwsel), .cw_val(cp_cwv),
+		.b_req(cp_req), .b_breq(cp_breq), .b_wdata(cp_wdata), .b_gnt(cp_gnt), .b_done(cp_done),
+		.b_err(cp_err), .b_rvalid(cp_rvalid), .b_rdata(cp_rdata)
+	);
+end
+else begin : g_nocpif
+	assign cp_fin = 1'b0; assign cp_npc = '0; assign cp_srwe = 1'b0; assign cp_srwv = '0;
+	assign cp_xreq = 1'b0; assign cp_xirq = 1'b0; assign cp_xvec = '0; assign cp_xfmt = '0;
+	assign cp_xpc = '0; assign cp_xia = '0; assign cp_xint = '0; assign cp_xea = '0; assign cp_xfslw = '0;
+	assign cp_busy = 1'b0; assign cp_rra = '0; assign cp_rwe = 1'b0; assign cp_rwa = '0; assign cp_rwd = '0;
+	assign cp_cwe = 1'b0; assign cp_cwsel = '0; assign cp_cwv = '0;
+	assign cp_req = 1'b0; assign cp_breq = '0; assign cp_wdata = '0;
+end endgenerate
 
 endmodule

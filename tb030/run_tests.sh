@@ -53,7 +53,7 @@ verilator --binary --timing -j 16 --build-jobs 16 -O3 \
 	-I"$RTL" -I"$RTL/fpu" -CFLAGS "-O2 -march=native" \
 	"-GFAST_PORT=${FAST_PORT:-0}" "-GCACHE030=${CACHE030:-1}" \
 	$RTL/ap68060_pkg.sv $RTL/gen/ap68060_upkg.sv $RTL/ap68060_alu.sv $RTL/ap68060_alu_slow.sv $RTL/ap68060_muldiv.sv \
-	$RTL/ap030_bus.v $RTL/ap030_cache.v $RTL/ap030_mmu.v $RTL/ap68030_biu.sv $RTL/ap68060_ram.sv $RTL/ap68060_atc.sv $RTL/ap68060_dmu.sv \
+	$RTL/ap030_bus.v $RTL/ap030_cache.v $RTL/ap030_mmu.v $RTL/ap68030_biu.sv $RTL/ap68030_cpif.sv $RTL/ap68060_ram.sv $RTL/ap68060_atc.sv $RTL/ap68060_dmu.sv \
 	$RTL/ap68060_predec.sv $RTL/ap68060_fetch.sv \
 	$RTL/ap68060_decode.sv $RTL/ap68060_useq.sv $RTL/fpu/ap040_fpu.v $RTL/ap68060_fpif.sv $RTL/ap68060_backend.sv \
 	$RTL/ap68060_snoop.sv $RTL/ap68030.sv \

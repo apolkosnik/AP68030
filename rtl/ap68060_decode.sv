@@ -25,7 +25,8 @@
 module ap68060_decode
 	import ap68060_pkg::*, ap68060_upkg::*;
 #(
-	parameter bit LOOP_PRED = 1          // the loop exit predictor
+	parameter bit LOOP_PRED = 1,         // the loop exit predictor
+	parameter bit CPIF      = 0          // F-line CpID 1-7: the coprocessor interface (no FPU)
 )
 (
 	input  logic        clk,
@@ -260,6 +261,8 @@ always_ff @(posedge clk)
 	end
 // synthesis translate_on
 wire [15:0] opw = win[0];
+// (CPIF) an F-line with CpID 1-7: the coprocessor interface's instruction
+wire        cpop = CPIF && (opw[15:12] == 4'hF) && (opw[11:9] != 3'd0);
 
 //--------------------------------------------------------------------------
 // state
@@ -329,7 +332,7 @@ logic        part_call, part_ret, part_fpg;
 wire         rcall = (ph == PH_IDLE) ? (a0.rt == UA_BSR || a0.rt == UA_JSR) : part_call;
 wire         rret  = (ph == PH_IDLE) ? (a0.rt == UA_RTS) : part_ret;
 // an FPU general instruction (the decoder's entry FPU_GEN)
-wire         fpg   = (ph == PH_IDLE) ? (a0.rt == UA_FPU_GEN) : part_fpg;
+wire         fpg   = (ph == PH_IDLE) ? (a0.rt == UA_FPU_GEN && !cpop) : part_fpg;
 // its straight-line routine for the common forms (FPU_GEN's paths without
 // their jump words), else the record's own
 function automatic logic [9:0] fpu_k(input logic [15:0] x, input logic [3:0] m,
@@ -541,7 +544,14 @@ always_comb begin
 		nrec.ea0 = '0; nrec.ea0.m = EM_NONE;
 		nrec.ea1 = '0; nrec.ea1.m = EM_NONE;
 
-		if (!pd0.legal) begin
+		if (cpop) begin
+			// the coprocessor interface: the operation word alone; the
+			// engine reads the rest of the instruction itself
+			use_n    = 4'd1;
+			go       = 1'b1;
+			flt      = win_flt[0];
+		end
+		else if (!pd0.legal) begin
 			// illegal / unimplemented operation word
 			use_n    = 4'd1;
 			go       = 1'b1;
@@ -669,11 +679,31 @@ always_comb begin
 				else    nrec.exc = 8'd11;
 			end
 			else if (a0.rt == UA_RTE && rte_alt != 2'd0)
-				nrec.rt = rte_alt[1] ? UA_RTE_BUSB : UA_RTE_BUSA;
+				nrec.rt = (rte_alt == 2'd3) ? UA_RTE_CP9 : rte_alt[1] ? UA_RTE_BUSB : UA_RTE_BUSA;
 			else if (a0.rt == UA_TRAP)
 				nrec.exc = 8'd32 + {4'd0, opw[3:0]};
 			else if (a0.rt == UA_ILLEGAL)
 				nrec.exc = 8'd4;
+		end
+		// the coprocessor interface's instructions (UM 10.2; AP68030's
+		// dispatch): cpGEN, cpScc/cpDBcc/cpTRAPcc (opmodes 101-111 F-line),
+		// cpBcc, cpSAVE (-(An) or control alterable) and cpRESTORE ((An)+ or
+		// control), privileged; the rest of CpID 1-7 F-line
+		if (cpop) begin
+			logic [2:0] m, r;
+			logic       ca, cc;
+			m  = opw[5:3]; r = opw[2:0];
+			ca = (m == 3'd2) || (m == 3'd5) || (m == 3'd6) || (m == 3'd7 && r[2:1] == 2'b00);
+			cc = ca || (m == 3'd7 && (r == 3'd2 || r == 3'd3));
+			nrec.exc = 8'd0;
+			nrec.rt  = UA_CPI;
+			case (opw[8:6])
+				3'b001: if (m == 3'd7 && r > 3'd4) nrec.exc = 8'd11;
+				3'b100: if (!(ca || m == 3'd4)) nrec.exc = 8'd11; else if (!smode) nrec.exc = 8'd8;
+				3'b101: if (!(cc || m == 3'd3)) nrec.exc = 8'd11; else if (!smode) nrec.exc = 8'd8;
+				3'b110, 3'b111: nrec.exc = 8'd11;
+				default: ;
+			endcase
 		end
 		// (a privileged instruction in user mode is identified from its
 		// operation word: a fault on a later word of it is not taken, UM

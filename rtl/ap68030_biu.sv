@@ -251,9 +251,11 @@ always_comb begin
 end
 busreq_t     rs;
 assign rs = breq[csel];
-wire         rs_d   = (csel == '0) && (rs.tt != TT_ACK) && (rs.tm != 3'd7) && (rs.siz != SIZ_LINE) &&
+// (the data cache: client 0, the DMU, and client 2, the coprocessor
+// interface's operands; the instruction cache: client 1, the fetch)
+wire         rs_d   = (csel != 1) && (rs.tt != TT_ACK) && (rs.tm != 3'd7) && (rs.siz != SIZ_LINE) &&
                       !(nc_v && rs.rd && rs.addr == nc_a);
-wire         rs_i   = (csel != '0) && (rs.siz != SIZ_LINE);
+wire         rs_i   = (csel == 1) && (rs.siz != SIZ_LINE);
 //--------------------------------------------------------------------------
 // the PMMU: every transfer outside CPU space is translated as it starts
 // (logical address and function code; the caches are logical); a walk

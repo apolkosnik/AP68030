@@ -466,6 +466,26 @@ R('RTE_BUSB',
   U(op='MOV', sz='L', msz='L', a='LD', d='T2', ag='BASED', agb='SP', const=2, mfc='SUP'),
   U(ag='ADDT0', agb='SP', agw='SP'),
   U(op='RTE', sz='W', a='T1', b='T2', last=1))
+# RTE of a $9 frame (the coprocessor interface): the dialogue resumes.  The
+# frame's SR, PC, instruction address through the latch chain, its state
+# word and EA in MISC 15 (long: a resume); the engine restores SR first
+R('RTE_CP9',
+  U(op='MOV', sz='W', msz='W', a='LD', d='T3', ag='BASED', agb='SP', const=6, mfc='SUP'),
+  U(op='RTEF', cond=2, sz='W', a='T3', d='T0'),
+  U(op='MOV', sz='W', msz='W', a='LD', d='T1', ag='BASED', agb='SP', const=0, mfc='SUP'),
+  U(op='MOV', sz='L', msz='L', a='LD', d='T2', ag='BASED', agb='SP', const=2, mfc='SUP'),
+  U(op='MOV', sz='L', msz='L', a='LD', d='T3', ag='BASED', agb='SP', const=8, mfc='SUP'),
+  U(op='MOV', sz='L', msz='L', a='LD', d='T4', ag='BASED', agb='SP', const=12, mfc='SUP'),
+  U(op='MOV', sz='L', msz='L', a='LD', d='T5', ag='BASED', agb='SP', const=16, mfc='SUP'),
+  U(ag='ADDT0', agb='SP', agw='SP'),
+  U(op='LATCH', sz='L', a='T1'),
+  U(op='LATCH', sz='L', a='T2'),
+  U(op='LATCH', sz='L', a='T3'),
+  U(op='MISC', cond=15, sz='L', a='T4', b='T5', ser=1, last=1))
+# the coprocessor interface (the build without the on-chip FPU): an F-line
+# with CpID 1-7 hands its operation word to the engine at WB (MISC 15,
+# word), which runs the instruction and ends it with the next PC
+R('CPI', U(op='MISC', cond=15, sz='W', a='OPW', ser=1, last=1))
 # RTR: CCR = (SP)+ word, PC = (SP)+ long
 R('RTR',
   U(op='MOV', sz='W', msz='W', a='LD', d='T1', ag='BASED', agb='SP', const=0),
@@ -855,6 +875,18 @@ R('EXC_FMTB',
   U(op='MOV', sz='W', a='T10', ag='BASEDU', agb='SSP', const=-92, msz='W', mem='ST', mfc='SUP'),
   U(op='MOV', sz='L', ag='BASED', agb='T8', const=0, msz='L', mem='LD', mfc='SUP',
     a='LD', br='A', cond=15, last=1))     # cond 15: the handler fetch
+# format $9 (coprocessor mid-instruction, 20 bytes; the coprocessor
+# interface's): +$08 the instruction address (T11), +$0C the protocol state
+# with the operation word (T6), +$10 the evaluated EA (T5)
+R('EXC_FMT9',
+  U(op='MOV', sz='L', a='T5',  ag='BASED', agb='SSP', const=-4, msz='L', mem='ST', mfc='SUP'),
+  U(op='MOV', sz='L', a='T6',  ag='BASED', agb='SSP', const=-8, msz='L', mem='ST', mfc='SUP'),
+  U(op='MOV', sz='L', a='T11', ag='BASED', agb='SSP', const=-12, msz='L', mem='ST', mfc='SUP'),
+  U(op='MOV', sz='W', a='T12', ag='BASED', agb='SSP', const=-14, msz='W', mem='ST', mfc='SUP'),
+  U(op='MOV', sz='L', a='T9',  ag='BASED', agb='SSP', const=-18, msz='L', mem='ST', mfc='SUP'),
+  U(op='MOV', sz='W', a='T10', ag='BASEDU', agb='SSP', const=-20, msz='W', mem='ST', mfc='SUP'),
+  U(op='MOV', sz='L', ag='BASED', agb='T8', const=0, msz='L', mem='LD', mfc='SUP',
+    a='LD', br='A', cond=15, last=1))     # cond 15: the handler fetch
 R('EXC_RESET',
   U(op='MOV', sz='L', ag='BASED', agb='ZERO', const=0, msz='L', mem='LD', mfc='SUP',
     a='LD', d='ISP'),
@@ -871,6 +903,21 @@ R('EXC_IRQ',
   U(op='MOV', sz='W', a='T12', ag='BASED', agb='ISP', const=-2, msz='W', mem='ST', mfc='SUP'),
   U(op='MOV', sz='L', a='T9',  ag='BASED', agb='ISP', const=-6, msz='L', mem='ST', mfc='SUP'),
   U(op='MOV', sz='W', a='T10', ag='BASEDU', agb='ISP', const=-8, msz='W', mem='ST', mfc='SUP'),
+  U(op='MOV', sz='L', ag='BASED', agb='T8', const=0, msz='L', mem='LD', mfc='SUP',
+    a='LD', br='A', cond=15, last=1))     # cond 15: the handler fetch
+# an interrupt the coprocessor dialogue let in (null, come again, IA): the
+# mid-instruction frame $9 on the interrupt stack (T11, T6, T5 as EXC_FMT9)
+R('EXC_IRQ9',
+  U(op='IACKV', cond=0, sz='L', msz='B', a='LD', d='T12', mem='LD', mfc='IACK',
+    ag='BASED', agb='ZERO', const=-1),
+  U(op='IACKV', cond=1, sz='L', d='T8'),
+  U(op='OR', sz='W', a='CONST', const=0x9000, b='T12', d='T12'),
+  U(op='MOV', sz='L', a='T5',  ag='BASED', agb='ISP', const=-4, msz='L', mem='ST', mfc='SUP'),
+  U(op='MOV', sz='L', a='T6',  ag='BASED', agb='ISP', const=-8, msz='L', mem='ST', mfc='SUP'),
+  U(op='MOV', sz='L', a='T11', ag='BASED', agb='ISP', const=-12, msz='L', mem='ST', mfc='SUP'),
+  U(op='MOV', sz='W', a='T12', ag='BASED', agb='ISP', const=-14, msz='W', mem='ST', mfc='SUP'),
+  U(op='MOV', sz='L', a='T9',  ag='BASED', agb='ISP', const=-18, msz='L', mem='ST', mfc='SUP'),
+  U(op='MOV', sz='W', a='T10', ag='BASEDU', agb='ISP', const=-20, msz='W', mem='ST', mfc='SUP'),
   U(op='MOV', sz='L', ag='BASED', agb='T8', const=0, msz='L', mem='LD', mfc='SUP',
     a='LD', br='A', cond=15, last=1))     # cond 15: the handler fetch
 # with M set (68020-68040): format $0 on the master stack, then a format $1
@@ -1003,7 +1050,7 @@ def emit():
         for n, i in JC.items():
             f.write('localparam logic [5:0] JC_%s = 6\'d%d;\n' % (n, i))
         for n in ['EXC_FMT0', 'EXC_FMT2', 'EXC_FMT4', 'EXC_FMTA', 'EXC_FMTB', 'EXC_RESET', 'EXC_IRQ', 'EXC_IRQM',
-                  'RTE', 'RTE_BUSA', 'RTE_BUSB',
+                  'RTE', 'RTE_BUSA', 'RTE_BUSB', 'RTE_CP9', 'CPI', 'EXC_FMT9', 'EXC_IRQ9',
                   'MMU_TO32', 'MMU_TO16', 'MMU_TO64', 'MMU_FRTC', 'MMU_FRTT0', 'MMU_FRTT1',
                   'MMU_FRSR', 'MMU_FRSRP', 'MMU_FRCRP', 'MMU_OPEA', 'MMU_OPN', 'MMU_PTA',
                   'DEC_EXC', 'UNIMPL', 'LPSTOP', 'PMMU', 'BCC', 'BSR', 'DBCC', 'FBCC', 'FDBCC', 'FPU_GEN',

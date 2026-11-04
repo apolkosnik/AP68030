@@ -29,6 +29,9 @@ module ap68030
 	// UM section 6, at the bus interface; the pipeline's caches off), 0 =
 	// the pipeline's 8 KB caches with the 68030's CACR
 	parameter bit         CACHE030     = 1,
+	// the FPU: 1 = the on-chip FPU, 0 = none: F-line instructions with
+	// CpID 1-7 run the coprocessor interface (UM section 10) on the bus
+	parameter bit         FPU          = 0,
 	parameter             USE_CE       = 0
 )(
 	input             clk,
@@ -150,7 +153,8 @@ end
 //--------------------------------------------------------------------------
 // BIU: client 0 data (DMU), client 1 instruction fetch
 //--------------------------------------------------------------------------
-localparam int NC = 2;
+// (client 2: the coprocessor interface, FPU = 0)
+localparam int NC = 3;
 logic [NC-1:0] b_req, b_gnt, b_done, b_err;
 logic          b_own;
 logic          sn_ovf, sn_busy, sn_act;
@@ -159,7 +163,7 @@ logic  [31:0]  sb_fslw;
 busreq_t       b_breq [NC];
 logic [127:0]  b_wdata [NC];
 logic          b_rvalid;
-logic          b_rclient;
+logic  [1:0]   b_rclient;
 logic [31:0]   b_rdata;
 logic  [1:0]   b_rbeat;
 logic          b_ravec, b_rtci;
@@ -276,7 +280,7 @@ wire [31:0] cacr6;
 assign cacr6 = {cacr[8] && !CACHE030, cacr[9], 1'b1, 5'd0, 1'b1, 7'd0, cacr[0] && !CACHE030, cacr[1], 14'd0};
 
 ap68060_backend #(.FPU_PIPE(FPU_PIPE), .EARLY_RES(EARLY_RES), .SKID(SKID),
-                  .PCR_REV(PCR_REV)) be (
+                  .PCR_REV(PCR_REV), .CPIF(!FPU)) be (
 	.clk(clk), .nreset(nreset),
 	.in_v(uq_n != 2'd0), .in_u(uq0), .in_rdy(uo_rdy),
 	.redir_v(redir_v), .redir_pc(redir_pc), .flush(flush), .fe_flush(fe_flush),
@@ -284,6 +288,8 @@ ap68060_backend #(.FPU_PIPE(FPU_PIPE), .EARLY_RES(EARLY_RES), .SKID(SKID),
 	.exc_go(exc_go), .exc_kind(exc_kind), .exc_ssp(exc_ssp),
 	.ucond_v(ucond_v), .ucond(ucond),
 	.sr(sr), .vbr(vbr), .cacr(cacr), .caar(caar), .cclr30(cclr30), .nmi_rt(nmi_rt), .nmi_va(nmi_va),
+	.cp_req(b_req[2]), .cp_breq(b_breq[2]), .cp_wdata(b_wdata[2]), .cp_gnt(b_gnt[2]),
+	.cp_done(b_done[2]), .cp_err(b_err[2]), .cp_rvalid(b_rvalid && b_rclient == 2'd2), .cp_rdata(b_rdata),
 	.mm_req(mm_req), .mm_reg(mm_reg), .mm_sel(mm_sel), .mm_fd(mm_fd), .mm_hi(mm_hi), .mm_lo(mm_lo),
 	.mm_kind(mm_kind), .mm_level(mm_level), .mm_fc(mm_fc), .mm_fcmask(mm_fcmask),
 	.mm_done(mm_done), .mm_cfgerr(mm_cfgerr), .mm_desc(mm_desc),
@@ -346,7 +352,7 @@ ap68060_dmu #(.DC1_ATC(DC1_ATC)) dmu (
 	.iatc_wfc2(iatc_wfc2), .iatc_went(iatc_went),
 	.bi_req(b_req[0]), .bi_breq(b_breq[0]), .bi_wdata(b_wdata[0]),
 	.bi_gnt(b_gnt[0]), .bi_done(b_done[0]), .bi_err(b_err[0]), .bi_drop(b_drop), .bi_more(b_more),
-	.bi_rvalid(b_rvalid && b_rclient == 1'b0), .b_rdata(b_rdata), .b_rbeat(b_rbeat),
+	.bi_rvalid(b_rvalid && b_rclient == 2'd0), .b_rdata(b_rdata), .b_rbeat(b_rbeat),
 	.sb_empty(sb_empty), .sb_err(sb_err), .sb_fslw(sb_fslw), .sb_err_ack(sb_err_ack),
 	.sb_fa(sb_fa), .sb_dob(sb_dob), .sb_fn(sb_fn), .sb_ffc(sb_ffc), .sb_wait(sb_wait), .bi_errm(b_errm), .sb_fm(sb_fm),
 	.rr_v(rr_v), .rr_pa(rr_pa), .rr_n(rr_n), .rr_wd(rr_wd), .rr_fc(rr_fc),
@@ -428,12 +434,12 @@ ap68060_fetch fetch (
 	.sn_ihit(sn_ihit),
 	.b_req(b_req[1]), .b_breq(b_breq[1]),
 	.b_gnt(b_gnt[1]), .b_done(b_done[1]), .b_err(b_err[1]),
-	.b_rvalid(b_rvalid && b_rclient == 1'b1), .b_rdata(b_rdata), .b_rbeat(b_rbeat),
+	.b_rvalid(b_rvalid && b_rclient == 2'd1), .b_rdata(b_rdata), .b_rbeat(b_rbeat),
 	.b_rtci(b_rtci)
 );
 assign b_wdata[1] = '0;
 
-ap68060_decode #(.LOOP_PRED(LOOP_PRED)) dec (
+ap68060_decode #(.LOOP_PRED(LOOP_PRED), .CPIF(!FPU)) dec (
 	.clk(clk), .nreset(nreset), .flush(fe_flush),
 	.ras_rv(ras_rv), .ras_rtp(ras_rtp), .ras_rn(ras_rn),
 	.win(win), .win_flt(win_flt), .win_fdem(win_fdem), .win_fatc(win_fatc),
@@ -462,7 +468,7 @@ ap68060_useq useq (
 //--------------------------------------------------------------------------
 ap68030_biu #(.NC(NC), .C030(CACHE030)) biu (
 	.clk(clk), .nreset(nreset),
-	.req(b_req & ~{be_fstop || rsto_busy, 1'b0}), .breq(b_breq), .wdata(b_wdata),
+	.req(b_req & ~{1'b0, be_fstop || rsto_busy, 1'b0}), .breq(b_breq), .wdata(b_wdata),
 	.gnt(b_gnt), .done(b_done), .err(b_err), .errm(b_errm),
 	.rvalid(b_rvalid), .rclient(b_rclient), .rdata(b_rdata), .rbeat(b_rbeat),
 	.ravec(b_ravec), .rtci(b_rtci), .errbeat(b_errbeat), .idle(b_idle), .own(b_own),
