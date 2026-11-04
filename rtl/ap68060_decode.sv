@@ -612,11 +612,12 @@ always_comb begin
 			// new SR leaves supervisor mode stops in user mode, 68020-68040)
 			if ((a0.rt == UA_MOVEC_RD || a0.rt == UA_MOVEC_WR) && !movec_ok(win[1][11:0]))
 				nrec.exc = 8'd4;
-			// the MMU instructions: F-line until the PMMU is in (phase 4)
-			else if (a0.rt == UA_PMMU)
-				nrec.exc = 8'd11;
+			// (the MMU instructions check the privilege first, UM 9.8; then
+			// F-line until the PMMU is in, phase 4)
 			else if (a0.priv && !smode)
 				nrec.exc = 8'd8;
+			else if (a0.rt == UA_PMMU)
+				nrec.exc = 8'd11;
 			else if (a0.rt == UA_RTE && rte_alt != 2'd0)
 				nrec.rt = rte_alt[1] ? UA_RTE_BUSB : UA_RTE_BUSA;
 			else if (a0.rt == UA_TRAP)
@@ -624,7 +625,10 @@ always_comb begin
 			else if (a0.rt == UA_ILLEGAL)
 				nrec.exc = 8'd4;
 		end
-		if (flt) nrec.exc = f_code;
+		// (a privileged instruction in user mode is identified from its
+		// operation word: a fault on a later word of it is not taken, UM
+		// 8.1.2, 8.1.6 -- it never uses that word)
+		if (flt && !(pd0.legal && a0.priv && !smode && !win_flt[0])) nrec.exc = f_code;
 		if (nrec.exc != 8'd0) begin
 			nrec.rt = UA_DEC_EXC;
 			if (go_part) begin
