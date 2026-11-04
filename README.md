@@ -27,7 +27,7 @@ Measured at commit `27dd6d4` (default build); the 8 KB / FPU build at `8157742`.
 | Timing | Default build: +0.426 ns at 70 MHz, Fmax 72.2 MHz, no failing endpoint. 8 KB caches and on-chip FPU: +0.006 ns, Fmax 70.0 MHz |
 | Regression | AP68030's 18 programs, each plain and with wait states, plus Dhrystone: all 37 runs pass (default build) |
 | Dhrystone 2.1 | 0.133 DMIPS/MHz with the 68030 caches; 0.375 DMIPS/MHz with the 8 KB caches (AP68030 itself: 0.235) |
-| Corpus | The WinUAE 68030 `cputest` corpus has not been run on this core yet |
+| Corpus | WinUAE 68030 `cputest` (v20): the smoke set (six slices of Default, Basic, AE, ODD_EXC, ODD_STK, FFEXT_SRC; 38,918 rounds) passes. The full integer corpus has not been run yet; the IRQ groups need the v20 interrupt model, not ported to this bench yet |
 
 **Open**:
 
@@ -142,6 +142,22 @@ The programs are AP68030's ([tb030/asm/](tb030/asm/)): `t_integer`,
 `t_exceptions`, `t_stack`, `t_bus`, `t_cache`, `t_snoop`, `t_mmu`,
 `t_pmmuenc`, `t_extword`, `t_held`, `t_initstruct`, `t_ipendmask`,
 `t_dblfault`, `t_cp` and the `t_cpx_*` coprocessor scripts.
+
+### Corpus
+
+```sh
+cd tb030
+WORK=/tmp/cpt ./build_cputest030.sh
+WORK=/tmp/cpt ./run_cputest030.py /path/to/cputest030/data          # smoke set
+WORK=/tmp/cpt ./run_cputest030.py /path/to/cputest030/data --full --group Default
+```
+
+[tb030/tb_cputest030.sv](tb030/tb_cputest030.sv) is the AP68060's corpus
+bench at the 68030's pins: a monitor ([tb030/asm/cputest_mon030.s](tb030/asm/cputest_mon030.s))
+loads each round through a mailbox and enters it with an RTE, so the bench
+needs no access to the core's internals. The records come from AP68030's
+generator ([tools/cputest030/](tools/cputest030/)), which knows the v20
+corpus' rules.
 
 ## Synthesis
 

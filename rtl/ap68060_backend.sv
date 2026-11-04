@@ -265,6 +265,7 @@ logic        wb_exc_fmtv;     // the frame format is wb_exc_fmt (FPU exceptions)
 logic  [3:0] wb_exc_fmt;
 logic        wb_xcommit;      // the uop's address updates stand (FPU unimp/unsupp)
 logic        wb_dcommit;      // ... and its result (DBcc's decrement, odd target)
+logic        wb_stx;          // ... and its store (BSR, JSR to an odd target: the push)
 logic [31:0] wb_exc_addr;
 logic [31:0] wb_exc_fslw;     // FSLW of an access error
 logic [31:0] wb_exc_dob;      // 68030 $A frame: the failed write's data
@@ -1742,7 +1743,7 @@ assign wb_tcinv  = wb_mm && mm_reg && (mm_sel == 3'd0) && mm_seen && !wb_is_exc;
 // bus fault, decided while the routine still runs)
 wire sb_wait = !sb_empty && (wb_is_exc || wb_u.ser || (wb_u.last && (irq_pend || tr_now)) ||
                              (wb_u.last && xstk && xr_dbl));
-assign wb_hold = wb_v && (halted || (!wb_is_exc &&
+assign wb_hold = wb_v && (halted || (wb_stx && wb_st && !dm_st_rdy) || (!wb_is_exc &&
                  ((wb_st && !dm_st_rdy) || (wb_st && dm_st_fault) ||
                   (wb_reset && (!rst_issued || rsto_busy)) ||
                   (wb_mt && !mt_seen) || (wb_mm && !mm_seen) || (wb_cpi && !cp_seen))) || sb_wait);
@@ -2143,8 +2144,13 @@ always_ff @(posedge clk) begin
 			wb_st       <= (ex_u.mem == M_ST || ex_u.mem == M_RMW) && !ex_stkill;
 			// (the same, and no exception: the DMU's store valid from a
 			// flip-flop -- wb_exc's compare sat on the stall chain)
+			// (68030: BSR and JSR to an odd target push the return address
+			// first -- the push stands, then the address error: wb_stx)
 			wb_stv      <= (ex_u.mem == M_ST || ex_u.mem == M_RMW) && !ex_stkill &&
-			               ex_u.exc == 8'd0 && !ex_fault && ex_xvec == 8'd0 && !ex_odd;
+			               ex_u.exc == 8'd0 && !ex_fault && ex_xvec == 8'd0 &&
+			               (!ex_odd || ex_ubr);
+			wb_stx      <= ex_u.exc == 8'd0 && !ex_fault && ex_xvec == 8'd0 && ex_odd && ex_ubr &&
+			               ex_u.mem == M_ST && !ex_stkill;
 			wb_ok       <= ex_u.exc == 8'd0 && !ex_fault && ex_xvec == 8'd0 && !ex_odd;
 			wb_st_data  <= ex_st;
 			// a store into the instruction stream just ahead (the fetch
@@ -2236,7 +2242,8 @@ always_ff @(posedge clk) begin
 			// (68030: a return to an odd address -- RTS, RTD, RTR, RTE --
 			// has popped its stack: the frame goes below)
 			wb_xcommit  <= ex_u.exc == 8'd0 && !ex_fault && ex_xvec == 8'd0 && ex_odd &&
-			               (ex_u.br == BR_A || ex_u.op == OP_CCRLOG || ex_u.op == OP_RTE);
+			               (ex_u.br == BR_A || ex_u.op == OP_CCRLOG || ex_u.op == OP_RTE ||
+			                (ex_u.mem == M_ST && ex_ubr));
 			wb_dcommit  <= ex_u.exc == 8'd0 && !ex_fault && ex_xvec == 8'd0 && ex_odd &&
 			               ex_u.op == OP_DBCC;
 			wb_exc_dob  <= 32'd0;
@@ -2522,6 +2529,7 @@ always_ff @(posedge clk) begin
 		// its instruction (WB holds one cycle, then takes it)
 		if (wb_v && wb_st && dm_st_rdy && dm_st_fault && wb_exc == 8'd0) begin
 			wb_stv      <= 1'b0;
+			wb_stx      <= 1'b0;
 			wb_ok       <= 1'b0;
 			wb_exc      <= 8'd2;
 			wb_exc_addr <= dm_st_faddr;
@@ -2550,6 +2558,7 @@ always_ff @(posedge clk) begin
 				wb_res <= mt_pa;
 				if (mt_fault && wb_exc == 8'd0) begin
 					wb_stv      <= 1'b0;
+					wb_stx      <= 1'b0;
 					wb_ok       <= 1'b0;
 					wb_exc      <= 8'd2;
 					wb_exc_addr <= wb_res;
@@ -2570,6 +2579,7 @@ always_ff @(posedge clk) begin
 			wb_res  <= mm_desc;
 			if (mm_reg && mm_cfgerr && wb_exc == 8'd0) begin
 				wb_stv      <= 1'b0;
+				wb_stx      <= 1'b0;
 				wb_ok       <= 1'b0;
 				wb_exc      <= 8'd56;
 				wb_exc_fmtv <= 1'b1;
@@ -2625,6 +2635,7 @@ always_ff @(posedge clk) begin
 			cp_seen     <= 1'b1;
 			cp_xtrq     <= cp_xtr;
 			wb_stv      <= 1'b0;
+			wb_stx      <= 1'b0;
 			wb_ok       <= 1'b0;
 			wb_exc      <= cp_xvec;
 			wb_exc_fmtv <= 1'b1;
@@ -2683,7 +2694,7 @@ end
 assign dm_st_v    = wb_v && wb_stv;
 // synthesis translate_off
 always_ff @(posedge clk)
-	if (nreset && wb_v && (wb_stv != (wb_st && wb_exc == 8'd0) || wb_ok != (wb_exc == 8'd0))) begin
+	if (nreset && wb_v && (wb_stv != (wb_st && (wb_exc == 8'd0 || wb_stx)) || wb_ok != (wb_exc == 8'd0))) begin
 		$display("FAIL: wb_stv %b, the store %b with exception %0d (pc %h)", wb_stv, wb_st, wb_exc, wb_u.pc);
 		$finish;
 	end
