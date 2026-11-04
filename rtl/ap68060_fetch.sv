@@ -52,6 +52,11 @@
 
 module ap68060_fetch
 	import ap68060_pkg::*;
+#(
+	// (AP68030 070) no instruction cache: its valid bits read as clear, so
+	// no fetch ever hits and synthesis drops the hit and fill logic
+	parameter bit NOCACHE = 0
+)
 (
 	input  logic        clk,
 	input  logic        nreset,
@@ -1062,8 +1067,8 @@ end
 // the valid copies' reads: F1's set; the invalidation's, else the fill's
 wire [6:0] inv_s = (inv_scope == 2'd1) ? inv_pa[10:4] : 7'(inv_i - 8'd1);
 always_comb ivo_ra = inv_busy ? inv_s : m_pa[10:4];
-assign ivf_q = ivf[f1_pc[10:4]];
-assign ivo_q = ivo[ivo_ra];
+assign ivf_q = NOCACHE ? 4'd0 : ivf[f1_pc[10:4]];
+assign ivo_q = NOCACHE ? 4'd0 : ivo[ivo_ra];
 initial for (int i = 0; i < 128; i++) begin ivf[i] = 4'd0; ivo[i] = 4'd0; end
 // synthesis translate_off
 always_ff @(posedge clk)

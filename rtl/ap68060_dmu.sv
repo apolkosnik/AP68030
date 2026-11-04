@@ -57,7 +57,10 @@ module ap68060_dmu
 #(
 	// DC1's own ATC read port and tag compare beside xlate (65 MHz timing;
 	// 0: DC1's hit and way are xlate's, the port is not built)
-	parameter bit DC1_ATC = 1
+	parameter bit DC1_ATC = 1,
+	// (AP68030 070) no data cache: its valid bits read as clear, so no access
+	// ever hits and synthesis drops the hit, fill and push logic
+	parameter bit NOCACHE = 0
 )
 (
 	input  logic        clk,
@@ -2783,9 +2786,9 @@ assign pq1_l  = bo_pa[31:4];
 
 // the valid copies' reads: DC1's lookup; the engine state's set (a
 // split's next line, the slow path's, the scan's, else the fill/push set), or the snooped set while the engine is frozen
-assign lvd_q = lsd_q[3:0];
+assign lvd_q = NOCACHE ? 4'd0 : lsd_q[3:0];
 wire  [7:0] lse_q = lse[lv_ra];
-assign lve_q = lse_q[3:0];
+assign lve_q = NOCACHE ? 4'd0 : lse_q[3:0];
 always_comb
 	lv_ra = (sn_ph == SN_B)                            ? sn_pa[10:4] :
 	        (e_st == E_SP_2)                           ? m2.r.a[10:4] + 7'd1 :

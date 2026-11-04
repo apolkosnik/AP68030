@@ -262,7 +262,8 @@ always_ff @(posedge clk)
 // synthesis translate_on
 wire [15:0] opw = win[0];
 // (CPIF) an F-line with CpID 1-7: the coprocessor interface's instruction
-wire        cpop = CPIF && (opw[15:12] == 4'hF) && (opw[11:9] != 3'd0);
+// (predecoded with the queue word: no compare on D1's consume path)
+wire        cpop = CPIF && pd0.cpf;
 
 //--------------------------------------------------------------------------
 // state

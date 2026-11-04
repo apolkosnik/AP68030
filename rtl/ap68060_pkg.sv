@@ -335,6 +335,7 @@ typedef struct packed {
 	logic        slow;    // parsed in several cycles (FPU immediate)
 	logic  [3:0] i0;      // EA0 mode index, EM_NONE when absent
 	logic  [3:0] i1;
+	logic        cpf;     // (AP68030 070) an F-line with CpID 1-7: the coprocessor interface's
 } pd_t;
 
 typedef struct packed {

@@ -342,7 +342,7 @@ ap68060_backend #(.FPU_PIPE(FPU_PIPE), .EARLY_RES(EARLY_RES), .SKID(SKID),
 	.dbg_pc(dbg_pc), .dbg_retire(dbg_retire), .halted(dbg_halted), .fetch_stop(be_fstop)
 );
 
-ap68060_dmu #(.DC1_ATC(DC1_ATC)) dmu (
+ap68060_dmu #(.DC1_ATC(DC1_ATC), .NOCACHE(CACHE030 == 1)) dmu (
 	.clk(clk), .nreset(nreset),
 	.adv_ag(adv_ag), .dm_req(dm_req), .dm_va(dm_va), .dm_mem(dm_mem),
 	.dm_msz(dm_msz), .dm_fc(dm_fc), .dm_lock(dm_lock), .dm_locke(dm_locke),
@@ -358,9 +358,12 @@ ap68060_dmu #(.DC1_ATC(DC1_ATC)) dmu (
 	.mt_v(mt_v), .mt_op(mt_op), .mt_scope(mt_scope), .mt_caches(mt_caches),
 	.mt_addr(mt_addr), .mt_fc(mt_fc), .mt_ng(mt_ng), .mt_wr(mt_wr),
 	.mt_done(mt_done), .mt_pa(mt_pa), .mt_fault(mt_fault), .mt_fslw(mt_fslw),
-	.cacr(cacr6), .tc(tc), .urp(urp), .srp(srp),
-	.dtt0(dtt0), .dtt1(dtt1), .itt0(itt0), .itt1(itt1),
-	.cdis(cdis), .mdis(mdis), .tw_busy(tw_busy),
+	// (the 68060's translation is never on: the 68030's PMMU, in the BIU,
+	// translates; constants here let synthesis drop the ATCs and the table
+	// walker of the DMU and the fetch unit)
+	.cacr(cacr6), .tc(32'd0), .urp(32'd0), .srp(32'd0),
+	.dtt0(32'd0), .dtt1(32'd0), .itt0(32'd0), .itt1(32'd0),
+	.cdis(cdis), .mdis(1'b1), .tw_busy(tw_busy),
 	.iw_req(iw_req), .iw_va(iw_va), .iw_fc2(iw_fc2), .iw_done(iw_done), .iw_ent(iw_ent),
 	.iw_cause(iw_cause),
 	.ic_inv(ic_inv), .ic_inv_scope(ic_inv_scope), .ic_inv_pa(ic_inv_pa),
@@ -425,7 +428,7 @@ logic  [1:0] rq_n;
 dinst_t      rq0, rq1;
 logic        rq_pop, rq_pop_e;
 
-ap68060_fetch fetch (
+ap68060_fetch #(.NOCACHE(CACHE030 == 1)) fetch (
 	.clk(clk), .nreset(nreset),
 	.redir_v(redir_v), .redir_pc(redir_pc),
 	.d_redir_v(d_redir_v), .d_redir_pc(d_redir_pc),
@@ -433,7 +436,7 @@ ap68060_fetch fetch (
 	// (MC68060UM 7.8.2.1: no bus activity after the LPSTOP broadcast; 2.8.4:
 	// all bus cycles are suspended before RSTO is asserted)
 	.stop(be_fstop || rsto_busy), .smode(sr[13]),
-	.cacr(cacr6), .tc(tc), .itt0(itt0), .itt1(itt1), .cdis(cdis), .mdis(mdis),
+	.cacr(cacr6), .tc(32'd0), .itt0(32'd0), .itt1(32'd0), .cdis(cdis), .mdis(1'b1),
 	.win(win), .win_flt(win_flt), .win_fdem(win_fdem), .win_fatc(win_fatc),
 	.win_bt(win_bt), .bt_tgt(bt_tgt),
 	.pd0(pd0), .pd0_n(pd0_n), .qcnt(qcnt), .qpc(qpc), .consume(consume),

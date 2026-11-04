@@ -81,6 +81,7 @@ always_comb begin
 	pd.slow = (a.rt == UA_FPU_GEN) && (i0 == EM_IMM);
 	pd.i0   = i0;
 	pd.i1   = i1;
+	pd.cpf  = (op[15:12] == 4'hF) && (op[11:9] != 3'd0);
 	// an illegal word: D1 takes one word and the exception; b, p1 and tot
 	// are not used for it (they stay off the override, a timing path)
 	if (!pd.legal) begin
