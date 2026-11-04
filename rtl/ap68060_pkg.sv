@@ -54,6 +54,8 @@ typedef struct packed {
 	logic        ci;      // CIOUT
 	logic        lock;    // LOCK for this transfer
 	logic        locke;   // LOCKE: last transfer of the locked sequence
+	logic        nobst;   // (68030) no burst for this read: the first part of a
+	                      // line-crossing operand, or a later piece after CIIN
 } busreq_t;
 
 //--------------------------------------------------------------------------

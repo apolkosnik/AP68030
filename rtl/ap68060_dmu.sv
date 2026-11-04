@@ -408,6 +408,7 @@ logic  [1:0] sn_way;
 logic        bo_cancel;            // the queued push was invalidated by a snoop
 logic        bo_ingnt;             // the engine's transfer is the BIU's (granted)
 logic  [3:0] bo_got;               // a line read: the long words that arrived
+logic        bo_ciin;              // (68030) a piece of this transfer saw CIIN
 logic        bo_later;             // a piece of this transfer has completed: a
                                   // bus error now is on a later access (FSLW.MA)
 
@@ -1162,6 +1163,9 @@ always_comb begin
 	b_breq.tln   = bo.tln;
 	b_breq.upa   = bo.upa;
 	b_breq.ci    = bo.ci;
+	// (68030, UM 6.1.3.2: CBREQ never for the first part of an operand that
+	// crosses a line, nor for the rest of a part after CIIN)
+	b_breq.nobst = (m2.split && !e_part) || bo_ciin;
 	b_breq.lock  = bo.lock;
 	b_breq.locke = bo.locke && !bo.rd && (bo.line || bo_left == bo_np);
 	// (the LPSTOP broadcast drives D31-D16 high, the new SR on D15-D0)
@@ -1249,7 +1253,7 @@ always_ff @(posedge clk) begin
 		wfs_p1 <= 1'b0;
 		e_job <= 1'b0;
 		m1_stale <= 1'b0;
-		sn_ph <= SN_IDLE; sn_src <= '0; sn_way <= '0; bo_cancel <= 1'b0; bo_later <= 1'b0; pbe_r <= 1'b0;
+		sn_ph <= SN_IDLE; sn_src <= '0; sn_way <= '0; bo_cancel <= 1'b0; bo_later <= 1'b0; bo_ciin <= 1'b0; pbe_r <= 1'b0;
 		bo_ingnt <= 1'b0; sn_pvm <= 1'b0; sn_bom <= 1'b0;
 		sn_look <= 1'b0; sn_hit <= 1'b0; sn_dirty <= 1'b0;
 		clr_i   <= '0;
@@ -2219,6 +2223,7 @@ always_ff @(posedge clk) begin
 		E_BUS: begin
 			bo_err <= 1'b0;
 			bo_later <= 1'b0;
+			bo_ciin <= 1'b0;
 			bo_got <= 4'd0;
 			bo_tci <= 1'b0;
 			bo_avec <= 1'b0;
@@ -2265,6 +2270,7 @@ always_ff @(posedge clk) begin
 				else begin
 					bo_rd   <= (bo_rd << (8 * bo_pn)) | grab(b_rdata, bo_pn, bo_pa[1:0]);
 					bo_avec <= b_ravec;
+					if (b_rtci) bo_ciin <= 1'b1;
 				end
 			end
 			// the last write of a locked sequence (LOCKE) is out

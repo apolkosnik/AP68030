@@ -347,7 +347,7 @@ always_ff @(posedge clk) begin
 				cfill_i <= C030 && rs_i && rs.rd && !rs.ci && ic_fok;
 				q_cache <= C030 && rs.rd && !rs.ci && ((rs_d && dc_fok) || (rs_i && ic_fok));
 				q_cbreq <= C030 && rs.rd && !rs.ci &&
-				           ((rs_d && dc_fok && cacr30[12] && !rs.lock && (!dc_tag_hit || dc_empty)) ||
+				           ((rs_d && dc_fok && cacr30[12] && !rs.lock && !rs.nobst && (!dc_tag_hit || dc_empty)) ||
 				            (rs_i && ic_fok && cacr30[4] && (!ic_tag_hit || ic_empty)));
 				st    <= sub_hit(rs, sub_v && !sub_arm, sub_ar) ? S_SUB :
 				         (c_dhit || c_ihit) ? S_HIT : S_REQ;
