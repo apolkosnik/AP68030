@@ -612,12 +612,60 @@ always_comb begin
 			// new SR leaves supervisor mode stops in user mode, 68020-68040)
 			if ((a0.rt == UA_MOVEC_RD || a0.rt == UA_MOVEC_WR) && !movec_ok(win[1][11:0]))
 				nrec.exc = 8'd4;
-			// (the MMU instructions check the privilege first, UM 9.8; then
-			// F-line until the PMMU is in, phase 4)
+			// (the MMU instructions check the privilege first, UM 9.8)
 			else if (a0.priv && !smode)
 				nrec.exc = 8'd8;
-			else if (a0.rt == UA_PMMU)
-				nrec.exc = 8'd11;
+			else if (a0.rt == UA_PMMU) begin
+				// the PMMU's instructions: the second word decides (UM 3.3.3
+				// formats of PFLUSH, PLOAD, PMOVE, PTEST: their zero bits,
+				// register and mode fields, FC field 10xxx/01ddd/0000x,
+				// control alterable EAs; where the UM does not say, WinUAE's
+				// cpummu030.c: PMOVE R/W=1 with FD, no PC relative or
+				// immediate EA even for the forms without an operand, as
+				// AP68030); an encoding the MC68030 does not support is an
+				// F-line exception (in supervisor mode, UM 9.8)
+				logic [15:0] x;
+				logic [2:0]  m, r;
+				logic        ca, nea, fcok, ok;
+				logic [9:0]  mrt;
+				x    = win[1]; m = opw[5:3]; r = opw[2:0];
+				ca   = (m == 3'd2) || (m == 3'd5) || (m == 3'd6) || (m == 3'd7 && r[2:1] == 2'b00);
+				nea  = (m == 3'd7) && (r >= 3'd2);           // PC relative, immediate, invalid
+				fcok = (x[4:3] == 2'b10) || (x[4:3] == 2'b01) || (x[4:1] == 4'b0000);
+				ok   = 1'b0;
+				mrt  = UA_MMU_OPN;
+				case (x[15:13])
+					3'b000: begin       // PMOVE TT0/TT1
+						ok  = (x[12:11] == 2'b01) && (x[7:0] == 8'd0) && !(x[9] && x[8]) && ca;
+						mrt = x[9] ? (x[10] ? UA_MMU_FRTT1 : UA_MMU_FRTT0) : UA_MMU_TO32;
+					end
+					3'b001: case (x[12:10])
+						3'b000: begin ok = (x[8:5] == 4'd0) && fcok && ca;   mrt = UA_MMU_OPEA; end  // PLOAD
+						3'b001: begin ok = (x[9:0] == 10'd0) && !nea;        mrt = UA_MMU_OPN;  end  // PFLUSHA
+						3'b100: begin ok = (x[9:8] == 2'd0) && fcok && !nea; mrt = UA_MMU_OPN;  end  // PFLUSH fc
+						3'b110: begin ok = (x[9:8] == 2'd0) && fcok && ca;   mrt = UA_MMU_OPEA; end  // PFLUSH fc,ea
+						default: ok = 1'b0;
+					endcase
+					3'b010: begin       // PMOVE TC/SRP/CRP
+						ok  = (x[12:10] == 3'b000 || x[12:10] == 3'b010 || x[12:10] == 3'b011) &&
+						      (x[7:0] == 8'd0) && !(x[9] && x[8]) && ca;
+						mrt = x[9] ? ((x[12:10] == 3'b000) ? UA_MMU_FRTC :
+						              (x[12:10] == 3'b010) ? UA_MMU_FRSRP : UA_MMU_FRCRP) :
+						             ((x[12:10] == 3'b000) ? UA_MMU_TO32 : UA_MMU_TO64);
+					end
+					3'b011: begin       // PMOVE MMUSR
+						ok  = (x[12:10] == 3'b000) && (x[8:0] == 9'd0) && ca;
+						mrt = x[9] ? UA_MMU_FRSR : UA_MMU_TO16;
+					end
+					3'b100: begin       // PTEST
+						ok  = fcok && ca && !(x[8] && x[12:10] == 3'd0);
+						mrt = x[8] ? UA_MMU_PTA : UA_MMU_OPEA;
+					end
+					default: ok = 1'b0;
+				endcase
+				if (ok) nrec.rt = mrt;
+				else    nrec.exc = 8'd11;
+			end
 			else if (a0.rt == UA_RTE && rte_alt != 2'd0)
 				nrec.rt = rte_alt[1] ? UA_RTE_BUSB : UA_RTE_BUSA;
 			else if (a0.rt == UA_TRAP)

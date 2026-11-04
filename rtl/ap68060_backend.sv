@@ -62,6 +62,23 @@ module ap68060_backend
 	output logic [31:0] cacr,
 	output logic [31:0] caar,
 	output logic  [3:0] cclr30,         // pulse: a MOVEC to CACR with CD, CED, CI, CEI
+	// the PMMU's instructions (MISC 14 at WB: the request, WB waits for
+	// mm_done) and its registers (PMOVE from them: SPR $40-$47)
+	output logic        mm_req,
+	output logic        mm_reg,
+	output logic  [2:0] mm_sel,
+	output logic        mm_fd,
+	output logic [31:0] mm_hi,
+	output logic [31:0] mm_lo,
+	output logic  [2:0] mm_kind,
+	output logic  [2:0] mm_level,
+	output logic  [2:0] mm_fc,
+	output logic  [2:0] mm_fcmask,
+	input  logic        mm_done,
+	input  logic        mm_cfgerr,
+	input  logic [31:0] mm_desc,
+	input  logic [31:0] mmu_tc, mmu_srp_hi, mmu_srp_lo, mmu_crp_hi, mmu_crp_lo, mmu_tt0, mmu_tt1,
+	input  logic [15:0] mmu_sr,
 	output logic        nmi_rt,         // a level 7 interrupt's routine runs ...
 	output logic [31:0] nmi_va,         // ... its autovector's address
 	output logic        bc_clr,         // MOVEC to CACR with CABC or CUBC: clear the branch cache
@@ -937,6 +954,14 @@ function automatic logic [31:0] spr_read(input logic [7:0] n);
 		8'h16: spr_read = urp_r;
 		8'h17: spr_read = srp_r;
 		8'h18: spr_read = {16'h0430, PCR_REV, pcr_edebug, 5'd0, pcr_dfp, pcr_ess}; // PCR
+		8'h40: spr_read = mmu_tc;                           // the PMMU's (PMOVE)
+		8'h41: spr_read = mmu_tt0;
+		8'h42: spr_read = mmu_tt1;
+		8'h43: spr_read = mmu_srp_hi;
+		8'h44: spr_read = mmu_srp_lo;
+		8'h45: spr_read = mmu_crp_hi;
+		8'h46: spr_read = mmu_crp_lo;
+		8'h47: spr_read = {16'd0, mmu_sr};
 		8'h20: spr_read = {16'd0, sr_r[15:5], ccr_f};     // SR
 		8'h21: spr_read = {27'd0, ccr_f};                   // CCR
 		default: spr_read = 32'd0;
@@ -1614,6 +1639,29 @@ wire wb_cclr     = (wb_u.op == OP_MISC) && (wb_u.cond == 4'd12) && (wb_u.imm_b[7
                    ((wb_res & 32'h0000_0C0C) != 32'd0);
 wire wb_mt       = ((wb_u.op == OP_MISC) && (wb_u.cond >= 4'd3) && (wb_u.cond <= 4'd5)) || wb_cclr;
 logic mt_seen;                // the DMU finished this WB uop's maintenance
+// the PMMU's instruction at WB (MISC 14): its operands from EX -- A the
+// address or the register's (second) long word, B the extension word, the
+// latch the first long word or the Dn of the FC field
+wire  wb_mm      = (wb_u.op == OP_MISC) && (wb_u.cond == 4'd14);
+logic mm_seen, mm_iss;
+logic [31:0] mx_lo, mx_hi;
+logic [15:0] mx_ext;
+assign mm_reg    = (mx_ext[15:13] == 3'b000) || (mx_ext[15:13] == 3'b010) || (mx_ext[15:13] == 3'b011);
+assign mm_sel    = (mx_ext[15:13] == 3'b000) ? (mx_ext[10] ? 3'd4 : 3'd3) :
+                   (mx_ext[15:13] == 3'b010) ? ((mx_ext[12:10] == 3'b000) ? 3'd0 :
+                                                (mx_ext[12:10] == 3'b010) ? 3'd1 : 3'd2) : 3'd5;
+assign mm_fd     = mx_ext[8];
+assign mm_hi     = (mm_sel == 3'd1 || mm_sel == 3'd2) ? mx_hi : mx_lo;
+assign mm_lo     = mx_lo;
+assign mm_kind   = (mx_ext[15:13] == 3'b001) ?
+                       ((mx_ext[12:10] == 3'b000) ? {2'b00, ~mx_ext[9]} :
+                        (mx_ext[12:10] == 3'b001) ? 3'd4 : (mx_ext[12:10] == 3'b100) ? 3'd5 : 3'd6) :
+                   {2'b01, ~mx_ext[9]};
+assign mm_level  = mx_ext[12:10];
+// the FC field: 10xxx the value, 01ddd Dn, 00000 SFC, 00001 DFC
+assign mm_fc     = (mx_ext[4:3] == 2'b10) ? mx_ext[2:0] : (mx_ext[4:3] == 2'b01) ? mx_hi[2:0] :
+                   mx_ext[0] ? dfc_r : sfc_r;
+assign mm_fcmask = mx_ext[7:5];
 // the store buffer empties before exception processing and before a
 // synchronizing instruction (MC68060UM 5.10, 8.4.6): WB waits with an
 // exception, a serializing uop, or an instruction's last uop when a trace
@@ -1626,7 +1674,7 @@ wire sb_wait = !sb_empty && (wb_is_exc || wb_u.ser || (wb_u.last && (irq_pend ||
 assign wb_hold = wb_v && (halted || (!wb_is_exc &&
                  ((wb_st && !dm_st_rdy) || (wb_st && dm_st_fault) ||
                   (wb_reset && (!rst_issued || rsto_busy)) ||
-                  (wb_mt && !mt_seen))) || sb_wait);
+                  (wb_mt && !mt_seen) || (wb_mm && !mm_seen))) || sb_wait);
 
 assign mt_v      = wb_v && wb_mt && !wb_is_exc && !mt_seen;
 assign mt_op     = wb_cclr ? 3'd1 :
@@ -1777,6 +1825,7 @@ always_ff @(posedge clk) begin
 	fe_flush <= 1'b0;
 	rr_v    <= 1'b0;
 	cclr30  <= 4'd0;
+	mm_req  <= 1'b0;
 	sub_arm <= 1'b0;
 	sub_clr <= 1'b0;
 	ucond_v <= 1'b0;
@@ -1848,6 +1897,8 @@ always_ff @(posedge clk) begin
 		stop_pc <= 32'd0;
 		rst_issued <= 1'b0;
 		mt_seen <= 1'b0;
+		mm_seen <= 1'b0; mm_iss <= 1'b0;
+		mx_lo <= '0; mx_hi <= '0; mx_ext <= '0;
 		wb_cof  <= 1'b0;
 		halted  <= 1'b0;
 		rst_seq <= 1'b1;
@@ -2169,6 +2220,9 @@ always_ff @(posedge clk) begin
 			rb_fa <= ex_av; rb_ssw <= ex_bv[15:0];
 		end
 		if (adv_ex && ex_u.op == OP_MISC && ex_u.cond == 4'd13) rb_dib <= ex_av;
+		if (adv_ex && ex_u.op == OP_MISC && ex_u.cond == 4'd14) begin
+			mx_lo <= ex_av; mx_ext <= ex_bv[15:0]; mx_hi <= ex_latch;
+		end
 		if (adv_ex && ex_u.op == OP_MISC && ex_u.cond == 4'd7) begin
 			rb_dob <= ex_av; rb_int <= ex_bv[1:0];
 		end
@@ -2402,6 +2456,29 @@ always_ff @(posedge clk) begin
 				end
 			end
 		end
+		// the PMMU's instruction: the request once the writes before it are
+		// out; done -- PTEST's descriptor address its result, or a register
+		// write's configuration error: the MMU configuration exception
+		// (vector 56, format $2: the next PC, the instruction's address)
+		if (wb_v && wb_mm && !wb_is_exc && !mm_seen && !mm_iss && sb_empty) begin
+			mm_req <= 1'b1;
+			mm_iss <= 1'b1;
+		end
+		if (wb_v && wb_mm && mm_done) begin
+			mm_seen <= 1'b1;
+			wb_res  <= mm_desc;
+			if (mm_reg && mm_cfgerr && wb_exc == 8'd0) begin
+				wb_stv      <= 1'b0;
+				wb_ok       <= 1'b0;
+				wb_exc      <= 8'd56;
+				wb_exc_fmtv <= 1'b1;
+				wb_exc_fmt  <= 4'h2;
+				wb_exc_pcv  <= 1'b1;
+				wb_exc_pc   <= wb_npc;
+				wb_exc_addr <= wb_u.pc;
+			end
+		end
+		if (adv_wb) begin mm_seen <= 1'b0; mm_iss <= 1'b0; end
 		// the locked sequence BUSCR opened ends with its LOCKE write
 		if (dm_lkend) bus_lkdone <= 1'b1;
 		if (adv_wb) mt_seen <= 1'b0;

@@ -95,6 +95,25 @@ module ap68030_biu
 	input  logic [31:0]       snoop_addr,
 	input  logic              nc_v,          // a read of nc_a goes past the data cache
 	input  logic [31:0]       nc_a,          // (the level 7 autovector, nmi_vec_nocache)
+	// the PMMU (AP68030's ap030_mmu): an MMU instruction (pulse; WB waits
+	// for mm_done) -- a register write (PMOVE to TC SRP CRP TT0 TT1 MMUSR)
+	// or an operation (PLOAD PTEST PFLUSH) -- and the registers
+	input  logic              mm_req,
+	input  logic              mm_reg,
+	input  logic  [2:0]       mm_sel,        // 0 TC 1 SRP 2 CRP 3 TT0 4 TT1 5 MMUSR
+	input  logic              mm_fd,
+	input  logic [31:0]       mm_hi,
+	input  logic [31:0]       mm_lo,         // (an operation's logical address)
+	input  logic  [2:0]       mm_kind,       // 0 PLOADR 1 PLOADW 2 PTESTR 3 PTESTW 4 PFLUSHA 5 PFLUSH fc 6 PFLUSH fc,ea
+	input  logic  [2:0]       mm_level,
+	input  logic  [2:0]       mm_fc,
+	input  logic  [2:0]       mm_fcmask,
+	output logic              mm_done,       // pulse
+	output logic              mm_cfgerr,     // ... a register write's MMU configuration error
+	output logic [31:0]       mm_desc,       // ... PTEST: the last descriptor's address
+	output logic [31:0]       mmu_tc, mmu_srp_hi, mmu_srp_lo, mmu_crp_hi, mmu_crp_lo,
+	output logic [31:0]       mmu_tt0, mmu_tt1,
+	output logic [15:0]       mmu_sr,
 	output logic              rsto_busy,
 	output logic              rsto_n,
 	// the MC68030 pins
@@ -130,7 +149,7 @@ module ap68030_biu
 //--------------------------------------------------------------------------
 // the transaction latched
 //--------------------------------------------------------------------------
-typedef enum logic [2:0] { S_IDLE, S_REQ, S_WAIT, S_SUB, S_HIT } st_t;
+typedef enum logic [3:0] { S_IDLE, S_REQ, S_WAIT, S_SUB, S_HIT, S_FLT, S_WALK, S_MMR } st_t;
 st_t         st;
 logic [$clog2(NC)-1:0] cl;
 busreq_t     q;
@@ -156,14 +175,16 @@ wire ack_tt = (q.tt == TT_ACK);
 // bytes of a single transfer
 wire [2:0] nb = (q.siz == SIZ_B) ? 3'd1 : (q.siz == SIZ_W) ? 3'd2 : 3'd4;
 // the function code
-wire [2:0] fc = ack_tt ? `FC_CPU_SPACE :
-                (q.tm == TM_UDATA || q.tm == TM_UCODE || q.tm == TM_SDATA || q.tm == TM_SCODE) ? q.tm :
-                `FC_SUPER_DATA;
-wire [1:0] kind = (ack_tt && q.tm != 3'd0) ? `BK_IACK :
-                  (q.tm == TM_TBL_DATA || q.tm == TM_TBL_CODE) && !ack_tt ? `BK_TABLE : `BK_DATA;
+// (the requesters' TM is the function code -- MOVES's any; table searches
+// are the PMMU's own cycles, below)
+wire [2:0] fc = ack_tt ? `FC_CPU_SPACE : q.tm;
+wire [1:0] kind = (ack_tt && q.tm != 3'd0) ? `BK_IACK : `BK_DATA;
 // the address of this transfer
+// (q_pa: the physical address the translation gave; the caches use q.addr)
+logic [31:0] q_pa;
+logic        q_trci;            // the page is cache inhibited (CIOUT)
 wire [31:0] t_addr = (ack_tt && q.tm != 3'd0) ? {28'hFFFFFFF, q.tm, 1'b1} :
-                     line ? {q.addr[31:4], k, 2'b00} : q.addr;
+                     line ? {q_pa[31:4], k, 2'b00} : q_pa;
 // write data, right justified (single writes come placed on the lanes)
 logic [31:0] t_wd;
 always_comb begin
@@ -183,16 +204,25 @@ logic [31:0] b_rd, b_fill_data;
 logic [31:2] b_fill_addr;
 wire  [2:0]  t_nb = line ? 3'd4 : nb;
 
+// the PMMU's table search cycles (S_WALK): long words, supervisor data,
+// RMC held, never cached
+logic        w_req, w_rw, w_active, w_ack, w_berr, w_pend, mmu_busy;
+logic [31:0] w_addr, w_wdata, w_rdata;
+wire         wk  = (st == S_WALK);
+wire         qci = q.ci || q_trci;
 ap030_bus bus (
 	.clk(clk), .ce(1'b1), .ce_f(1'b1), .rst(!nreset),
-	.req(b_req), .req_kind(kind), .req_addr(t_addr), .req_nbytes(t_nb), .req_total(t_nb),
-	.req_rw(q.rd), .req_fc(fc), .req_rmc(q.lock), .req_rmc_last(q.locke),
-	.req_ciout(q.ci), .req_cbreq((line && q.rd && first && !q.ci) || q_cbreq), .req_ocs(1'b1),
-	.req_cache((line && q.rd && !q.ci) || q_cache), .req_wdata(t_wd),
+	.req(b_req), .req_kind(wk ? `BK_TABLE : kind), .req_addr(wk ? w_addr : t_addr),
+	.req_nbytes(wk ? 3'd4 : t_nb), .req_total(wk ? 3'd4 : t_nb),
+	.req_rw(wk ? w_rw : q.rd), .req_fc(wk ? `FC_SUPER_DATA : fc),
+	.req_rmc(wk ? 1'b1 : q.lock), .req_rmc_last(wk ? 1'b0 : q.locke),
+	.req_ciout(wk ? 1'b0 : qci), .req_cbreq(!wk && ((line && q.rd && first && !qci) || q_cbreq)),
+	.req_ocs(!wk), .req_cache(!wk && ((line && q.rd && !qci) || q_cache)),
+	.req_wdata(wk ? w_wdata : t_wd),
 	.req_ack(b_ack), .busy(b_busy), .done(b_done), .rd_data(b_rd),
 	.res_berr(b_berr), .res_avec(b_avec), .res_ciin(b_ciin),
 	.fill_stb(b_fill), .fill_addr(b_fill_addr), .fill_data(b_fill_data),
-	.rmc_hold(lk_open || (st != S_IDLE && q.lock)), .halted(halt), .bus_idle(b_idle),
+	.rmc_hold(lk_open || (st != S_IDLE && !wk && q.lock) || w_active), .halted(halt), .bus_idle(b_idle),
 	.a_o(a_o), .fc_o(fc_o), .siz_o(siz_o), .rw_o(rw_o), .rmc_n_o(rmc_n_o),
 	.as_n_o(as_n_o), .ds_n_o(ds_n_o), .dben_n_o(dben_n_o), .ecs_n_o(ecs_n_o), .ocs_n_o(ocs_n_o),
 	.ciout_n_o(ciout_n_o), .cbreq_n_o(cbreq_n_o), .bus_oe(bus_oe),
@@ -201,7 +231,7 @@ ap030_bus bus (
 	.halt_n(halt_n), .avec_n(avec_n), .ciin_n(ciin_n), .cback_n(cback_n),
 	.br_n(br_n), .bgack_n(bgack_n), .bg_n_o(bg_n_o), .bus_granted(b_granted)
 );
-assign b_req = (st == S_REQ);
+assign b_req = (st == S_REQ) || (wk && w_req && !w_ack && !w_pend);
 assign own   = !b_granted;
 
 //--------------------------------------------------------------------------
@@ -221,6 +251,43 @@ assign rs = breq[csel];
 wire         rs_d   = (csel == '0) && (rs.tt != TT_ACK) && (rs.tm != 3'd7) && (rs.siz != SIZ_LINE) &&
                       !(nc_v && rs.rd && rs.addr == nc_a);
 wire         rs_i   = (csel != '0) && (rs.siz != SIZ_LINE);
+//--------------------------------------------------------------------------
+// the PMMU: every transfer outside CPU space is translated as it starts
+// (logical address and function code; the caches are logical); a walk
+// first when the ATC has no entry, a bus error (no bus cycle) when the
+// access is denied.  (A read that hits a cache needs no ATC entry, only no
+// denial: UM 9.2.)
+//--------------------------------------------------------------------------
+logic        tr_ok, tr_fault, tr_walk, tr_ci, tr_use, walk_req, mmu_cfg;
+logic [31:0] tr_pa, mmu_desc;
+logic        mmu_opreq, mmu_regwe, mmu_opdone;
+logic [31:0] wk_la;
+logic  [2:0] wk_fc;
+logic        wk_rw, wk_rmc, wk_op;          // S_WALK: a search for the requester / an MMU instruction
+logic  [1:0] mmr_n;                          // S_MMR: clocks to wait for the configuration check
+logic        mm_pend;
+logic        walk_done;
+wire         rs_tr  = (rs.tt != TT_ACK) && (rs.tm != 3'd7);
+wire         tr_flt = rs_tr && tr_fault;
+wire         tr_wk  = rs_tr && tr_walk && !tr_fault;
+wire         tr_go  = !rs_tr || tr_ok;
+wire         tr_inh = rs_tr && tr_ci;
+ap030_mmu mmu (
+	.clk(clk), .ce(1'b1), .rst(!nreset),
+	.tr_la(rs.addr), .tr_fc(rs.tm), .tr_rw(rs.rd), .tr_rmc(rs.lock), .mmudis(1'b0),
+	.tr_ok(tr_ok), .tr_fault(tr_fault), .tr_walk(tr_walk), .tr_pa(tr_pa), .tr_ci(tr_ci),
+	.tr_use(tr_use),
+	.walk_req(walk_req), .walk_la(wk_la), .walk_fc(wk_fc), .walk_rw(wk_rw), .walk_rmc(wk_rmc),
+	.walk_done(walk_done),
+	.op_req(mmu_opreq), .op_kind(mm_kind), .op_level(mm_level), .op_la(mm_lo), .op_fc(mm_fc),
+	.op_fcmask(mm_fcmask), .op_done(mmu_opdone), .op_desc_addr(mmu_desc), .wpend(1'b0),
+	.reg_we(mmu_regwe), .reg_sel(mm_sel), .reg_wdata_hi(mm_hi), .reg_wdata_lo(mm_lo),
+	.reg_fd(mm_fd), .cfg_err(mmu_cfg), .tc(mmu_tc), .srp_hi(mmu_srp_hi), .srp_lo(mmu_srp_lo),
+	.crp_hi(mmu_crp_hi), .crp_lo(mmu_crp_lo), .tt0(mmu_tt0), .tt1(mmu_tt1), .mmusr(mmu_sr),
+	.w_req(w_req), .w_addr(w_addr), .w_rw(w_rw), .w_wdata(w_wdata), .w_ack(w_ack),
+	.w_rdata(w_rdata), .w_berr(w_berr), .w_active(w_active), .busy(mmu_busy)
+);
+
 wire         ic_on  = cacr30[0], ic_fok = cacr30[0] && !cacr30[1];
 wire         dc_on  = cacr30[8], dc_fok = cacr30[8] && !cacr30[9];
 logic        ic_tag_hit, ic_hit, ic_empty, dc_tag_hit, dc_hit, dc_empty;
@@ -229,8 +296,8 @@ logic        cfill_d, cfill_i;     // the transaction's fill strobes go to that 
 logic        hit_i;                // S_HIT: from the instruction cache
 logic        dc_iline, ic_iline;   // a burst's first cycle ended in a bus error: the line invalid
 // a read hit (a locked read never: it is always a bus cycle)
-wire         c_dhit = C030 && rs_d && rs.rd && !rs.lock && dc_on && dc_hit;
-wire         c_ihit = C030 && rs_i && rs.rd && ic_on && ic_hit;
+wire         c_dhit = C030 && rs_d && rs.rd && !rs.lock && dc_on && dc_hit && !tr_flt;
+wire         c_ihit = C030 && rs_i && rs.rd && ic_on && ic_hit && !tr_flt;
 // a write: the data cache's update (hit; WA allocation)
 wire  [3:0]  rs_be  = (rs.siz == SIZ_B) ? (4'b1000 >> rs.addr[1:0]) :
                       (rs.siz == SIZ_W) ? (rs.addr[1] ? 4'b0011 : 4'b1100) : 4'b1111;
@@ -238,9 +305,16 @@ wire  [3:0]  rs_be  = (rs.siz == SIZ_B) ? (4'b1000 >> rs.addr[1:0]) :
 // burst's fill strobes still belong to the last one)
 // (and not in a fill strobe's clock: the cache's one tag comparator is the
 // fill's then)
-wire         c_go   = (st == S_IDLE) && !sn_busy && !rsto_busy && !rsto_req && !halt && (|req_ok) &&
-                      (!C030 || (b_idle && !b_fill));
-wire         c_wr   = C030 && c_go && rs_d && !rs.rd && !sub_hit(rs, sub_v && !sub_arm, sub_ar);
+wire         mm_go  = (st == S_IDLE) && mm_pend && !mmu_busy && b_idle && !b_fill;
+wire         c_go   = (st == S_IDLE) && !mm_pend && !sn_busy && !rsto_busy && !rsto_req && !halt &&
+                      (|req_ok) && (!C030 || (b_idle && !b_fill));
+// (the transaction is granted: not one that must wait for a search)
+wire         c_sub  = sub_hit(rs, sub_v && !sub_arm, sub_ar);
+wire         c_take = c_go && !(tr_wk && !(c_dhit || c_ihit) && !c_sub) && !(tr_wk && mmu_busy);
+// (a write: the data cache's update, once translated to a page that is not
+// cache inhibited; a write the MMU denies invalidates the entry, UM 6.1.2)
+wire         c_wr   = C030 && c_take && rs_d && !rs.rd && !c_sub && tr_go && !tr_inh;
+wire         c_inv  = C030 && c_take && rs_d && !rs.rd && tr_flt;
 
 wire         fill_d = C030 && b_fill && cfill_d;
 wire         fill_i = C030 && b_fill && cfill_i;
@@ -262,7 +336,7 @@ ap030_cache #(.FC_BITS(3)) dcache (
 	.fi_we(fill_d), .fi_addr({q.addr[31:4], b_fill_addr[3:2]}), .fi_fc(q.tm), .fi_data(b_fill_data),
 	.wr_we(c_wr), .wr_la(rs.addr), .wr_fc(rs.tm), .wr_be(rs_be), .wr_data(wdata[csel][31:0]),
 	.wr_wa(cacr30[13]), .wr_allow_fill(dc_fok),
-	.inv_we(1'b0), .inv_la(32'd0), .inv_line(dc_iline), .inv_line_idx(q.addr[7:4]),
+	.inv_we(c_inv), .inv_la(rs.addr), .inv_line(dc_iline), .inv_line_idx(q.addr[7:4]),
 	// (a snoop between the bus read and its fills clears them again)
 	.snp_we(snoop_we), .snp_la(snoop_addr),
 	.fw_start(C030 && b_req && b_ack && cfill_d), .fw_line(q.addr[7:4]),
@@ -296,6 +370,8 @@ always_ff @(posedge clk) begin
 	gnt <= '0; done <= '0; err <= '0;
 	rvalid <= 1'b0; ravec <= 1'b0; rtci <= 1'b0;
 	dc_iline <= 1'b0; ic_iline <= 1'b0;
+	walk_req <= 1'b0; tr_use <= 1'b0; mmu_opreq <= 1'b0; mmu_regwe <= 1'b0;
+	w_ack <= 1'b0; mm_done <= 1'b0;
 	if (!nreset) begin
 		st <= S_IDLE; cl <= '0; q <= '0; qw <= '0; got <= '0; k <= '0; nth <= '0;
 		first <= 1'b0; lk_open <= 1'b0; tci <= 1'b0;
@@ -304,6 +380,9 @@ always_ff @(posedge clk) begin
 		sub_v <= 1'b0; sub_ar <= '0; sub_lanes <= '0;
 		cfill_d <= 1'b0; cfill_i <= 1'b0; q_cache <= 1'b0; q_cbreq <= 1'b0; hit_i <= 1'b0;
 		dc_iline <= 1'b0; ic_iline <= 1'b0;
+		q_pa <= '0; q_trci <= 1'b0; mm_pend <= 1'b0; mm_cfgerr <= 1'b0; mm_desc <= '0;
+		wk_la <= '0; wk_fc <= '0; wk_rw <= 1'b0; wk_rmc <= 1'b0; wk_op <= 1'b0; mmr_n <= '0;
+		w_pend <= 1'b0; w_rdata <= '0; w_berr <= 1'b0;
 	end
 	else begin
 		// RESET instruction: RSTO once nothing is in progress
@@ -318,6 +397,7 @@ always_ff @(posedge clk) begin
 			rsto_cnt  <= 10'd512;
 		end
 		if (unlock) lk_open <= 1'b0;
+		if (mm_req) mm_pend <= 1'b1;
 		if (sub_arm) begin
 			sub_v  <= 1'b1;
 			sub_ar <= sub_a;
@@ -331,8 +411,37 @@ always_ff @(posedge clk) begin
 		S_IDLE: begin
 			// a new transaction: the highest-priority client asking (none
 			// while snoop invalidations are pending, RSTO or a halt)
-			if (c_go) begin
+			if (mm_go) begin
+				// an MMU instruction: a register write (then the MMU's
+				// configuration check), or an operation (its search on the bus)
+				mm_pend <= 1'b0;
+				mm_cfgerr <= 1'b0;
+				if (mm_reg) begin
+					mmu_regwe <= 1'b1;
+					mmr_n     <= 2'd2;
+					st        <= S_MMR;
+				end
+				else begin
+					mmu_opreq <= 1'b1;
+					wk_op     <= 1'b1;
+					st        <= S_WALK;
+				end
+			end
+			else if (c_go && !c_take) begin
+				// no ATC entry: the table search first, then the transaction
+				// again (the request stays presented)
+				if (!mmu_busy) begin
+					walk_req <= 1'b1;
+					wk_la  <= rs.addr; wk_fc <= rs.tm; wk_rw <= rs.rd; wk_rmc <= rs.lock;
+					wk_op  <= 1'b0;
+					st     <= S_WALK;
+				end
+			end
+			else if (c_go) begin
 				cl    <= csel;
+				q_pa  <= (rs_tr && tr_ok) ? tr_pa : rs.addr;
+				q_trci <= tr_inh;
+				tr_use <= rs_tr && tr_ok;
 				q     <= rs;
 				qw    <= wdata[csel];
 				gnt[csel] <= 1'b1;
@@ -343,14 +452,13 @@ always_ff @(posedge clk) begin
 				tci   <= 1'b0;
 				// C030: a read hit, else the bus read's cache attributes
 				hit_i   <= c_ihit;
-				cfill_d <= C030 && rs_d && rs.rd && !rs.ci && dc_fok;
-				cfill_i <= C030 && rs_i && rs.rd && !rs.ci && ic_fok;
-				q_cache <= C030 && rs.rd && !rs.ci && ((rs_d && dc_fok) || (rs_i && ic_fok));
-				q_cbreq <= C030 && rs.rd && !rs.ci &&
+				cfill_d <= C030 && rs_d && rs.rd && !rs.ci && !tr_inh && dc_fok;
+				cfill_i <= C030 && rs_i && rs.rd && !rs.ci && !tr_inh && ic_fok;
+				q_cache <= C030 && rs.rd && !rs.ci && !tr_inh && ((rs_d && dc_fok) || (rs_i && ic_fok));
+				q_cbreq <= C030 && rs.rd && !rs.ci && !tr_inh &&
 				           ((rs_d && dc_fok && cacr30[12] && !rs.lock && !rs.nobst && (!dc_tag_hit || dc_empty)) ||
 				            (rs_i && ic_fok && cacr30[4] && (!ic_tag_hit || ic_empty)));
-				st    <= sub_hit(rs, sub_v && !sub_arm, sub_ar) ? S_SUB :
-				         (c_dhit || c_ihit) ? S_HIT : S_REQ;
+				st    <= c_sub ? S_SUB : (c_dhit || c_ihit) ? S_HIT : tr_flt ? S_FLT : S_REQ;
 			end
 		end
 		S_REQ: if (b_ack) st <= S_WAIT;
@@ -380,7 +488,8 @@ always_ff @(posedge clk) begin
 						rvalid  <= 1'b1; rclient <= cl; rdata <= line ? b_rd : lanes;
 						rbeat   <= line ? k : q.addr[3:2];
 						ravec   <= b_avec;
-						rtci    <= first && b_ciin;
+						// (a page the PMMU marks CI is not cached either)
+						rtci    <= first && (b_ciin || q_trci);
 					end
 					if (!line) begin
 						done[cl] <= 1'b1;
@@ -388,7 +497,7 @@ always_ff @(posedge clk) begin
 					end
 					else begin
 						g[k] = 1'b1;
-						if (first && b_ciin) tci <= 1'b1;
+						if (first && (b_ciin || q_trci)) tci <= 1'b1;
 					end
 				end
 			end
@@ -406,6 +515,36 @@ always_ff @(posedge clk) begin
 					first <= 1'b0;
 					st    <= S_REQ;
 				end
+			end
+		end
+		S_FLT: begin
+			// the PMMU denied the access: a bus error, no bus cycle
+			err[cl] <= 1'b1; errbeat <= 2'd0;
+			st      <= S_IDLE;
+		end
+		S_WALK: begin
+			// the PMMU's search: its cycles on the bus, one per w_req
+			if (b_req && b_ack) w_pend <= 1'b1;
+			if (w_pend && b_done) begin
+				w_ack   <= 1'b1;
+				w_rdata <= b_rd;
+				w_berr  <= b_berr;
+				w_pend  <= 1'b0;
+			end
+			if (!wk_op && walk_done) st <= S_IDLE;
+			if (wk_op && mmu_opdone) begin
+				mm_done <= 1'b1;
+				mm_desc <= mmu_desc;
+				st      <= S_IDLE;
+			end
+		end
+		S_MMR: begin
+			// the configuration check comes in the second clock after the write
+			if (mmu_cfg) mm_cfgerr <= 1'b1;
+			mmr_n <= mmr_n - 2'd1;
+			if (mmr_n == 2'd0) begin
+				mm_done <= 1'b1;
+				st      <= S_IDLE;
 			end
 		end
 		S_HIT: begin

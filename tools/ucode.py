@@ -48,7 +48,7 @@ CAS2W CAS2R RTEF RTE IACKV""".split())}
 SYM = ['NONE', 'EA0', 'EA1', 'EA1R', 'DX', 'DY', 'AX', 'AY', 'IMM', 'QUICK',
        'MOVEQ', 'SHCNT', 'SP', 'SSP', 'NPC', 'PC', 'ZERO', 'CONST', 'X1R',
        'X1DL', 'X1DH', 'X1DU', 'X2DC', 'X2DU', 'X2R', 'MVR', 'EA0R', 'LD',
-       'CREG', 'CREGR', 'BFO', 'BFW', 'OPW', 'EXT1', 'FPDL']
+       'CREG', 'CREGR', 'BFO', 'BFW', 'OPW', 'EXT1', 'FPDL', 'X1PA']
 SYMI = {n: i for i, n in enumerate(SYM)}
 assert len(SYM) <= 40
 
@@ -523,6 +523,53 @@ R('MOVEP_RM',
   _mpb(3, a='DX', mem='ST', last=1))
 # the MMU instructions: for now the F-line exception (D1), until the PMMU
 R('PMMU', U(last=1))
+# the PMMU's instructions (MC68030UM 9.8, 3.3.3); the decoder checks the
+# extension word and selects one of these.  MISC 14 hands the operation to
+# the PMMU at WB (A: the address or the register's second long word, B the
+# extension word, the latch: the first long word or the FC field's Dn); WB
+# waits for it, and the instruction ends with a refetch (ser).
+# PMOVE <ea>,TC/TT0/TT1 (32 bits), MMUSR (16), SRP/CRP (64)
+R('MMU_TO32',
+  U(op='MOV', sz='L', msz='L', a='LD', d='T0', ag='EA0', mem='LD'),
+  U(op='MISC', cond=14, sz='L', a='T0', b='EXT1', ser=1, last=1))
+R('MMU_TO16',
+  U(op='MOV', sz='L', msz='W', a='LD', d='T0', ag='EA0', mem='LD'),
+  U(op='MISC', cond=14, sz='L', a='T0', b='EXT1', ser=1, last=1))
+R('MMU_TO64',
+  U(ag='LEA0', agw='T2'),
+  U(op='MOV', sz='L', msz='L', a='LD', d='T0', ag='BASED', agb='T2', const=0, mem='LD'),
+  U(op='MOV', sz='L', msz='L', a='LD', d='T1', ag='BASED', agb='T2', const=4, mem='LD'),
+  U(op='LATCH', sz='L', a='T0'),
+  U(op='MISC', cond=14, sz='L', a='T1', b='EXT1', ser=1, last=1))
+# PMOVE TC/TT0/TT1/MMUSR/SRP/CRP,<ea>: the register (SPR $40-$47) stored
+R('MMU_FRTC',  U(op='SPR', sz='L', const=0x40, d='T0'),
+               U(op='MOV', sz='L', a='T0', ag='EA0', msz='L', mem='ST', last=1))
+R('MMU_FRTT0', U(op='SPR', sz='L', const=0x41, d='T0'),
+               U(op='MOV', sz='L', a='T0', ag='EA0', msz='L', mem='ST', last=1))
+R('MMU_FRTT1', U(op='SPR', sz='L', const=0x42, d='T0'),
+               U(op='MOV', sz='L', a='T0', ag='EA0', msz='L', mem='ST', last=1))
+R('MMU_FRSR',  U(op='SPR', sz='L', const=0x47, d='T0'),
+               U(op='MOV', sz='W', a='T0', ag='EA0', msz='W', mem='ST', last=1))
+R('MMU_FRSRP', U(op='SPR', sz='L', const=0x43, d='T0'),
+               U(op='SPR', sz='L', const=0x44, d='T1'),
+               U(ag='LEA0', agw='T2'),
+               U(op='MOV', sz='L', a='T0', ag='BASED', agb='T2', const=0, msz='L', mem='ST'),
+               U(op='MOV', sz='L', a='T1', ag='BASED', agb='T2', const=4, msz='L', mem='ST', last=1))
+R('MMU_FRCRP', U(op='SPR', sz='L', const=0x45, d='T0'),
+               U(op='SPR', sz='L', const=0x46, d='T1'),
+               U(ag='LEA0', agw='T2'),
+               U(op='MOV', sz='L', a='T0', ag='BASED', agb='T2', const=0, msz='L', mem='ST'),
+               U(op='MOV', sz='L', a='T1', ag='BASED', agb='T2', const=4, msz='L', mem='ST', last=1))
+# PLOAD, PFLUSH fc,#mask,<ea>, PTEST without A: the EA's address; PFLUSHA
+# and PFLUSH fc,#mask: none; PTEST with A: An = the last descriptor's address
+R('MMU_OPEA',  U(op='LATCH', sz='L', a='X1DH'),
+               U(ag='LEA0', agw='T0'),
+               U(op='MISC', cond=14, sz='L', a='T0', b='EXT1', ser=1, last=1))
+R('MMU_OPN',   U(op='LATCH', sz='L', a='X1DH'),
+               U(op='MISC', cond=14, sz='L', a='ZERO', b='EXT1', ser=1, last=1))
+R('MMU_PTA',   U(op='LATCH', sz='L', a='X1DH'),
+               U(ag='LEA0', agw='T0'),
+               U(op='MISC', cond=14, sz='L', a='T0', b='EXT1', d='X1PA', ser=1, last=1))
 
 # MOVES: ext bit 11 = register to memory (DFC), else memory to register
 # (SFC); an address register takes the operand sign-extended to 32 bits
@@ -953,6 +1000,8 @@ def emit():
             f.write('localparam logic [5:0] JC_%s = 6\'d%d;\n' % (n, i))
         for n in ['EXC_FMT0', 'EXC_FMT2', 'EXC_FMT4', 'EXC_FMTA', 'EXC_FMTB', 'EXC_RESET', 'EXC_IRQ', 'EXC_IRQM',
                   'RTE', 'RTE_BUSA', 'RTE_BUSB',
+                  'MMU_TO32', 'MMU_TO16', 'MMU_TO64', 'MMU_FRTC', 'MMU_FRTT0', 'MMU_FRTT1',
+                  'MMU_FRSR', 'MMU_FRSRP', 'MMU_FRCRP', 'MMU_OPEA', 'MMU_OPN', 'MMU_PTA',
                   'DEC_EXC', 'UNIMPL', 'LPSTOP', 'PMMU', 'BCC', 'BSR', 'DBCC', 'FBCC', 'FDBCC', 'FPU_GEN',
                   'TRAP', 'BKPT', 'ILLEGAL', 'MOVEM_RM', 'MOVEM_MR',
                   'MOVEC_RD', 'MOVEC_WR', 'JSR', 'JSR_K', 'JMP', 'RTS',

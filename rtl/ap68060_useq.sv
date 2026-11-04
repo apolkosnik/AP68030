@@ -297,6 +297,7 @@ always_comb begin
 			S_OPW:   begin o.src = OS_IMM; o.imm_v = 1'b1; o.imm = {16'd0, src.opw}; end
 			S_EXT1:  begin o.src = OS_IMM; o.imm_v = 1'b1; o.imm = {16'd0, src.ext1}; end
 			S_FPDL:  o.r = dreg(src.ext1[6:4]);      // FMOVEM dynamic list register
+			S_X1PA:  o.r = areg(src.ext1[7:5], sp_reg);   // PTEST's address register
 			S_CREGR: o.r = (src.ext1[2:0] == 3'd0) ? R_USP : (src.ext1[2:0] == 3'd3) ? R_MSP : R_ISP;
 			default: o.v = 1'b0;
 		endcase
