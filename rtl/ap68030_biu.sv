@@ -68,6 +68,7 @@ module ap68030_biu
 	output logic [NC-1:0]     gnt,
 	output logic [NC-1:0]     done,
 	output logic [NC-1:0]     err,
+	output logic              errm,          // with err: the PMMU denied it (no bus cycle)
 	output logic              rvalid,
 	output logic [$clog2(NC)-1:0] rclient,
 	output logic [31:0]       rdata,
@@ -367,7 +368,7 @@ logic       rsto_pend;
 assign rsto_busy = !rsto_n || rsto_pend;
 
 always_ff @(posedge clk) begin
-	gnt <= '0; done <= '0; err <= '0;
+	gnt <= '0; done <= '0; err <= '0; errm <= 1'b0;
 	rvalid <= 1'b0; ravec <= 1'b0; rtci <= 1'b0;
 	dc_iline <= 1'b0; ic_iline <= 1'b0;
 	walk_req <= 1'b0; tr_use <= 1'b0; mmu_opreq <= 1'b0; mmu_regwe <= 1'b0;
@@ -519,7 +520,7 @@ always_ff @(posedge clk) begin
 		end
 		S_FLT: begin
 			// the PMMU denied the access: a bus error, no bus cycle
-			err[cl] <= 1'b1; errbeat <= 2'd0;
+			err[cl] <= 1'b1; errm <= 1'b1; errbeat <= 2'd0;
 			st      <= S_IDLE;
 		end
 		S_WALK: begin

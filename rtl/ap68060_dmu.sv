@@ -175,6 +175,8 @@ module ap68060_dmu
 	output logic [31:0] sb_dob,         // data right justified, bytes, function code)
 	output logic  [2:0] sb_fn,
 	output logic  [2:0] sb_ffc,
+	input  logic        bi_errm,        // with bi_err: the PMMU denied the access
+	output logic        sb_fm,          // the failed buffered write: the PMMU denied it
 	output logic        sb_wait,        // a buffered write's bus error holds a data access back
 	// 68030 RTE of a $A/$B frame with DF set: the faulted write again (one
 	// aligned bus cycle) through the store buffer
@@ -1084,7 +1086,7 @@ always_ff @(posedge clk) begin
 	if (!nreset) begin
 		sb_n <= '0; sel_q <= 1'b0; own_sb <= 1'b0; sb_fly <= 1'b0; sbe_r <= 1'b0;
 		for (int i = 0; i < SBN; i++) sb[i] <= '0;
-		sb_fa <= '0; sb_dob <= '0; sb_fn <= '0; sb_ffc <= '0;
+		sb_fa <= '0; sb_dob <= '0; sb_fn <= '0; sb_ffc <= '0; sb_fm <= 1'b0;
 	end
 	else begin
 		logic [2:0] n;
@@ -1104,6 +1106,7 @@ always_ff @(posedge clk) begin
 				sb_dob <= sb[0].wd >> (8 * (3'd4 - sb[0].n));
 				sb_fn  <= sb[0].n;
 				sb_ffc <= sb[0].tm;
+				sb_fm  <= bi_errm;
 			end
 		end
 		if (sb_push) begin

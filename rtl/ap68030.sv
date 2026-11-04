@@ -239,7 +239,7 @@ logic  [1:0] mt_scope, mt_caches;
 logic [31:0] mt_addr, mt_pa, mt_fslw, urp, srp, dm_st_faddr;
 // 68030 bus fault frames: the failed write, the RTE's rerun and completion
 logic [31:0] dm_st_dob, sb_fa, sb_dob, rr_pa, rr_wd, sub_a, sub_d;
-logic        dm_st_lastc, rr_v, sub_arm, sub_clr, sb_wait;
+logic        dm_st_lastc, rr_v, sub_arm, sub_clr, sb_wait, sb_fm, b_errm;
 logic  [2:0] sb_fn, sb_ffc, rr_n, rr_fc;
 logic  [1:0] sub_sz, rte_alt;
 logic        mt_fault, dm_lkend, dm_iack_end;
@@ -306,7 +306,7 @@ ap68060_backend #(.FPU_PIPE(FPU_PIPE), .EARLY_RES(EARLY_RES), .SKID(SKID),
 	.mt_wr(mt_wr), .mt_done(mt_done), .mt_pa(mt_pa), .mt_fault(mt_fault), .mt_fslw(mt_fslw),
 	.dm_st_faddr(dm_st_faddr),
 	.dm_st_dob(dm_st_dob), .dm_st_lastc(dm_st_lastc),
-	.sb_fa(sb_fa), .sb_dob(sb_dob), .sb_fn(sb_fn), .sb_ffc(sb_ffc), .dm_sbw(sb_wait),
+	.sb_fa(sb_fa), .sb_dob(sb_dob), .sb_fn(sb_fn), .sb_ffc(sb_ffc), .dm_sbw(sb_wait), .sb_fm(sb_fm),
 	.rr_v(rr_v), .rr_pa(rr_pa), .rr_n(rr_n), .rr_wd(rr_wd), .rr_fc(rr_fc),
 	.sub_arm(sub_arm), .sub_clr(sub_clr), .sub_a(sub_a), .sub_d(sub_d), .sub_sz(sub_sz),
 	.rte_alt(rte_alt),
@@ -348,7 +348,7 @@ ap68060_dmu #(.DC1_ATC(DC1_ATC)) dmu (
 	.bi_gnt(b_gnt[0]), .bi_done(b_done[0]), .bi_err(b_err[0]), .bi_drop(b_drop), .bi_more(b_more),
 	.bi_rvalid(b_rvalid && b_rclient == 1'b0), .b_rdata(b_rdata), .b_rbeat(b_rbeat),
 	.sb_empty(sb_empty), .sb_err(sb_err), .sb_fslw(sb_fslw), .sb_err_ack(sb_err_ack),
-	.sb_fa(sb_fa), .sb_dob(sb_dob), .sb_fn(sb_fn), .sb_ffc(sb_ffc), .sb_wait(sb_wait),
+	.sb_fa(sb_fa), .sb_dob(sb_dob), .sb_fn(sb_fn), .sb_ffc(sb_ffc), .sb_wait(sb_wait), .bi_errm(b_errm), .sb_fm(sb_fm),
 	.rr_v(rr_v), .rr_pa(rr_pa), .rr_n(rr_n), .rr_wd(rr_wd), .rr_fc(rr_fc),
 	.b_ravec(b_ravec), .b_rtci(b_rtci),
 	.sn_req(sn_req), .sn_pa(sn_pa), .sn_look(sn_look), .sn_hit(sn_hit),
@@ -463,7 +463,7 @@ ap68060_useq useq (
 ap68030_biu #(.NC(NC), .C030(CACHE030)) biu (
 	.clk(clk), .nreset(nreset),
 	.req(b_req & ~{be_fstop || rsto_busy, 1'b0}), .breq(b_breq), .wdata(b_wdata),
-	.gnt(b_gnt), .done(b_done), .err(b_err),
+	.gnt(b_gnt), .done(b_done), .err(b_err), .errm(b_errm),
 	.rvalid(b_rvalid), .rclient(b_rclient), .rdata(b_rdata), .rbeat(b_rbeat),
 	.ravec(b_ravec), .rtci(b_rtci), .errbeat(b_errbeat), .idle(b_idle), .own(b_own),
 	.unlock(lk_abandon), .sn_busy(sn_busy || sn_act), .halt(dbg_halted),

@@ -157,6 +157,7 @@ module ap68060_backend
 	input  logic  [2:0] sb_fn,
 	input  logic  [2:0] sb_ffc,
 	input  logic        dm_sbw,         // a data access waits for a buffered write's bus error
+	input  logic        sb_fm,          // ... the PMMU denied that write
 	// RTE of a $A/$B frame: the faulted write again (DF set) ...
 	output logic        rr_v,
 	output logic [31:0] rr_pa,
@@ -254,8 +255,9 @@ logic        wb_dcommit;      // ... and its result (DBcc's decrement, odd targe
 logic [31:0] wb_exc_addr;
 logic [31:0] wb_exc_fslw;     // FSLW of an access error
 logic [31:0] wb_exc_dob;      // 68030 $A frame: the failed write's data
-logic  [1:0] wb_exc_int;      // ... the frame's internal word: 1 a write the
-                              // RTE reruns (DF), 2 a read it can complete (!DF)
+logic  [2:0] wb_exc_int;      // ... the frame's internal word: 1 a write the
+                              // RTE reruns (DF), 2 a read it can complete (!DF),
+                              // 4 a read-modify-write's read (!DF: emulated)
 logic        wb_st;           // store at WB
 logic [31:0] wb_st_data;
 logic [15:0] wb_sr_new;       // SR write
@@ -311,12 +313,13 @@ logic        pcr_edebug, pcr_dfp, pcr_ess;
 logic        bus_l, bus_sl, bus_le, bus_sle;
 
 // exception information for the exception microroutine
-logic [31:0] xi_pc, xi_addr, xi_fslw, xi_dob;
-logic  [1:0] xi_int;
+logic [31:0] xi_pc, xi_addr, xi_fslw, xi_dob, xi_baddr;
+logic  [2:0] xi_int;
 // RTE of a $A/$B frame (68030): the frame's words its routine read
-logic [31:0] rb_fa, rb_dob, rb_dib;
+logic [31:0] rb_fa, rb_dob, rb_dib, rb_baddr;
 logic [15:0] rb_ssw;
-logic  [1:0] rb_int;
+logic  [2:0] rb_int;
+logic        rb_emul;           // the RTE resumes after an emulated read-modify-write
 logic  [1:0] rte_bx;            // EX: this RTE's frame is $A (1) / $B (2): run again
 logic  [1:0] wb_rteb;
 logic [15:0] xi_sr, xi_vecw;
@@ -1242,7 +1245,7 @@ always_comb begin
 			// a throwaway frame: SR from it, then this RTE again (on the
 			// stack the new SR selects); a $A/$B frame: nothing changes, the
 			// RTE again as that frame's routine
-			xs.target = (rte_fmt1 || rte_bx != 2'd0) ? ex_u.pc : ex_bv;
+			xs.target = (rte_fmt1 || rte_bx != 2'd0) ? ex_u.pc : rb_emul ? (rb_baddr - 32'd2) : ex_bv;
 			if (rte_bx != 2'd0) begin
 				xs.sr_we = 1'b0;
 				xs.flags = ccr_f;
@@ -1625,7 +1628,11 @@ always_comb begin
 		3'd4: begin
 			bwe = 3'b011;
 			bwa[0] = R_T0 + 5'd6;  bwd[0] = xi_dob;
-			bwa[1] = R_T0 + 5'd7;  bwd[1] = {30'd0, xi_int};
+			bwa[1] = R_T0 + 5'd7;  bwd[1] = {29'd0, xi_int};
+		end
+		3'd5: begin
+			bwe = 3'b001;
+			bwa[0] = R_T0 + 5'd5;  bwd[0] = xi_baddr;    // $B: the stage B address
 		end
 		default: ;
 	endcase
@@ -1699,7 +1706,7 @@ assign kill_now = (adv_wb && (wb_is_exc || wb_redir)) || x_go;
 logic  [7:0] x_vec;
 logic  [3:0] x_fmt;
 logic [31:0] x_pc, x_addr, x_fslw, x_dob;
-logic  [1:0] x_int;
+logic  [2:0] x_int;
 logic [15:0] x_osr, x_nsr;
 logic  [3:0] x_kind;
 logic  [4:0] x_ssp;
@@ -1724,7 +1731,7 @@ always_comb begin
 	x_osr  = cur;
 	x_fslw = 32'd0;
 	x_dob  = 32'd0;
-	x_int  = 2'd0;
+	x_int  = 3'd0;
 	x_addr = wb_u.pc;
 	x_pc   = wb_u.pc;
 	x_vec  = wb_exc;
@@ -1782,15 +1789,17 @@ always_comb begin
 	// or where execution continues (8.4.6)
 	// (68030: the RTE's rerun of a faulted write failed again: format $A
 	// with that write)
+	// (a write the PMMU denied: format $B -- the 68030 translates a write
+	// before it posts it, so the fault falls in its instruction)
 	if (take_sbe) begin
 		x_vec  = 8'd2;
-		x_fmt  = 4'hA;
-		x_kind = EK_FMTA;
+		x_fmt  = sb_fm ? 4'hB : 4'hA;
+		x_kind = sb_fm ? EK_FMTB : EK_FMTA;
 		x_fslw = {16'd0, 7'd0, 1'b1, 1'b0, 1'b0,
 		          (sb_fn == 3'd1) ? 2'b01 : (sb_fn == 3'd2) ? 2'b10 : 2'b00, 1'b0, sb_ffc};
 		x_addr = sb_fa;
 		x_dob  = sb_dob;
-		x_int  = 2'd1;
+		x_int  = 3'd1;
 		if (!(adv_wb && wb_is_exc)) x_pc = (stopped && !wb_v) ? stop_pc : wb_next;
 		if (sbe_hold && !wb_bound) begin
 			x_fmt  = 4'hB;
@@ -1872,10 +1881,10 @@ always_ff @(posedge clk) begin
 		rte_fmt1 <= 1'b0;
 		rte_bx   <= 2'd0;
 		rte_alt  <= 2'd0;
-		rb_fa <= '0; rb_ssw <= '0; rb_dib <= '0; rb_dob <= '0; rb_int <= '0;
+		rb_fa <= '0; rb_ssw <= '0; rb_dib <= '0; rb_dob <= '0; rb_int <= '0; rb_baddr <= '0; rb_emul <= 1'b0;
 		rr_v <= 1'b0; rr_pa <= '0; rr_n <= '0; rr_wd <= '0; rr_fc <= '0;
 		sub_arm <= 1'b0; sub_clr <= 1'b0; sub_a <= '0; sub_d <= '0; sub_sz <= '0;
-		xi_dob <= '0; xi_int <= '0;
+		xi_dob <= '0; xi_int <= '0; xi_baddr <= '0;
 		cas2_eq <= 1'b0;
 		ex_latch <= 32'd0;
 		bf_off   <= 32'd0;
@@ -2161,8 +2170,11 @@ always_ff @(posedge clk) begin
 			wb_exc_dob  <= 32'd0;
 			// a data read that faulted: the handler may complete it (DIB, DF
 			// cleared) for the RTE
+			// (a locked one -- TAS, CAS, CAS2: the handler may emulate the
+			// whole instruction, DF cleared: the RTE resumes after it)
 			wb_exc_int  <= (ex_u.exc == 8'd0 && ex_fault && (ex_fslw & FSLW_IO) == 32'd0 &&
-			                (ex_fslw & FSLW_WE) == 32'd0 && ex_fslw[24]) ? 2'd2 : 2'd0;
+			                (ex_fslw & FSLW_WE) == 32'd0 && ex_fslw[24]) ?
+			               (((ex_fslw & FSLW_LK) != 32'd0) ? 3'd4 : 3'd2) : 3'd0;
 			wb_rteb     <= (ex_u.op == OP_RTE) ? rte_bx : 2'd0;
 			if (ex_u.exc == 8'd0 && !ex_fault && ex_is_fp && ex_xvec != 8'd0) begin
 				wb_exc_pcv  <= 1'b1;
@@ -2219,13 +2231,17 @@ always_ff @(posedge clk) begin
 		if (adv_ex && ex_u.op == OP_MISC && ex_u.cond == 4'd6) begin
 			rb_fa <= ex_av; rb_ssw <= ex_bv[15:0];
 		end
-		if (adv_ex && ex_u.op == OP_MISC && ex_u.cond == 4'd13) rb_dib <= ex_av;
+		if (adv_ex && ex_u.op == OP_MISC && ex_u.cond == 4'd13) begin
+			rb_dib <= ex_av; rb_baddr <= ex_bv;
+		end
 		if (adv_ex && ex_u.op == OP_MISC && ex_u.cond == 4'd14) begin
 			mx_lo <= ex_av; mx_ext <= ex_bv[15:0]; mx_hi <= ex_latch;
 		end
 		if (adv_ex && ex_u.op == OP_MISC && ex_u.cond == 4'd7) begin
-			rb_dob <= ex_av; rb_int <= ex_bv[1:0];
+			rb_dob  <= ex_av; rb_int <= ex_bv[2:0];
+			rb_emul <= ex_bv[2] && !rb_ssw[8];
 		end
+		if (adv_ex && ex_u.op == OP_RTEF) rb_emul <= 1'b0;
 		if (adv_ex && ex_u.op == OP_CAS2C)
 			cas2_eq <= ex_u.cond[0] ? (cas2_eq && cmp_flags[2]) : cmp_flags[2];
 		if (!stall_wb) wb_v <= adv_ex;
@@ -2366,6 +2382,7 @@ always_ff @(posedge clk) begin
 			xw_ph    <= 3'd1;          // T8-T13, T6-T7 first, then exc_go
 			xi_dob   <= x_dob;
 			xi_int   <= x_int;
+			xi_baddr <= wb_npc + 32'd2;
 			rte_alt  <= 2'd0;
 			// a new bus fault frame: a completion the last RTE armed is void
 			if (x_kind == EK_FMTA || x_kind == EK_FMTB) sub_clr <= 1'b1;
@@ -2406,7 +2423,7 @@ always_ff @(posedge clk) begin
 			flush    <= 1'b1;
 			fe_flush <= 1'b1;
 			xw_ph <= xw_ph + 3'd1;
-			if (xw_ph == 3'd4) begin
+			if (xw_ph == 3'd5) begin
 				xw_ph  <= 3'd0;
 				exc_go <= 1'b1;
 			end
@@ -2426,7 +2443,7 @@ always_ff @(posedge clk) begin
 			wb_exc_addr <= dm_st_faddr;
 			wb_exc_fslw <= dm_st_fslw;
 			wb_exc_dob  <= dm_st_dob;
-			wb_exc_int  <= 2'd0;
+			wb_exc_int  <= 3'd0;
 			// (68030) the store's last bus cycle ends the instruction: it
 			// completes, format $A with the write for the RTE to rerun and
 			// the next instruction's PC; otherwise format $B and the
@@ -2437,7 +2454,7 @@ always_ff @(posedge clk) begin
 				wb_exc_pcv  <= 1'b1;
 				wb_exc_pc   <= wb_npc;
 				wb_xcommit  <= 1'b1;
-				wb_exc_int  <= 2'd1;
+				wb_exc_int  <= 3'd1;
 			end
 		end
 		// maintenance done: WB completes next cycle.  PLPA: the physical

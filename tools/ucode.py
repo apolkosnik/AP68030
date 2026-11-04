@@ -458,8 +458,9 @@ R('RTE_BUSB',
   U(op='MOV', sz='L', msz='L', a='LD', d='T6', ag='BASED', agb='SP', const=0x10, mfc='SUP'),
   U(op='MOV', sz='L', msz='L', a='LD', d='T7', ag='BASED', agb='SP', const=0x18, mfc='SUP'),
   U(op='MOV', sz='L', msz='L', a='LD', d='T3', ag='BASED', agb='SP', const=0x2C, mfc='SUP'),
+  U(op='MOV', sz='L', msz='L', a='LD', d='T1', ag='BASED', agb='SP', const=0x24, mfc='SUP'),
   U(op='MISC', cond=6, sz='L', a='T6', b='T5'),
-  U(op='MISC', cond=13, sz='L', a='T3'),
+  U(op='MISC', cond=13, sz='L', a='T3', b='T1'),
   U(op='MISC', cond=7, sz='L', a='T7', b='T4'),
   U(op='MOV', sz='W', msz='W', a='LD', d='T1', ag='BASED', agb='SP', const=0, mfc='SUP'),
   U(op='MOV', sz='L', msz='L', a='LD', d='T2', ag='BASED', agb='SP', const=2, mfc='SUP'),
@@ -829,7 +830,9 @@ R('EXC_FMT4',
 # internal word at +$08 (this core's: 1 a write the RTE reruns when DF is
 # set, 2 a read the RTE completes from the data input buffer when DF is
 # clear).  Format $A (32 bytes): +$08 internal, +$0A SSW, +$10 FA, +$18
-# DOB.  Format $B (92 bytes): the same, +$2C DIB, +$36 version (0).
+# DOB.  Format $B (92 bytes): the same, +$24 the stage B address (the next
+# instruction + 2: where an emulated read-modify-write resumes), +$2C DIB,
+# +$36 version (0).
 R('EXC_FMTA',
   U(op='MOV', sz='L', a='T6',  ag='BASED', agb='SSP', const=-32 + 0x18, msz='L', mem='ST', mfc='SUP'),
   U(op='MOV', sz='L', a='T11', ag='BASED', agb='SSP', const=-32 + 0x10, msz='L', mem='ST', mfc='SUP'),
@@ -842,6 +845,7 @@ R('EXC_FMTA',
     a='LD', br='A', cond=15, last=1))     # cond 15: the handler fetch
 R('EXC_FMTB',
   U(op='MOV', sz='W', a='ZERO', ag='BASED', agb='SSP', const=-92 + 0x36, msz='W', mem='ST', mfc='SUP'),
+  U(op='MOV', sz='L', a='T5',  ag='BASED', agb='SSP', const=-92 + 0x24, msz='L', mem='ST', mfc='SUP'),
   U(op='MOV', sz='L', a='T6',  ag='BASED', agb='SSP', const=-92 + 0x18, msz='L', mem='ST', mfc='SUP'),
   U(op='MOV', sz='L', a='T11', ag='BASED', agb='SSP', const=-92 + 0x10, msz='L', mem='ST', mfc='SUP'),
   U(op='MOV', sz='W', a='T13', ag='BASED', agb='SSP', const=-92 + 0x0A, msz='W', mem='ST', mfc='SUP'),
