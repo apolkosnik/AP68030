@@ -27,7 +27,7 @@ Measured at commit `27dd6d4` (default build); the 8 KB / FPU build at `8157742`.
 | Timing | Default build: +0.426 ns at 70 MHz, Fmax 72.2 MHz, no failing endpoint. 8 KB caches and on-chip FPU: +0.006 ns, Fmax 70.0 MHz |
 | Regression | AP68030's 18 programs, each plain and with wait states, plus Dhrystone: all 37 runs pass (default build) |
 | Dhrystone 2.1 | 0.133 DMIPS/MHz with the 68030 caches; 0.375 DMIPS/MHz with the 8 KB caches (AP68030 itself: 0.235) |
-| Corpus | WinUAE 68030 `cputest` (v20): the smoke set (six slices of Default, Basic, AE, ODD_EXC, ODD_STK, FFEXT_SRC; 38,918 rounds) passes. The full integer corpus has not been run yet; the IRQ groups need the v20 interrupt model, not ported to this bench yet |
+| Corpus | WinUAE 68030 `cputest` (v20): the smoke set (six slices of Default, Basic, AE, ODD_EXC, ODD_STK, FFEXT_SRC; 38,918 rounds) passes. The full integer corpus (v24, 3,203 slices) is being run; it found three bugs so far (MOVEC privilege order, MOVES with its own register as (An)+/-(An), stale coprocessor-engine state), all fixed; the IRQ groups need the v20 interrupt model, not ported to this bench yet |
 
 **Open**:
 

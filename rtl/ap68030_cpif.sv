@@ -241,6 +241,7 @@ task automatic xgo(input logic [7:0] v, input logic [3:0] f, input logic [31:0] 
 	xint <= {tr_t1, tr_t0, flow, cp_cond, cp_dr, cp_ca, cp_pcbit, cp_trace_wait, cp_kind, cp_id, 1'b0, ir};
 	xea  <= ea;
 	x_tr <= 1'b0;
+	acc_on <= 1'b0; s_wait <= 1'b0; cnt <= 8'd0;   // (no sub-step left for the next instruction)
 	st   <= C_IDLE;
 endtask
 task automatic proto;
@@ -249,6 +250,7 @@ endtask
 // (the trace: T1, T0 with a change of flow, or one an SR transfer made due)
 task automatic finish(input logic [31:0] p);
 	fin <= 1'b1; npc <= p; st <= C_IDLE;
+	acc_on <= 1'b0; s_wait <= 1'b0;
 	fin_tr <= tr_t1 || (tr_t0 && flow) || cp_trace_wait;
 endtask
 task automatic goto_pc(input logic [31:0] p);
@@ -283,6 +285,7 @@ always_ff @(posedge clk) begin
 		C_IDLE: begin
 			if (start) begin
 				ir <= op; pci <= pc_i; scan <= pc_i + 32'd2; cnt <= 8'd0;
+				acc_on <= 1'b0; s_wait <= 1'b0;
 				cp_id <= op[11:9];
 				cp_cond <= 1'b0; cp_dr <= 1'b0; cp_ca <= 1'b0; cp_pcbit <= 1'b0; cp_trace_wait <= 1'b0;
 				tr_t1 <= sr[15]; tr_t0 <= sr[14]; flow <= 1'b0;
@@ -300,6 +303,7 @@ always_ff @(posedge clk) begin
 			else if (resume) begin
 				// RTE of a $9 frame: the dialogue again from the response
 				ir <= rs_int[15:0]; pci <= pc_i; scan <= rs_pc; ea <= rs_ea;
+				acc_on <= 1'b0; s_wait <= 1'b0; cnt <= 8'd0;
 				{tr_t1, tr_t0, flow, cp_cond, cp_dr, cp_ca, cp_pcbit, cp_trace_wait, cp_kind, cp_id} <= rs_int[31:17];
 				tr_t1 <= sr[15]; tr_t0 <= sr[14];
 				st <= C_CP1;

@@ -454,9 +454,10 @@ always_comb begin
 	// after the source EA's update (the 68000 family computes the EA first)
 	nu.b_upd = nu.upd_v && !me_ea1 && (me.m == EM_AIP || me.m == EM_APD) &&
 	           nu.b_src == OS_REG && nu.b_reg == nu.upd_reg;
-	// (the 68060 MOVES Rn,(An)+/-(An) stores the original Rn, as MOVE does --
-	// WinUAE gencpu; the 68040 computed the EA first)
-	nu.a_upd = 1'b0;
+	// MOVES Rn,<ea> computes the EA first on the 68030: MOVES.L A6,-(A6)
+	// stores the decremented A6 (the WinUAE 68030 corpus, v24)
+	nu.a_upd = nu.upd_v && (me.m == EM_AIP || me.m == EM_APD) &&
+	           src.opw[15:8] == 8'h0E && nu.a_src == OS_REG && nu.a_reg == nu.upd_reg;
 	// the deferred update lands on the upd2 uop, memory or not (FRESTORE
 	// commits (An)+ only after its frame check).  Its displacement merge is
 	// applied after the MOVEM block (no MOVEM uop has upd2), so the two

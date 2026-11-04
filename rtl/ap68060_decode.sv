@@ -624,11 +624,12 @@ always_comb begin
 			// (WinUAE's order: a control register number the 68030 does not
 			// have is an illegal instruction in either mode; a STOP whose
 			// new SR leaves supervisor mode stops in user mode, 68020-68040)
-			if ((a0.rt == UA_MOVEC_RD || a0.rt == UA_MOVEC_WR) && !movec_ok(win[1][11:0]))
-				nrec.exc = 8'd4;
-			// (the MMU instructions check the privilege first, UM 9.8)
-			else if (a0.priv && !smode)
+			// (the WinUAE 68030 corpus v24: MOVEC checks the privilege first,
+			// then the register; the MMU instructions too, UM 9.8)
+			if (a0.priv && !smode)
 				nrec.exc = 8'd8;
+			else if ((a0.rt == UA_MOVEC_RD || a0.rt == UA_MOVEC_WR) && !movec_ok(win[1][11:0]))
+				nrec.exc = 8'd4;
 			else if (a0.rt == UA_PMMU) begin
 				// the PMMU's instructions: the second word decides (UM 3.3.3
 				// formats of PFLUSH, PLOAD, PMOVE, PTEST: their zero bits,
