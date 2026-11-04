@@ -33,27 +33,56 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parent
-sys.path.insert(0, str(REPO / "tools" / "cputest030"))
-from replay_gen import generate  # noqa: E402
+# the v20 corpus: AP68030's generator (its v20 rules); v24: the AP68060's
+# (the generator's setup writes are not undone, as cputest.cpp computes)
+import importlib.util  # noqa: E402
+
+
+def _load(name, path):
+    sys.path.insert(0, str(path.parent))
+    spec = importlib.util.spec_from_file_location(name, path)
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[name] = mod
+    spec.loader.exec_module(mod)
+    sys.path.pop(0)
+    return mod
+
+
+GEN20 = _load("replay_gen030", REPO / "tools" / "cputest030" / "replay_gen.py").generate
+GEN24 = _load("replay_gen060", REPO / "tools" / "cputest" / "replay_gen.py").generate
 
 OBJ = Path(os.environ.get("WORK", REPO / "obj030cpt"))
 SIM = Path(os.environ.get("CPUTEST_SIM", OBJ / "obj_cputest" / "tb_cputest"))
 MON = Path(os.environ.get("CPUTEST_MON", OBJ / "cputest_mon030.bin"))
 
-# group directories are 68030_<name>; the integer groups only
+# group directories: 68030_<name> (v20) or 3_<name> (v24, merged .daz
+# slices); the integer groups only (the FPU ones assume a 68881/68882)
+GROUPS = {"BASIC": "Basic", "EXTDST": "FFEXT_DST", "EXTSRC": "FFEXT_SRC",
+          "ODDEXC": "ODD_EXC", "ODDIRQ": "ODD_IRQ", "ODDSTK": "ODD_STK"}
 INTEGER = ["AE", "Basic", "Default", "FFEXT_DST", "FFEXT_SRC", "IRQ", "JITLM",
            "ODD_EXC", "ODD_IRQ", "ODD_STK"]
-NOT_DEFAULT = ["IRQ", "ODD_IRQ"]
+NOT_DEFAULT = ["IRQ", "ODD_IRQ"]     # (v20 only: its interrupt model is not in this bench)
 SMOKE = [("Default", "DIVS.W", "0001"), ("Basic", "ABCD.B", "0001"),
          ("AE", "BSR.B", "0001"), ("ODD_EXC", "ANDSR.W", "0001"),
-         ("FFEXT_SRC", "MOVE.L", "0001"), ("ODD_STK", "BSR.W", "0001")]
+         ("FFEXT_SRC", "MOVE.L", "0001"), ("ODD_STK", "BSR.W", "0001"),
+         ("IRQ", "NOP", "0001")]
 
 
 def corpus_root(src: Path, work: Path) -> Path:
-    for cand in (src, src / "data"):
-        if any(cand.glob("68030_*")):
+    if src.is_file():
+        dest = work / "corpus"
+        stamp = dest / ".src"
+        ident = "%s %d" % (src.resolve(), src.stat().st_mtime_ns)
+        if not stamp.exists() or stamp.read_text() != ident:
+            dest.mkdir(parents=True, exist_ok=True)
+            with zipfile.ZipFile(src) as zf:
+                zf.extractall(dest)
+            stamp.write_text(ident)
+        src = dest
+    for cand in (src, src / "data", src / "data030"):
+        if any(cand.glob("68030_*")) or any(cand.glob("3_*")):
             return cand
-    raise SystemExit("no 68030_* groups under %s" % src)
+    raise SystemExit("no 68030_* or 3_* groups under %s" % src)
 
 
 def unpack_daz(daz: Path, cache: Path) -> Path:
@@ -97,6 +126,23 @@ def match(v, pats):
 
 def discover(root: Path, args):
     out = []
+    for daz in sorted(root.glob("3_*/*/0000.daz")):
+        g = daz.parent.parent.name[2:]
+        group = GROUPS.get(g, g)
+        instr = daz.parent.name
+        if group not in INTEGER:
+            continue
+        if not match(group, args.group) or not match(instr, args.instruction):
+            continue
+        d = unpack_daz(daz, args.work / "unpacked")
+        for dat in sorted(d.glob("[0-9][0-9][0-9][0-9].dat")):
+            num = dat.name[:4]
+            if num == "0000" or not match(num, args.slice):
+                continue
+            if not args.full and (group, instr, num) not in SMOKE:
+                continue
+            out.append(dict(group=group, instr=instr, slice=num, header=d / "0000.dat",
+                            data=dat, gdir=daz.parent.parent))
     for hdr in sorted(root.glob("68030_*/*/0000.dat")):
         group = hdr.parent.parent.name[6:]
         instr = hdr.parent.name
@@ -132,7 +178,9 @@ def run(item, args):
     log.parent.mkdir(parents=True, exist_ok=True)
     t0 = time.monotonic()
     try:
-        generate(str(item["header"]), str(item["data"]), str(job), args.round_limit)
+        ver = struct.unpack(">I", Path(item["header"]).read_bytes()[0:4])[0]
+        (GEN24 if ver >= 24 else GEN20)(str(item["header"]), str(item["data"]), str(job),
+                                        args.round_limit)
         cmd = [str(SIM), "+job=%s" % job, "+mon=%s" % MON,
                "+lmem=%s" % image(item["gdir"], "lmem.dat", args.work / "images"),
                "+tmem=%s" % image(item["gdir"], "tmem.dat", args.work / "images")]
