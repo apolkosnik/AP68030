@@ -61,6 +61,9 @@ module ap68060_backend
 	output logic [31:0] vbr,
 	output logic [31:0] cacr,
 	output logic        bc_clr,         // MOVEC to CACR with CABC or CUBC: clear the branch cache
+	output logic        bk_ov,          // pulse: the BKPT at bk_pc is replaced by the opcode bk_w (68030)
+	output logic [31:0] bk_pc,
+	output logic [15:0] bk_w,
 	output logic  [2:0] sfc,
 	output logic  [2:0] dfc,
 
@@ -153,7 +156,7 @@ module ap68060_backend
 );
 
 // the SR bits the 68060 keeps: T1 S M I2-I0 X N Z V C (no T0)
-localparam logic [15:0] SR_MASK = 16'hB71F;
+localparam logic [15:0] SR_MASK = 16'hF71F;   // T1 T0 S M I2-I0 X N Z V C
 
 //--------------------------------------------------------------------------
 // exception routine kinds (sequencer entry points)
@@ -251,7 +254,7 @@ logic  [4:0] ccr_f, ccr_b;
 
 // special registers (architectural, written at WB)
 logic [15:0] sr_r;            // T1 T0 S M 0 I2 I1 I0 (CCR lives in ccr_b)
-logic [31:0] vbr_r, cacr_r;
+logic [31:0] vbr_r, cacr_r, caar_r;
 logic  [2:0] sfc_r, dfc_r;
 logic [31:0] tc_r, itt0_r, itt1_r, dtt0_r, dtt1_r, urp_r, srp_r;
 // 68060: PCR (EDEBUG, DFP, ESS; the identification and revision are
@@ -891,6 +894,7 @@ function automatic logic [31:0] spr_read(input logic [7:0] n);
 		8'h07: spr_read = dtt1_r;
 		8'h08: spr_read = {bus_l, bus_sl, bus_le, bus_sle, 28'd0};            // BUSCR
 		8'h11: spr_read = vbr_r;
+		8'h12: spr_read = caar_r;                           // CAAR (the 68030)
 		8'h16: spr_read = urp_r;
 		8'h17: spr_read = srp_r;
 		8'h18: spr_read = {16'h0430, PCR_REV, pcr_edebug, 5'd0, pcr_dfp, pcr_ess}; // PCR
@@ -1124,9 +1128,11 @@ always_comb begin
 				xs.sr_we  = 1'b1;
 				xs.flags  = xs.sr_new[4:0];
 			end
-			// BKPT: after its acknowledge cycle, the illegal instruction
-			// exception (format $0, the BKPT's PC)
-			if (ex_u.cond == 4'd9) xs.xvec = 8'd4;
+			// BKPT: its acknowledge ended in BERR (A bit 16): the illegal
+			// instruction exception (format $0, the BKPT's PC); else the
+			// opcode it returned (A 15:0) replaces the BKPT: WB redirects
+			// to the BKPT's own address with the replacement armed
+			if (ex_u.cond == 4'd9 && ex_av[16]) xs.xvec = 8'd4;
 		end
 		OP_IACKV: begin
 			// IACK data: [7:0] vector, [8] AVEC, [9] TEA (spurious)
@@ -1414,13 +1420,22 @@ wire wb_commit   = adv_wb && !wb_is_exc;
 wire wb_bound    = wb_commit && wb_u.last;
 wire [31:0] wb_next = wb_redir_pc;
 
-// trace (68060: T1 only, no trace on change of flow) uses the T1 the
-// instruction started with (sr_r before its own SR write); a traced STOP
-// or LPSTOP loads SR, takes the trace and never stops (MC68060UM 8.2.6)
-wire tr_now      = sr_r[15];
+// trace uses the T1/T0 the instruction started with (sr_r before its own
+// SR write): T1 every instruction, T0 a change of flow -- a taken branch,
+// jump, call, return -- or an SR write that changes its upper byte's T,
+// S, M or mask bits (MC68030UM 8.1.6; AP68030's rule); a traced STOP loads
+// SR, takes the trace and never stops
+wire wb_srchg    = wb_sr_we && ({wb_sr_new[15:12], wb_sr_new[10:8]} != {sr_r[15:12], sr_r[10:8]});
+wire tr_now      = sr_r[15] || (sr_r[14] && (wb_cof || wb_srchg));
 wire wb_is_stop  = (wb_u.op == OP_MISC) && (wb_u.cond == 4'd2 || wb_u.cond == 4'd8);
-wire stop_traced = wb_is_stop && sr_r[15];
-wire trace_due   = wb_bound && tr_now;
+wire stop_traced = wb_is_stop && tr_now;
+// (a trap instruction -- TRAP, TRAPV, TRAPcc, CHK, CHK2, divide by zero --
+// traced under T1: its exception is processed, then the trace of it,
+// stacking the trap handler's entry; MC68030UM 8.1.12.  trace_defer holds
+// it to the end of the trap's exception routine)
+logic        trace_defer;
+logic [31:0] trace_addr;
+wire trace_due   = wb_bound && (tr_now || (trace_defer && xstk));
 // 68060 priorities (MC68060UM 8.3): a trace goes before an interrupt due at
 // the same boundary, and interrupts are not sampled from the start of an
 // exception's processing until the first instruction of its handler has
@@ -1577,6 +1592,10 @@ always_comb begin
 	// before the interrupt clears M (WinUAE cputest, 68060: M stays)
 	if (adv_wb && wb_is_exc && wb_hodd && xm_v)
 		cur[12] = xm_m;
+	// a format error (RTE, FRESTORE): the 68030 clears T1/T0 first, so the
+	// frame's SR has no trace bits
+	if (adv_wb && wb_is_exc && wb_exc == 8'd14)
+		cur[15:14] = 2'b00;
 	x_osr  = cur;
 	x_fslw = 32'd0;
 	x_addr = wb_u.pc;
@@ -1601,7 +1620,7 @@ always_comb begin
 		// traced instruction
 		x_vec  = 8'd9;
 		x_pc   = wb_next;
-		x_addr = wb_u.pc;
+		x_addr = (trace_defer && xstk) ? trace_addr : wb_u.pc;
 	end
 	// 68060 frames (MC68060UM table 8-1): $4 access error, $2 address
 	// error, CHK, TRAPcc/TRAPV, divide by zero, trace; $0 the rest; the FPU
@@ -1668,8 +1687,10 @@ always_ff @(posedge clk) begin
 		xm_v    <= 1'b0;
 		xm_m    <= 1'b0;
 		vbr_r   <= 32'd0;
+		caar_r  <= 32'd0;
 		cacr_r  <= 32'd0;
 		bc_clr  <= 1'b0;
+		bk_ov   <= 1'b0; bk_pc <= 32'd0; bk_w <= 16'd0;
 		sfc_r   <= 3'd0;
 		dfc_r   <= 3'd0;
 		tc_r    <= 32'd0;
@@ -1688,6 +1709,8 @@ always_ff @(posedge clk) begin
 		md_lol  <= 32'd0;
 		md_ovfl <= 1'b0;
 		md_hiin <= 32'd0;
+		trace_defer <= 1'b0;
+		trace_addr  <= 32'd0;
 		rte_fmt1 <= 1'b0;
 		cas2_eq <= 1'b0;
 		ex_latch <= 32'd0;
@@ -1898,7 +1921,7 @@ always_ff @(posedge clk) begin
 			if (ex_u.last) smc_pend <= 1'b0;
 			else if (ex_smc) smc_pend <= 1'b1;
 			// where execution continues, predicted correctly or not
-			wb_redir_pc <= ex_br ? ex_next : ex_npc;
+			wb_redir_pc <= (ex_u.op == OP_MISC && ex_u.cond == 4'd9) ? ex_u.pc : (ex_br ? ex_next : ex_npc);
 			wb_sr_we    <= ex_sr_we;
 			wb_cof      <= ex_br && ex_taken;
 			wb_sr_new   <= ex_sr_new;
@@ -2018,6 +2041,7 @@ always_ff @(posedge clk) begin
 		// WB commit
 		//------------------------------------------------------------------
 		bc_clr <= 1'b0;
+		bk_ov  <= 1'b0;
 		if (wb_commit) begin
 			dbg_retire <= wb_u.last;
 			// architectural commit: the back file's write ports (bwe)
@@ -2047,6 +2071,7 @@ always_ff @(posedge clk) begin
 						bus_lkdone <= 1'b0;
 					end
 					8'h11: vbr_r  <= wb_res;
+					8'h12: caar_r <= wb_res;
 					8'h16: urp_r  <= wb_res & 32'hFFFF_FE00;
 					8'h17: srp_r  <= wb_res & 32'hFFFF_FE00;
 					8'h18: begin
@@ -2068,6 +2093,9 @@ always_ff @(posedge clk) begin
 			end
 			// HALT: the halted state until reset (no debug port to restart)
 			if (wb_u.op == OP_MISC && wb_u.cond == 4'd10) halted <= 1'b1;
+			if (wb_u.op == OP_MISC && wb_u.cond == 4'd9) begin
+				bk_ov <= 1'b1; bk_pc <= wb_u.pc; bk_w <= wb_res[15:0];
+			end
 			if (wb_redir) begin
 				flush    <= 1'b1;
 				if (!wb_eredir) begin
@@ -2138,6 +2166,9 @@ always_ff @(posedge clk) begin
 			ccr_f    <= x_osr[4:0];
 			stopped  <= 1'b0;
 			lpstopped <= 1'b0;
+			// the trace of a traced trap instruction, after its routine
+			trace_defer <= adv_wb && wb_is_exc && wb_post_trap && sr_r[15];
+			trace_addr  <= wb_u.pc;
 			if (take_irq && !(adv_wb && wb_is_exc)) begin
 				irq_lvl_r <= irq_lvl;
 				ipend_r   <= 1'b0;

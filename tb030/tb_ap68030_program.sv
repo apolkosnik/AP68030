@@ -612,6 +612,9 @@ initial begin
 	$finish;
 end
 
+always @(posedge clk) if ($test$plusargs("biudbg") && (dut.biu.gnt != 0 || dut.biu.done != 0 || dut.biu.err != 0 || dut.biu.b_ack))
+	$display("%8d BIU gnt=%b done=%b err=%b ack=%b st=%0d addr=%08x tt=%0d tm=%0d rd=%b siz=%0d lanes=%08x berr=%b",
+	         clocks, dut.biu.gnt, dut.biu.done, dut.biu.err, dut.biu.b_ack, dut.biu.st, dut.biu.q.addr, dut.biu.q.tt, dut.biu.q.tm, dut.biu.q.rd, dut.biu.q.siz, dut.biu.lanes, dut.biu.b_berr);
 // the pipeline's retirements and exception entries with +trace
 always @(posedge clk)
 	if ($test$plusargs("trace") && dut.be.adv_wb)

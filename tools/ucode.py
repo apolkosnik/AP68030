@@ -321,9 +321,14 @@ R('MOVE_FROM_USP', U(op='MOV', sz='L', a='USP', d='AY', last=1))
 # breakpoint acknowledge cycle (TT=3, TM=0, A=0, a byte read; TA or TEA
 # both end it) and then takes the illegal instruction exception (MISC 9)
 R('TRAP',  U(last=1))
-R('BKPT',  U(op='MOV', sz='B', msz='B', a='LD', mem='LD', mfc='BKPT', ag='BASED', agb='ZERO',
+# BKPT #n: the breakpoint acknowledge (CPU space, A4-A2 = n, a word); BERR
+# gives the illegal instruction exception, a normal end the opcode that
+# replaces the BKPT (the 68030, MC68030UM 7.4.2)
+R('BKPT',  U(op='AND', sz='L', a='CONST', const=7, b='OPW', d='T0'),
+           U(op='LSL', sz='L', a='CONST', const=2, b='T0', d='T0'),
+           U(op='MOV', sz='L', msz='W', a='LD', d='T1', mem='LD', mfc='BKPT', ag='BASED', agb='T0',
              const=0),
-           U(op='MISC', cond=9, last=1))
+           U(op='MISC', cond=9, sz='L', a='T1', ser=1, last=1))
 R('NOP',   U(op='MISC', cond=0, ser=1, last=1))
 R('RESET', U(op='MISC', cond=1, ser=1, last=1))
 R('STOP',  U(op='MISC', cond=2, a='IMM', ser=1, last=1))

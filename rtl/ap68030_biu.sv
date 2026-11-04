@@ -167,7 +167,7 @@ assign own   = !b_granted;
 
 // read data back on the lanes D31-D0 (the requesters pick their bytes by
 // address); an acknowledge's vector on D7-D0
-wire [31:0] lanes = ack_tt ? {24'd0, b_rd[7:0]} :
+wire [31:0] lanes = (ack_tt && q.tm != 3'd0) ? {24'd0, b_rd[7:0]} :
                     (q.siz == SIZ_B) ? ({24'd0, b_rd[7:0]} << (8 * (3 - q.addr[1:0]))) :
                     (q.siz == SIZ_W) ? (q.addr[1] ? {16'd0, b_rd[15:0]} : {b_rd[15:0], 16'd0}) :
                     b_rd;

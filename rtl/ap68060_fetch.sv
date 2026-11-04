@@ -84,6 +84,9 @@ module ap68060_fetch
 	input  logic  [2:0] consume,
 	output logic        q_odd,        // the stream starts at an odd address
 	input  logic        bc_clr,       // CACR.CABC/CUBC: clear the branch cache
+	input  logic        bk_ov,        // pulse: a BKPT's replacement opcode (bk_w) for the word at bk_pc
+	input  logic [31:0] bk_pc,
+	input  logic [15:0] bk_w,
 	input  logic        btb_we,       // D1 writes a BTB entry
 	input  logic [BTB_AW-1:0] btb_wi,
 	input  logic        btb_wv,       // valid (0 drops the entry)
@@ -215,6 +218,17 @@ generate
 		ap68060_predec pd (.op(f2_w[gp]), .pd(f2_p[gp]));
 	end
 endgenerate
+// the 68030's breakpoint instruction replacement: the opcode a BKPT's
+// acknowledge returned stands for the word at the BKPT's address, once
+// (its F2 copy is replaced on its way to F3; the cache keeps the BKPT)
+logic [31:0] f2_la;            // F2 word 0's address
+logic        ov_v;
+logic [31:0] ov_a;
+logic [15:0] ov_w;
+pd_t         ov_p;
+ap68060_predec pd_ov (.op(ov_w), .pd(ov_p));
+wire ov_h0 = ov_v && (f2_n != 2'd0) && (f2_la[31:1] == ov_a[31:1]);
+wire ov_h1 = ov_v && (f2_n == 2'd2) && ({f2_la[31:2], 1'b1} == ov_a[31:1]);
 
 //--------------------------------------------------------------------------
 // I-ATC
@@ -542,6 +556,7 @@ always_ff @(posedge clk) begin
 		qb    <= '0; tq_n <= '0;
 		for (int i = 0; i < 4; i++) tq[i] <= '0;
 		f2_n  <= '0; f2_f <= 1'b0; f2_d <= 1'b0; f2_a <= 1'b0;
+		ov_v  <= 1'b0; ov_a <= '0; ov_w <= '0; f2_la <= '0;
 		for (int i = 0; i < 2; i++) f2_w[i] <= '0;
 		f3_n  <= '0; f3_f <= 1'b0; f3_d <= 1'b0; f3_a <= 1'b0;
 		for (int i = 0; i < 2; i++) begin f3_w[i] <= '0; f3_p[i] <= '0; end
@@ -649,6 +664,10 @@ always_ff @(posedge clk) begin
 		f3_f  <= f2_f; f3_d <= f2_d; f3_a <= f2_a;
 		f3_b  <= f2_b; f3_t <= f2_t;
 		for (int i = 0; i < 2; i++) begin f3_w[i] <= f2_w[i]; f3_p[i] <= f2_p[i]; end
+		if (ov_h0) begin f3_w[0] <= ov_w; f3_p[0] <= ov_p; end
+		if (ov_h1) begin f3_w[1] <= ov_w; f3_p[1] <= ov_p; end
+		if (ov_h0 || ov_h1) ov_v <= 1'b0;
+		if (bk_ov) begin ov_v <= 1'b1; ov_a <= bk_pc; ov_w <= bk_w; end
 		f2_n  <= '0;
 		f2_b  <= '0;
 
@@ -686,6 +705,7 @@ always_ff @(posedge clk) begin
 		//------------------------------------------------------------------
 		if (f1_deliver) begin
 			f2_n    <= f1_pc[1] ? 2'd1 : 2'd2;
+			f2_la <= f1_pc;
 			f2_w[0] <= f1_pc[1] ? x_chunk[15:0] : x_chunk[31:16];
 			f2_w[1] <= x_chunk[15:0];
 			f2_f <= 1'b0; f2_d <= 1'b0; f2_a <= 1'b0;
@@ -697,6 +717,7 @@ always_ff @(posedge clk) begin
 				logic [30:0] t;
 				t = (f1_bkind == 2'd2) ? fras[fras_tp] : f1_btgt;
 				f2_n <= (f1_pc[1] || !f1_bslot) ? 2'd1 : 2'd2;
+				f2_la <= f1_pc;
 				f2_b <= (f1_pc[1] || !f1_bslot) ? 2'b01 : 2'b10;
 				f2_t <= t;
 				f1_v <= 1'b0;
@@ -734,6 +755,7 @@ always_ff @(posedge clk) begin
 			else if (x_flt) begin
 				// ATC fault: the long word's words carry it
 				f2_n <= f1_pc[1] ? 2'd1 : 2'd2;
+				f2_la <= f1_pc;
 				for (int i = 0; i < 2; i++) f2_w[i] <= 16'd0;
 				f2_f <= 1'b1; f2_d <= f1_dem; f2_a <= 1'b1;
 				st   <= S_HALT;
@@ -810,10 +832,12 @@ always_ff @(posedge clk) begin
 						nla = {m_la[31:2], 2'b00} + 32'd4;
 						if (m_la[1]) begin
 							f2_n    <= 2'd1;
+							f2_la <= m_la;
 							f2_w[0] <= lw[15:0];
 						end
 						else begin
 							f2_n    <= 2'd2;
+							f2_la <= m_la;
 							f2_w[0] <= lw[31:16];
 							f2_w[1] <= lw[15:0];
 						end
@@ -841,10 +865,12 @@ always_ff @(posedge clk) begin
 					nla = {m_la[31:2], 2'b00} + 32'd4;
 					if (m_la[1]) begin
 						f2_n    <= 2'd1;
+						f2_la <= m_la;
 						f2_w[0] <= lw[15:0];
 					end
 					else begin
 						f2_n    <= 2'd2;
+						f2_la <= m_la;
 						f2_w[0] <= lw[31:16];
 						f2_w[1] <= lw[15:0];
 					end
@@ -858,6 +884,7 @@ always_ff @(posedge clk) begin
 				end
 				else begin
 					f2_n <= m_la[1] ? 2'd1 : 2'd2;
+					f2_la <= m_la;
 					for (int i = 0; i < 2; i++) f2_w[i] <= 16'd0;
 					f2_f <= 1'b1; f2_d <= m_dem; f2_a <= 1'b0;
 					// (a bus error's cause: the fetch mapped by a TTR, 8.4.4)
@@ -870,10 +897,12 @@ always_ff @(posedge clk) begin
 			if (busy && b_rvalid && !stale) begin
 				if (m_la[1]) begin
 					f2_n    <= 2'd1;
+					f2_la <= m_la;
 					f2_w[0] <= b_rdata[15:0];
 				end
 				else begin
 					f2_n    <= 2'd2;
+					f2_la <= m_la;
 					f2_w[0] <= b_rdata[31:16];
 					f2_w[1] <= b_rdata[15:0];
 				end
@@ -900,6 +929,7 @@ always_ff @(posedge clk) begin
 				stale <= 1'b0;
 				if (!stale) begin
 					f2_n    <= m_la[1] ? 2'd1 : 2'd2;
+					f2_la <= m_la;
 					f2_w[0] <= 16'd0;
 					f2_w[1] <= 16'd0;
 					f2_f <= 1'b1; f2_d <= m_dem; f2_a <= 1'b0;

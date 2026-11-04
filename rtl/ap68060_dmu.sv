@@ -1659,6 +1659,9 @@ always_ff @(posedge clk) begin
 				if (m2.r.ack == 2'd1)
 					// IACK: [7:0] vector, [8] AVEC, [9] TEA = spurious
 					e_acc <= {22'd0, bo_err, bo_avec && !bo_err, bo_rd[7:0]};
+				else if (m2.r.ack == 2'd2)
+					// BKPT: [15:0] the replacement opcode, [16] BERR
+					e_acc <= {15'd0, bo_err, bo_rd[15:0]};
 				else if (m2.r.msz == SZ_Q)
 					mv_line <= bo_line;
 				else

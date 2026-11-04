@@ -212,6 +212,9 @@ logic  [4:0] exc_ssp;
 logic        ucond_v, ucond;
 logic [15:0] sr;
 logic [31:0] vbr, cacr;
+logic        bk_ov;
+logic [31:0] bk_pc;
+logic [15:0] bk_w;
 logic        bc_clr;
 logic  [2:0] sfc, dfc;
 logic        kill_now, adv_ag, lk_abandon;
@@ -260,7 +263,7 @@ ap68060_backend #(.FPU_PIPE(FPU_PIPE), .EARLY_RES(EARLY_RES), .SKID(SKID),
 	.ras_rv(ras_rv), .ras_rtp(ras_rtp), .ras_rn(ras_rn),
 	.exc_go(exc_go), .exc_kind(exc_kind), .exc_ssp(exc_ssp),
 	.ucond_v(ucond_v), .ucond(ucond),
-	.sr(sr), .vbr(vbr), .cacr(cacr), .bc_clr(bc_clr), .sfc(sfc), .dfc(dfc),
+	.sr(sr), .vbr(vbr), .cacr(cacr), .bc_clr(bc_clr), .bk_ov(bk_ov), .bk_pc(bk_pc), .bk_w(bk_w), .sfc(sfc), .dfc(dfc),
 	.dm_req(dm_req), .dm_va(dm_va), .dm_mem(dm_mem), .dm_msz(dm_msz),
 	.dm_fc(dm_fc), .dm_lock(dm_lock), .dm_locke(dm_locke), .dm_super(dm_super), .dm_noalloc(dm_noalloc), .dm_ack(dm_ack), .dm_older(dm_older),
 	.bht_we(bht_we), .bht_wa(bht_wa), .bht_dis(bht_dis),
@@ -376,7 +379,7 @@ ap68060_fetch fetch (
 	.win_bt(win_bt), .bt_tgt(bt_tgt),
 	.pd0(pd0), .pd0_n(pd0_n), .qcnt(qcnt), .qpc(qpc), .consume(consume),
 	.q_odd(q_odd),
-	.bc_clr(bc_clr),
+	.bc_clr(bc_clr), .bk_ov(bk_ov), .bk_pc(bk_pc), .bk_w(bk_w),
 	.btb_we(btb_we), .btb_wi(btb_wi), .btb_wv(btb_wv), .btb_wtag(btb_wtag),
 	.btb_wslot(btb_wslot), .btb_wkind(btb_wkind), .btb_wtgt(btb_wtgt),
 	.d_ras(d_ras), .d_ras_tp(d_ras_tp), .d_ras_n(d_ras_n),
