@@ -15,6 +15,7 @@ localparam logic [4:0] R_D0  = 5'd0;
 localparam logic [4:0] R_A0  = 5'd8;
 localparam logic [4:0] R_USP = 5'd15;
 localparam logic [4:0] R_ISP = 5'd16;
+localparam logic [4:0] R_MSP = 5'd17;
 localparam logic [4:0] R_T0  = 5'd18;   // T0..T13 = 18..31, microcode temps
 
 //--------------------------------------------------------------------------

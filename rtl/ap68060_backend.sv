@@ -163,6 +163,7 @@ localparam logic [3:0] EK_FMT2  = 4'd1;   // format $2 / $3 (+ address)
 localparam logic [3:0] EK_FMT4  = 4'd2;   // format $4: access error, FP disabled
 localparam logic [3:0] EK_IRQ   = 4'd3;   // interrupt (IACK + format $0)
 localparam logic [3:0] EK_RESET = 4'd4;   // reset: SSP/PC from 0/4
+localparam logic [3:0] EK_IRQM  = 4'd5;   // interrupt with M set: format $0 on the MSP, throwaway $1 on the ISP
 
 //--------------------------------------------------------------------------
 // pipeline registers
@@ -686,15 +687,23 @@ always_comb begin
 		end
 	end
 	else begin
-		// divide
+		// divide.  The undefined flags of an overflow take the MC68020/
+		// 68030 values (WinUAE setdivuflags/setdivsflags, divul_overflow/
+		// divsl_overflow; AP68030's, checked against the 68030 corpus)
 		if (ex_u.sz == SZ_W) begin
 			// quotient must fit 16 bits
-			logic ovf16;
+			logic ovf16, abs_ovf;
+			logic [31:0] aq;
 			ovf16 = md_ovf ||
 			        (md_sign ? (md_lo[31:15] != {17{md_lo[15]}}) : (md_lo[31:16] != 16'd0));
+			aq      = md_lo[31] ? (32'd0 - md_lo) : md_lo;
+			abs_ovf = md_ovf || (aq[31:16] != 16'd0);
 			if (ovf16) begin
 				md_dkill = 1'b1;
-				md_flags = {ccr_f[4], ccr_f[3], ccr_f[2], 1'b1, 1'b0};
+				if (!md_sign)   // V set, Z and C kept, N set by a negative dividend
+					md_flags = {ccr_f[4], ccr_f[3] | ex_bv[31], ccr_f[2], 1'b1, ccr_f[0]};
+				else            // N and Z from the low byte of |quotient|
+					md_flags = {ccr_f[4], !abs_ovf && aq[7], !abs_ovf && (aq[7:0] == 8'd0), 1'b1, 1'b0};
 			end
 			else begin
 				md_res   = {md_hi[15:0], md_lo[15:0]};
@@ -703,8 +712,18 @@ always_comb begin
 		end
 		else begin
 			if (md_ovf) begin
+				// (ex_bv the dividend's low half Dq, md_hiin its high half Dr
+				// for the 64-bit form, cond[1]; ex_av the divisor)
+				logic n, z;
 				md_dkill = 1'b1;
-				md_flags = {ccr_f[4], ccr_f[3], ccr_f[2], 1'b1, 1'b0};
+				if (!md_sign) begin n = ex_bv[31]; z = (ex_bv == 32'd0); end
+				else if (ex_u.cond[1] && md_hiin == 32'd0) begin n = 1'b0; z = 1'b1; end
+				else if (ex_u.cond[1] && md_hiin[31] && ex_av[31] && ($signed(md_hiin) > $signed(ex_av))) begin
+					n = 1'b0; z = 1'b0;
+				end
+				else if (ex_bv == 32'd0) begin n = 1'b0; z = 1'b1; end
+				else begin n = ex_bv[31] ^ (ex_u.cond[1] & md_hiin[31]); z = 1'b0; end
+				md_flags = {ccr_f[4], n, z, 1'b1, 1'b0};
 			end
 			else begin
 				md_res   = md_lo;
@@ -962,8 +981,16 @@ always_comb begin
 			xf.flags = md_flags;
 			xf.dkill = md_dkill;
 			if (ex_div0) begin
+				// divide by zero: the MC68020/68030 flags (WinUAE
+				// divbyzero_special, divsl_divbyzero, divul_divbyzero)
 				xf.xvec  = 8'd5;
-				xf.flags = {ccr_f[4:1], 1'b0};
+				if (ex_u.sz == SZ_W)
+					xf.flags = md_sign ? {ccr_f[4], 4'b0100}
+					                   : {ccr_f[4], ex_bv[31], ex_bv[31:16] == 16'd0, 1'b1, 1'b0};
+				else if (md_sign)
+					xf.flags = {ccr_f[4], 1'b0, 1'b1, ccr_f[1], 1'b0};
+				else
+					xf.flags = {ccr_f[4], ex_bv[31], ex_bv == 32'd0, 1'b1, 1'b0};
 			end
 		end
 		OP_MDRES: begin
@@ -1007,6 +1034,55 @@ always_comb begin
 		default: ;
 	endcase
 end
+
+// CHK2/CMP2's N and V (AP68030's, from the WinUAE 68030 corpus)
+function automatic logic [1:0] chk2_nv(input logic [31:0] lower, input logic [31:0] upper, input logic [31:0] val);   // {N, V}
+	logic n, v;
+	logic ln, un, vn, vl31;
+	logic [31:0] lv, uv, lu;
+	logic v_lt_l, v_gt_l, v_lt_u, v_gt_u, l_gt_u;
+	begin
+		n = 1'b0; v = 1'b0;
+		ln = lower[31]; un = upper[31]; vn = val[31];
+		lv = lower - val; uv = upper - val; lu = lower - upper;
+		vl31 = (lv == 32'h80000000) ? 1'b1 : !lv[31];
+		v_lt_l = (lv != 32'd0) && ((vn != ln) ? vn : !lv[31]);
+		v_gt_l = !v_lt_l;
+		v_lt_u = (uv != 32'd0) && ((vn != un) ? vn : !uv[31]);
+		v_gt_u = !v_lt_u;
+		l_gt_u = (lu != 32'd0) && ((ln != un) ? !ln : !lu[31]);
+		if (lv == 32'd0 || uv == 32'd0) ;
+		else if (ln && !un) begin
+
+			if (v_lt_l) n = 1'b1;
+			if (!vn && v_lt_u) n = 1'b1;
+			if (!vn && !lv[31]) begin
+				v = 1'b1; n = v_gt_u;
+			end
+		end else if (!ln && un) begin
+			if (!vn) n = 1'b1;
+			if (v_gt_u) n = 1'b1;
+			if (v_gt_l && !uv[31]) begin v = 1'b1; n = 1'b0; end
+		end else if (!ln && !un && l_gt_u) begin
+			if (v_gt_u && v_lt_l) n = 1'b1;
+			if (vn && lv[31]) v = 1'b1;
+			if (vn && !lv[31]) n = 1'b1;
+		end else if (!ln && !un) begin
+			if (!vn && v_lt_l) n = 1'b1;
+			if (v_gt_u) n = 1'b1;
+			if (vn && uv[31]) begin v = 1'b1; n = 1'b1; end
+		end else if (l_gt_u) begin
+			if (!vn) n = 1'b1;
+			if (v_gt_u && v_lt_l) n = 1'b1;
+			if (!vn && vl31) begin n = 1'b0; v = 1'b1; end
+		end else begin
+			if (v_lt_l) n = 1'b1;
+			if (vn && v_gt_u) n = 1'b1;
+			if (!vn && vl31) begin n = 1'b1; v = 1'b1; end
+		end
+		chk2_nv = {n, v};
+	end
+endfunction
 
 // slow operations (first EX cycle)
 always_comb begin
@@ -1066,8 +1142,9 @@ always_comb begin
 			end
 		end
 		OP_RTEF: begin
-			// 68060 frame formats (MC68060UM 8.4): $0 8, $2 and $3 12, $4
-			// 16 bytes; any other is a format error
+			// 68030 frame formats (MC68030UM 8.4): $0 and $1 (throwaway)
+			// 8, $2 12, $9 20, $A 32, $B 92 bytes; any other is a format
+			// error
 			xs.flags = ccr_f;
 			if (ex_u.cond[0]) begin
 				// FRESTORE header (FPU in reset state): only a NULL frame
@@ -1077,9 +1154,11 @@ always_comb begin
 				if (ex_av[31:24] != 8'd0) xs.xvec = 8'd14;
 			end
 			else case (ex_av[15:12])
-				4'h0:       xs.res = 32'd8;
-				4'h2, 4'h3: xs.res = 32'd12;
-				4'h4:       xs.res = 32'd16;
+				4'h0, 4'h1: xs.res = 32'd8;
+				4'h2:       xs.res = 32'd12;
+				4'h9:       xs.res = 32'd20;
+				4'hA:       xs.res = 32'd32;
+				4'hB:       xs.res = 32'd92;
 				default: begin xs.res = 32'd0; xs.xvec = 8'd14; end
 			endcase
 		end
@@ -1088,29 +1167,45 @@ always_comb begin
 			xs.sr_we  = 1'b1;
 			xs.flags  = xs.sr_new[4:0];
 			xs.taken  = 1'b1;
-			xs.target = ex_bv;
+			// a throwaway frame: SR from it, then this RTE again (on the
+			// stack the new SR selects)
+			xs.target = rte_fmt1 ? ex_u.pc : ex_bv;
 		end
 		OP_BF: begin
 			xs.res   = bf_res;
 			xs.flags = bf_flags;
 		end
 		OP_CHK2B: begin
-			// WinUAE i_CHK2: signed compares of the sign-extended bounds
-			// (lower in ex_latch, upper in A) with B, which is sign-extended
-			// only when it is a data register (cond[1]); N and V are kept
-			logic signed [31:0] lo, up, rg;
+			// the 68030's (AP68030, checked against the WinUAE 68030
+			// corpus): Z and C from compares within the size -- unsigned
+			// for a data register, of the sign-extended bounds for an
+			// address register (cond[1]: Rn is a data register) --; N and V
+			// from chk2_nv over the sign-extended values.  Lower bound in
+			// ex_latch, upper in A, Rn in B
+			logic [31:0] lo, up, rg, slo, sup, srg;
 			logic z, c;
-			case (ex_u.sz)
-				SZ_B: begin lo = {{24{ex_latch[7]}}, ex_latch[7:0]}; up = {{24{ex_av[7]}}, ex_av[7:0]};
-				            rg = ex_u.cond[1] ? {{24{ex_bv[7]}}, ex_bv[7:0]} : ex_bv; end
-				SZ_W: begin lo = {{16{ex_latch[15]}}, ex_latch[15:0]}; up = {{16{ex_av[15]}}, ex_av[15:0]};
-				            rg = ex_u.cond[1] ? {{16{ex_bv[15]}}, ex_bv[15:0]} : ex_bv; end
-				default: begin lo = ex_latch; up = ex_av; rg = ex_bv; end
-			endcase
-			z = (up == rg) || (lo == rg);
-			c = !z && ((lo <= up) ? ((rg < lo) || (rg > up)) : ((rg > up) && (rg < lo)));
+			logic [1:0] nv;
+			slo = (ex_u.sz == SZ_B) ? {{24{ex_latch[7]}}, ex_latch[7:0]} :
+			      (ex_u.sz == SZ_W) ? {{16{ex_latch[15]}}, ex_latch[15:0]} : ex_latch;
+			sup = (ex_u.sz == SZ_B) ? {{24{ex_av[7]}}, ex_av[7:0]} :
+			      (ex_u.sz == SZ_W) ? {{16{ex_av[15]}}, ex_av[15:0]} : ex_av;
+			if (!ex_u.cond[1]) begin
+				lo = slo; up = sup; rg = ex_bv; srg = ex_bv;
+			end
+			else begin
+				case (ex_u.sz)
+					SZ_B: begin lo = {24'd0, ex_latch[7:0]}; up = {24'd0, ex_av[7:0]}; rg = {24'd0, ex_bv[7:0]};
+					            srg = {{24{ex_bv[7]}}, ex_bv[7:0]}; end
+					SZ_W: begin lo = {16'd0, ex_latch[15:0]}; up = {16'd0, ex_av[15:0]}; rg = {16'd0, ex_bv[15:0]};
+					            srg = {{16{ex_bv[15]}}, ex_bv[15:0]}; end
+					default: begin lo = ex_latch; up = ex_av; rg = ex_bv; srg = ex_bv; end
+				endcase
+			end
+			z  = (rg == lo) || (rg == up);
+			c  = (lo <= up) ? ((rg < lo) || (rg > up)) : ((rg > up) && (rg < lo));
+			nv = chk2_nv(slo, sup, srg);
 			xs.res   = ex_bv;
-			xs.flags = {ccr_f[4], ccr_f[3], z, ccr_f[1], c};
+			xs.flags = {ccr_f[4], nv[1], z, nv[0], c};
 			if (ex_u.cond[0] && c) xs.xvec = 8'd6;
 		end
 		default: ;
@@ -1165,6 +1260,7 @@ ap68060_alu cmp_alu (
 	.res(cmp_res), .flags_out(cmp_flags), .cc_true(cmp_cc), .trap(cmp_tr)
 );
 logic        cas2_eq;
+logic        rte_fmt1;          // RTE: the frame is a throwaway ($1)
 
 wire  [31:0] ex_szm = (ex_u.sz == SZ_B) ? 32'h0000_00FF :
                       (ex_u.sz == SZ_W) ? 32'h0000_FFFF : 32'hFFFF_FFFF;
@@ -1422,7 +1518,10 @@ end
 
 // WB holds: store not accepted yet; RESET until RSTO is done
 wire wb_reset    = (wb_u.op == OP_MISC) && (wb_u.cond == 4'd1);
-wire wb_mt       = (wb_u.op == OP_MISC) && (wb_u.cond >= 4'd3) && (wb_u.cond <= 4'd5);
+// (MISC 12 after a MOVEC to CACR: its CI/CEI/CD/CED bits clear the caches)
+wire wb_cclr     = (wb_u.op == OP_MISC) && (wb_u.cond == 4'd12) && (wb_u.imm_b[7:0] == 8'h02) &&
+                   ((wb_res & 32'h0000_0C0C) != 32'd0);
+wire wb_mt       = ((wb_u.op == OP_MISC) && (wb_u.cond >= 4'd3) && (wb_u.cond <= 4'd5)) || wb_cclr;
 logic mt_seen;                // the DMU finished this WB uop's maintenance
 // the store buffer empties before exception processing and before a
 // synchronizing instruction (MC68060UM 5.10, 8.4.6): WB waits with an
@@ -1439,11 +1538,14 @@ assign wb_hold = wb_v && (halted || (!wb_is_exc &&
                   (wb_mt && !mt_seen))) || sb_wait);
 
 assign mt_v      = wb_v && wb_mt && !wb_is_exc && !mt_seen;
-assign mt_op     = (wb_u.cond == 4'd3) ? (wb_u.imm_b[5] ? 3'd2 : 3'd1) :
+assign mt_op     = wb_cclr ? 3'd1 :
+                   (wb_u.cond == 4'd3) ? (wb_u.imm_b[5] ? 3'd2 : 3'd1) :
                    (wb_u.cond == 4'd4) ? 3'd3 : 3'd4;
-assign mt_scope  = (wb_u.cond == 4'd3) ? wb_u.imm_b[4:3] :
+assign mt_scope  = wb_cclr ? 2'd3 :
+                   (wb_u.cond == 4'd3) ? wb_u.imm_b[4:3] :
                    (wb_u.cond == 4'd4) ? (wb_u.imm_b[4] ? 2'd3 : 2'd2) : 2'd2;
-assign mt_caches = wb_u.imm_b[7:6];
+// (bit 1 the instruction cache, bit 0 the data cache)
+assign mt_caches = wb_cclr ? {wb_res[3] || wb_res[2], wb_res[11] || wb_res[10]} : wb_u.imm_b[7:6];
 assign mt_addr   = wb_res;
 assign mt_fc     = dfc_r;
 assign mt_ng     = (wb_u.cond == 4'd4) && !wb_u.imm_b[3];
@@ -1508,9 +1610,11 @@ always_comb begin
 	         (x_vec == 8'd3 || x_vec == 8'd5 || x_vec == 8'd6 || x_vec == 8'd7 ||
 	          x_vec == 8'd9) ? 4'h2 : 4'h0;
 	if (adv_wb && wb_is_exc && wb_exc_fmtv) x_fmt = wb_exc_fmt;
-	x_kind = take_irq && !(adv_wb && wb_is_exc) ? EK_IRQ :
+	x_kind = take_irq && !(adv_wb && wb_is_exc) ? (cur[12] ? EK_IRQM : EK_IRQ) :
 	         (x_fmt == 4'h4) ? EK_FMT4 : (x_fmt == 4'h2 || x_fmt == 4'h3) ? EK_FMT2 : EK_FMT0;
-	x_ssp  = R_ISP;
+	// the active supervisor stack: the MSP with M set (an interrupt's
+	// routine names its two stacks itself)
+	x_ssp  = cur[12] ? R_MSP : R_ISP;
 	// a store buffer bus error: an access error, the stacked address
 	// meaningless; the PC is the one the exception due here would stack,
 	// or where execution continues (8.4.6)
@@ -1584,6 +1688,7 @@ always_ff @(posedge clk) begin
 		md_lol  <= 32'd0;
 		md_ovfl <= 1'b0;
 		md_hiin <= 32'd0;
+		rte_fmt1 <= 1'b0;
 		cas2_eq <= 1'b0;
 		ex_latch <= 32'd0;
 		bf_off   <= 32'd0;
@@ -1904,6 +2009,7 @@ always_ff @(posedge clk) begin
 		// overflow of the uop leaving EX (word forms check 16 bits)
 		if (adv_ex && (ex_u.op == OP_DIV || ex_u.op == OP_MUL)) md_ovfl <= (ex_u.op == OP_DIV) && md_dkill;
 		if (adv_ex && ex_u.op == OP_MDHI) md_hiin <= ex_av;
+		if (adv_ex && ex_u.op == OP_RTEF && !ex_u.cond[0]) rte_fmt1 <= (ex_av[15:12] == 4'h1);
 		if (adv_ex && ex_u.op == OP_CAS2C)
 			cas2_eq <= ex_u.cond[0] ? (cas2_eq && cmp_flags[2]) : cmp_flags[2];
 		if (!stall_wb) wb_v <= adv_ex;
@@ -1917,14 +2023,18 @@ always_ff @(posedge clk) begin
 			// architectural commit: the back file's write ports (bwe)
 			ccr_b <= wb_ccr;
 			if (wb_u.op == OP_SPW) begin
-				// MOVEC to the 68060's control registers (masks: WinUAE
-				// m68k_move2c; CABC and CUBC act and read as zero)
+				// MOVEC to the control registers.  CACR, the 68030's: EI FI
+				// IBE ED FD DBE WA are kept; CI/CEI and CD/CED act (the
+				// MISC uop after it asks the DMU to clear the caches; an
+				// entry clear clears the whole cache -- the caches are
+				// write-through, there is nothing to lose) and read as zero;
+				// an instruction cache clear also clears the branch cache
 				case (wb_u.imm_b[7:0])
 					8'h00: sfc_r  <= wb_res[2:0];
 					8'h01: dfc_r  <= wb_res[2:0];
 					8'h02: begin
-						cacr_r <= wb_res & 32'hF880_E000;
-						bc_clr <= wb_res[22] || wb_res[21];
+						cacr_r <= wb_res & 32'h0000_3313;
+						bc_clr <= wb_res[3] || wb_res[2];
 					end
 					8'h03: tc_r   <= wb_res & 32'h0000_FFFE;
 					8'h04: itt0_r <= wb_res & 32'hFFFF_E364;

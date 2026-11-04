@@ -276,8 +276,10 @@ endfunction
 function automatic logic [1:0] fc_tt(input logic [2:0] fc);
 	fc_tt = (fc == 3'd1 || fc == 3'd2 || fc == 3'd5 || fc == 3'd6) ? TT_NORMAL : TT_ALT;
 endfunction
+// (the 68030: a PC-relative operand read is a program space reference,
+// MC68030UM 2.4, 4.2: its function code goes to the bus as it is)
 function automatic logic [2:0] fc_tm(input logic [2:0] fc);
-	fc_tm = (fc == 3'd2) ? 3'd1 : (fc == 3'd6) ? 3'd5 : fc;
+	fc_tm = fc;
 endfunction
 
 // TTR match on A31-24 with mask, E, and the S field

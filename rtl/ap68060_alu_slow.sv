@@ -218,11 +218,12 @@ always_comb begin
 	case (op)
 		OP_ABCD: begin
 			res = {b[31:8], abcd_res[7:0]};
-			flags_out = {abcd_c, f_n, f_z & (abcd_res[7:0] == 8'd0), f_v, abcd_c};
+			// (the 68030: N from the result, V cleared -- WinUAE's 68030 core)
+			flags_out = {abcd_c, abcd_res[7], f_z & (abcd_res[7:0] == 8'd0), 1'b0, abcd_c};
 		end
 		OP_SBCD, OP_NBCD: begin
 			res = {b[31:8], sbcd_res[7:0]};
-			flags_out = {sbcd_c, f_n, f_z & (sbcd_res[7:0] == 8'd0), f_v, sbcd_c};
+			flags_out = {sbcd_c, sbcd_res[7], f_z & (sbcd_res[7:0] == 8'd0), 1'b0, sbcd_c};
 		end
 		OP_PACK: res = {b[31:8], pack_r};
 		OP_UNPK: res = {b[31:16], unpk_r};

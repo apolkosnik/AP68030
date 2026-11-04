@@ -31,6 +31,7 @@ module ap68060_useq
 	output logic        rq_pop_e,   // an early form: implies rq_pop (D1's room)
 
 	input  logic        smode,
+	input  logic        master,         // SR.M: A7 in supervisor mode is the MSP
 
 	input  logic        exc_go,
 	input  logic  [3:0] exc_kind,
@@ -82,7 +83,7 @@ wire         room_out = (uq_n != 2'd2);
 //--------------------------------------------------------------------------
 // register naming
 //--------------------------------------------------------------------------
-wire [4:0] sp_reg = !smode ? R_USP : R_ISP;
+wire [4:0] sp_reg = !smode ? R_USP : (master ? R_MSP : R_ISP);
 
 function automatic logic [4:0] areg(input logic [2:0] n, input logic [4:0] spr);
 	areg = (n == 3'd7) ? spr : (R_A0 + {2'b00, n});
@@ -296,7 +297,7 @@ always_comb begin
 			S_OPW:   begin o.src = OS_IMM; o.imm_v = 1'b1; o.imm = {16'd0, src.opw}; end
 			S_EXT1:  begin o.src = OS_IMM; o.imm_v = 1'b1; o.imm = {16'd0, src.ext1}; end
 			S_FPDL:  o.r = dreg(src.ext1[6:4]);      // FMOVEM dynamic list register
-			S_CREGR: o.r = R_USP;
+			S_CREGR: o.r = (src.ext1[2:0] == 3'd0) ? R_USP : (src.ext1[2:0] == 3'd3) ? R_MSP : R_ISP;
 			default: o.v = 1'b0;
 		endcase
 		if (k == 0) oa = o; else if (k == 1) ob = o; else od = o;
@@ -419,7 +420,9 @@ always_comb begin
 					nu.idx    = xr;
 					nu.idx_l  = me.xl;
 					nu.scale  = me.sc;
-					nu.mprog  = 1'b0;
+					// (the 68030: the operand through a PC-based pointer is a
+					// program space reference too, as the pointer is)
+					nu.mprog  = (me.m != EM_AX) && !me.bs;
 				end
 				if (mi_stage1) begin
 					// this cycle: the pointer load only
@@ -814,6 +817,7 @@ always_comb begin
 			4'd2:    na = UA_EXC_FMT4;
 			4'd3:    na = UA_EXC_IRQ;
 			4'd4:    na = UA_EXC_RESET;
+			4'd5:    na = UA_EXC_IRQM;
 			default: na = UA_EXC_FMT0;
 		endcase
 		nv = 1'b1;
@@ -969,7 +973,8 @@ always_comb begin
 		JC_FMT_8:    jc_now = (src.ext1[12:10] == 3'd5);
 		JC_FMT_12:   jc_now = (src.ext1[12:10] == 3'd2 || src.ext1[12:10] == 3'd3);
 		JC_FMT_7:    jc_now = (src.ext1[12:10] == 3'd7);
-		JC_CREG_RF:  jc_now = (src.ext1[11:0] == 12'h800);    // USP
+		JC_CREG_RF:  jc_now = (src.ext1[11:0] == 12'h800) || (src.ext1[11:0] == 12'h803) ||
+		                      (src.ext1[11:0] == 12'h804);    // USP, MSP, ISP
 		default:     jc_now = 1'b0;
 	endcase
 end

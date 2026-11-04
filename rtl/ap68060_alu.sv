@@ -147,6 +147,16 @@ wire [32:0] chk_diff   = {1'b0, am} - {1'b0, bm};   // bound - Dn
 wire        chk_gt     = (chk_ub_neg != chk_dn_neg) ? chk_ub_neg
                                                     : msb_of(chk_diff[31:0], sz);
 wire        chk_trap   = chk_dn_neg || chk_gt;
+// the 68030's CHK flags (undefined; the MC68020/030 values, WinUAE
+// setchkundefinedflags, AP68030's): N Dn < 0, Z Dn = 0, V the overflow of
+// bound - Dn and C from the signs, both clear when Dn is in bounds
+wire [31:0] chk_v      = (sz == SZ_W) ? {{16{b[15]}}, b[15:0]} : b;
+wire [31:0] chk_b      = (sz == SZ_W) ? {{16{a[15]}}, a[15:0]} : a;
+wire [31:0] chk_d      = chk_b - chk_v;
+wire        chk_vgtb   = $signed(chk_v) > $signed(chk_b);
+wire        chk_out    = chk_v[31] || chk_vgtb;
+wire        chk_fv     = chk_out && ((chk_v[31] ^ chk_b[31]) & (((sz == SZ_W) ? chk_d[15] : chk_d[31]) ^ chk_b[31]));
+wire        chk_fc     = chk_out && (chk_v[31] ? (chk_vgtb || !chk_b[31]) : !chk_b[31]);
 
 //--------------------------------------------------------------------------
 // CHK2/CMP2: b is the value, a the bound; signedness from cond[1]
@@ -263,8 +273,7 @@ always_comb begin
 
 		OP_CHK: begin
 			trap = chk_trap;
-			// 68060: N clear, or Dn < 0 on the trap; Z, V, C unchanged
-			flags_out = {f_x, chk_trap && chk_dn_neg, f_z, f_v, f_c};
+			flags_out = {f_x, chk_v[31], chk_v == 32'd0, chk_fv, chk_fc};
 		end
 
 		OP_CCRLOG: begin

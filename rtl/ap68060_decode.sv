@@ -201,7 +201,8 @@ function automatic logic jcond(input logic [4:0] jc, input logic [3:0] e0,
 		JC_BOTH_MEM: jcond = m0 && m1;
 		JC_MASK0:    jcond = (ext1 == 16'd0);
 		JC_X1A:      jcond = ext1[15];
-		JC_CREG_RF:  jcond = (ext1[11:0] == 12'h800);    // USP
+		JC_CREG_RF:  jcond = (ext1[11:0] == 12'h800) || (ext1[11:0] == 12'h803) ||
+		                     (ext1[11:0] == 12'h804);    // USP, MSP, ISP
 		JC_FP_OC0:   jcond = (ext1[15:13] == 3'b000);
 		default:     jcond = 1'b0;
 	endcase

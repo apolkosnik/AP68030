@@ -57,13 +57,13 @@ for i in range(8):
     PHYS['D%d' % i] = i
 for i in range(7):
     PHYS['A%d' % i] = 8 + i
-PHYS.update(USP=15, ISP=16)
+PHYS.update(USP=15, ISP=16, MSP=17)
 for i in range(14):
     PHYS['T%d' % i] = 18 + i
 
 
 # selector encoding: 0-39 symbolic, 40-56 the physical registers USP, ISP,
-# (17 unused), T0-T13 (physical 15-31) that microcode may name directly
+# MSP, T0-T13 (physical 15-31) that microcode may name directly
 def sel(x):
     if x is None:
         return 0
@@ -252,15 +252,15 @@ R('UNPK_M',
 R('MULW', U(op='EOP', cond='EC', a='EA0', b='DX', d='DX', ccr='NZVC', last=1))
 R('DIVW', U(op='EOP', cond='EC', a='EA0', b='DX', d='DX', ccr='NZVC', last=1))
 # long forms: ext word Dl/Dq = 14:12, Dh/Dr = 2:0, bit 11 signed, bit 10
-# 64-bit.  MULx.L 64 writes Dh then Dl, DIVx.L writes Dr then Dq (a shared
-# register keeps low / quotient); the 64-bit dividend's high half is Dr,
+# 64-bit.  MULx.L 64 writes Dl then Dh (the 68020/68030: a shared register
+# keeps the high half), DIVx.L writes Dr then Dq (it keeps the quotient); the 64-bit dividend's high half is Dr,
 # latched first (MDHI).
 R('MULL',
   U(jc='EXT10', jt='MULL.2'),
   U(op='MUL', cond='X1', sz='L', a='EA0', b='X1DL', d='X1DL', ccr='NZVC', last=1),
   U(op='MUL', cond='X1', sz='L', a='EA0', b='X1DL', ccr='NZVC'),
-  U(op='MDRES', cond=0, d='X1DH'),
-  U(op='MDRES', cond=1, d='X1DL', last=1))
+  U(op='MDRES', cond=1, d='X1DL'),
+  U(op='MDRES', cond=0, d='X1DH', last=1))
 R('DIVL',
   U(op='MDHI', a='X1DH'),
   U(op='DIV', cond='X1', sz='L', a='EA0', b='X1DL', ccr='NZVC'),
@@ -343,11 +343,12 @@ R('PULSE', U(op='MISC', cond=11, last=1))
 R('MOVEC_RD',
   U(jc='CREG_RF', jt='MOVEC_RD.2'),
   U(op='SPR', sz='L', a='CREG', d='X1R', last=1),
-  U(op='MOV', sz='L', a='USP', d='X1R', last=1))
+  U(op='MOV', sz='L', a='CREGR', d='X1R', last=1))
 R('MOVEC_WR',
-  U(jc='CREG_RF', jt='MOVEC_WR.2'),
-  U(op='SPW', sz='L', a='X1R', b='CREG', ser=1, last=1),
-  U(op='MOV', sz='L', a='X1R', d='USP', ser=1, last=1))
+  U(jc='CREG_RF', jt='MOVEC_WR.3'),
+  U(op='SPW', sz='L', a='X1R', b='CREG', ser=1),
+  U(op='MISC', cond=12, sz='L', a='X1R', b='CREG', ser=1, last=1),   # CACR: its clear bits
+  U(op='MOV', sz='L', a='X1R', d='CREGR', ser=1, last=1))
 
 # MOVEM: one micro-instruction repeated per register (D2 loop); an empty
 # mask transfers nothing and leaves An alone
@@ -432,18 +433,21 @@ R('RTR',
   U(op='MOV', sz='L', msz='L', a='LD', d='T2', ag='BASED', agb='SP', const=2),
   U(op='CCRLOG', cond=3, a='T1', b='T2', ag='ADDC', agb='SP', agw='SP', const=6,
     ccr='XNZVC', br='B', last=1))
-# CAS2: two locked reads, the compare leaves eq in EX; the first write
-# only on a match, the second always (Du2 or the second value read, with
-# LOCKE); on a mismatch Dc1/Dc2 take the values read
+# CAS2: two locked reads, the compare leaves eq in EX.  The 68030's order
+# (WinUAE's model, visible when the operands overlap): operand 2 is
+# written first, only on a match, then operand 1 always (Du1, or on a
+# mismatch the value read back, with LOCKE: the locked sequence ends);
+# on a mismatch Dc2 and then Dc1 take the values read (one register for
+# both receives operand 1)
 R('CAS2',
   U(op='MOV', a='LD', d='T0', ag='BASED', agb='X1R', lock=1),
   U(op='MOV', a='LD', d='T1', ag='BASED', agb='X2R', lock=1),
   U(op='CAS2C', cond=0, a='X1DH', b='T0', ccr='NZVC'),
   U(op='CAS2C', cond=1, a='X2DC', b='T1', ccr='NZVC'),
-  U(op='CAS2W', cond=0, a='X1DU', mem='ST', ag='BASED', agb='X1R', lock=1),
-  U(op='CAS2W', cond=1, a='X2DU', b='T1', mem='ST', ag='BASED', agb='X2R', lock=1, locke=1),
-  U(op='CAS2R', a='T0', b='X1DH', d='X1DH'),
-  U(op='CAS2R', a='T1', b='X2DC', d='X2DC', last=1))
+  U(op='CAS2W', cond=0, a='X2DU', mem='ST', ag='BASED', agb='X2R', lock=1),
+  U(op='CAS2W', cond=1, a='X1DU', b='T0', mem='ST', ag='BASED', agb='X1R', lock=1, locke=1),
+  U(op='CAS2R', a='T1', b='X2DC', d='X2DC'),
+  U(op='CAS2R', a='T0', b='X1DH', d='X1DH', last=1))
 # CHK2/CMP2 <ea>,Rn: bounds at EA and EA + size; cond 'CHK2' carries
 # {Rn is a data register, CHK2}
 R('CHK2',
@@ -451,7 +455,7 @@ R('CHK2',
   U(op='MOV', sz='L', a='LD', d='T0', ag='BASED', agb='T1', const=0),
   U(op='MOV', sz='L', a='LD', d='T2', ag='BASED', agb='T1', dsel='SZB'),
   U(op='LATCH', sz='L', a='T0'),
-  U(op='CHK2B', cond='CHK2', a='T2', b='X1R', ccr='ZC', last=1))
+  U(op='CHK2B', cond='CHK2', a='T2', b='X1R', ccr='NZVC', last=1))
 # MOVEP: bytes at d16(Ay) + 0, 2 (, 4, 6), most significant first
 def _mpb(k, **kw):
     return U(op='MOV', sz='B', msz='B', ag='BASED', agb='AY', dsel='IMMC',
@@ -753,6 +757,22 @@ R('EXC_IRQ',
   U(op='MOV', sz='W', a='T10', ag='BASEDU', agb='ISP', const=-8, msz='W', mem='ST', mfc='SUP'),
   U(op='MOV', sz='L', ag='BASED', agb='T8', const=0, msz='L', mem='LD', mfc='SUP',
     a='LD', br='A', cond=15, last=1))     # cond 15: the handler fetch
+# with M set (68020-68040): format $0 on the master stack, then a format $1
+# throwaway frame on the interrupt stack with S set in its SR
+R('EXC_IRQM',
+  U(op='IACKV', cond=0, sz='L', msz='B', a='LD', d='T12', mem='LD', mfc='IACK',
+    ag='BASED', agb='ZERO', const=-1),
+  U(op='IACKV', cond=1, sz='L', d='T8'),
+  U(op='MOV', sz='W', a='T12', ag='BASED', agb='MSP', const=-2, msz='W', mem='ST', mfc='SUP'),
+  U(op='MOV', sz='L', a='T9',  ag='BASED', agb='MSP', const=-6, msz='L', mem='ST', mfc='SUP'),
+  U(op='MOV', sz='W', a='T10', ag='BASEDU', agb='MSP', const=-8, msz='W', mem='ST', mfc='SUP'),
+  U(op='OR', sz='W', a='CONST', const=0x1000, b='T12', d='T7'),
+  U(op='OR', sz='W', a='CONST', const=0x2000, b='T10', d='T6'),
+  U(op='MOV', sz='W', a='T7',  ag='BASED', agb='ISP', const=-2, msz='W', mem='ST', mfc='SUP'),
+  U(op='MOV', sz='L', a='T9',  ag='BASED', agb='ISP', const=-6, msz='L', mem='ST', mfc='SUP'),
+  U(op='MOV', sz='W', a='T6',  ag='BASEDU', agb='ISP', const=-8, msz='W', mem='ST', mfc='SUP'),
+  U(op='MOV', sz='L', ag='BASED', agb='T8', const=0, msz='L', mem='LD', mfc='SUP',
+    a='LD', br='A', cond=15, last=1))     # cond 15: the handler fetch
 # ------------------------------------------------------------ entry params
 EOP = {
     'OR': 'OR', 'AND': 'AND', 'SUB': 'SUB', 'ADD': 'ADD', 'EOR': 'EOR',
@@ -866,7 +886,7 @@ def emit():
             f.write('localparam logic [2:0] DS_%s = 3\'d%d;\n' % (n, i))
         for n, i in JC.items():
             f.write('localparam logic [5:0] JC_%s = 6\'d%d;\n' % (n, i))
-        for n in ['EXC_FMT0', 'EXC_FMT2', 'EXC_FMT4', 'EXC_RESET', 'EXC_IRQ',
+        for n in ['EXC_FMT0', 'EXC_FMT2', 'EXC_FMT4', 'EXC_RESET', 'EXC_IRQ', 'EXC_IRQM',
                   'DEC_EXC', 'UNIMPL', 'LPSTOP', 'PMMU', 'BCC', 'BSR', 'DBCC', 'FBCC', 'FDBCC', 'FPU_GEN',
                   'TRAP', 'BKPT', 'ILLEGAL', 'MOVEM_RM', 'MOVEM_MR',
                   'MOVEC_RD', 'MOVEC_WR', 'JSR', 'JSR_K', 'JMP', 'RTS',
