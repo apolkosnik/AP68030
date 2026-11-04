@@ -16,12 +16,13 @@ sequential MC68030 core this repository started with: the bus controller
 
 ## Status at a glance
 
-Measured at commit `d079c58` (default build); the 8 KB / FPU build at `8157742`.
+Measured at commit `27dd6d4` (default build); the 8 KB / FPU build at `8157742`.
 
 | | |
 |---|---|
 | Target | Cyclone V 5CSEBA6U23I7 (MiSTer), out-of-context fit at 70 MHz (14.286 ns) |
 | Area, default build (68030 caches, coprocessor interface, no FPU) | 19,846 ALMs, 13,460 registers, 62 RAM blocks |
+| Area, no coprocessor interface (`COPROC = 0`) | 16,588 ALMs, 12,203 registers; +0.384 ns at 70 MHz (Fmax 71.9 MHz) |
 | Area, 8 KB caches and on-chip FPU | 24,432 ALMs, 17,401 registers, 339,968 block memory bits, 15 DSP blocks |
 | Timing | Default build: +0.426 ns at 70 MHz, Fmax 72.2 MHz, no failing endpoint. 8 KB caches and on-chip FPU: +0.006 ns, Fmax 70.0 MHz |
 | Regression | AP68030's 18 programs, each plain and with wait states, plus Dhrystone: all 37 runs pass (default build) |
@@ -60,6 +61,7 @@ ports (the ones this core has no use for are kept and tied off).
 | Parameter | Effect |
 |---|---|
 | `CACHE030` | 1 (default): the MC68030's 256-byte instruction and data caches (UM section 6: 16 lines of four long words, a valid bit per long word, logical tags with the function code, CACR EI/FI/IBE/ED/FD/DBE/WA, CI/CEI/CD/CED with CAAR), at the bus interface; the pipeline's own caches are off. 0: the pipeline's 8 KB four-way caches under the 68030's CACR (faster; see below). |
+| `COPROC` | With `FPU = 0`: 1 (default) the coprocessor interface; 0 the F-line exception at once for CpID 1-7 (a 68030 whose coprocessor never answers), without the interface's engine: about 3,300 ALMs less. AP68030's coprocessor programs (`t_cp`, `t_cpx_*`, the last case of `t_held`) need 1. |
 | `FPU` | 0 (default): no FPU (none is synthesized); F-line instructions with CpID 1-7 run the coprocessor interface (UM section 10) on the bus, so an external 68881/68882 works and without one they take the F-line exception. 1: the on-chip FPU (68060 rules, see Open). |
 
 With `CACHE030 = 0` the caches are bigger but not the 68030's: aliases of
