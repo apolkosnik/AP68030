@@ -152,8 +152,13 @@ function automatic logic [7:0] rd8(input logic [31:0] a);
 	if (a >= TBASE && a < TBASE + TSIZE) return tmem[a - TBASE];
 	if (a >= CAPV && a < CAPV + 32'h400) begin
 		vec = 8'((a - CAPV) >> 2);
-		v = (odd_vector != 32'd0 && vec >= 8'd4) ? odd_vector
-		                                        : MONB + {20'd0, vec, 4'd0};
+		// a standalone trace (e_trace 2) is one WinUAE's generator stores
+		// rather than takes through the odd vector (cputest.cpp, "trace
+		// after NOP"); vector 9 keeps the monitor's handler for it, as in
+		// AP68030's bench.  Its native runner leaves vector 9 odd too, so
+		// those rounds' oracle is the generator's model, not hardware's.
+		v = (odd_vector != 32'd0 && vec >= 8'd4 && !(vec == 8'd9 && e_trace == 8'd2))
+		    ? odd_vector : MONB + {20'd0, vec, 4'd0};
 		return v[31 - 8 * a[1:0] -: 8];
 	end
 	if (a >= MONB && a < MONB + MONN) return mon[a - MONB];

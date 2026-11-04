@@ -27,7 +27,7 @@ Measured at commit `27dd6d4` (default build); the 8 KB / FPU build at `8157742`.
 | Timing | Default build: +0.426 ns at 70 MHz, Fmax 72.2 MHz, no failing endpoint. 8 KB caches and on-chip FPU: +0.006 ns, Fmax 70.0 MHz |
 | Regression | AP68030's 18 programs, each plain and with wait states, plus Dhrystone: all 37 runs pass (default build) |
 | Dhrystone 2.1 | 0.133 DMIPS/MHz with the 68030 caches; 0.375 DMIPS/MHz with the 8 KB caches (AP68030 itself: 0.235) |
-| Corpus | WinUAE 68030 `cputest` (v20): the smoke set (six slices of Default, Basic, AE, ODD_EXC, ODD_STK, FFEXT_SRC; 38,918 rounds) passes. The full integer corpus (v24, 3,203 slices) is being run; it found three bugs so far (MOVEC privilege order, MOVES with its own register as (An)+/-(An), stale coprocessor-engine state), all fixed; the IRQ groups need the v20 interrupt model, not ported to this bench yet |
+| Corpus | WinUAE 68030 `cputest` v24 (data030_20261026), the full integer corpus: 3,161 of 3,203 slices passed in one run. The other 42 pass on rerun after fixes found by that run (MOVEC's privilege check before its register check, MOVES with its own register as (An)+/-(An), stale coprocessor-engine state) and one bench rule (see Corpus below). The IRQ groups need the v20 interrupt model, not ported to this bench yet |
 
 **Open**:
 
@@ -158,6 +158,16 @@ loads each round through a mailbox and enters it with an RTE, so the bench
 needs no access to the core's internals. The records come from AP68030's
 generator ([tools/cputest030/](tools/cputest030/)), which knows the v20
 corpus' rules.
+
+One bench rule follows WinUAE's generator rather than hardware. In the
+odd-vector groups (ODD_EXC, ODD_IRQ), when a traced instruction is followed
+by cputest's NOP, the generator stores the trace ("trace after NOP" in
+`cputest.cpp`) and runs on to the ILLEGAL, whose odd vector gives the
+address error. The native runner leaves vector 9 odd as well, so real
+hardware would take the trace into an address error there. The bench
+therefore keeps vector 9 on the monitor's handler when a round records a
+standalone trace, as AP68030's bench does. It still checks the trace's SR
+and PC and the final address error's frame.
 
 ## Synthesis
 
