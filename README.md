@@ -34,11 +34,12 @@ Measured at commit `8361a50` (default build); the 8 KB / FPU build at `8157742`.
   instructions, packed decimal, FScc/FDBcc/FTRAPcc and denormal operands
   trap as on the 68060. A 68881/68882's behaviour would need them in
   hardware.
-- **Speed with the 68030 caches**: every cache hit goes through the bus
-  interface (grant, then the lookup the next clock), so the default build is
-  slower per clock than AP68030 itself.
-  A fast path for the 256-byte caches in the data memory unit and the
-  fetch unit is the next performance step.
+- **Speed with the 68030 caches**: every access goes through the bus
+  interface, so the default build runs Dhrystone at 0.133 DMIPS/MHz, below
+  AP68030's 0.235. Letting the pipeline's 8 KB caches serve hits on the
+  lines the 68030 caches hold was tried: it reached 0.162 DMIPS/MHz, because
+  the hits are still limited to what 256 bytes hold and the pipeline's miss
+  path is long. For speed, use `CACHE030 = 0` (0.375 DMIPS/MHz).
 
 ## Configuration
 
