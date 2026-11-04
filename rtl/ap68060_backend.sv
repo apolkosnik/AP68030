@@ -228,6 +228,7 @@ logic        xm_v, xm_m;      // the routine running is an interrupt's; its old 
 logic        wb_exc_fmtv;     // the frame format is wb_exc_fmt (FPU exceptions)
 logic  [3:0] wb_exc_fmt;
 logic        wb_xcommit;      // the uop's address updates stand (FPU unimp/unsupp)
+logic        wb_dcommit;      // ... and its result (DBcc's decrement, odd target)
 logic [31:0] wb_exc_addr;
 logic [31:0] wb_exc_fslw;     // FSLW of an access error
 logic [31:0] wb_exc_dob;      // 68030 $A frame: the failed write's data
@@ -1370,7 +1371,9 @@ wire        ex_bdb  = (ex_u.op == OP_BCC) || (ex_u.op == OP_DBCC);
 wire        ex_ubr  = (ex_u.br == BR_IMM) || (ex_u.br == BR_EA) ||
                       (ex_u.br == BR_A) || (ex_u.br == BR_B) || (ex_u.op == OP_RTE);
 wire [31:0] ex_otgt = (!ex_bdb && ex_ubr) ? ex_target : ex_u.target;
-wire        ex_odd  = ex_br && (ex_bdb ? ex_u.target[0] :
+// (68030 DBcc: the target is fetched whenever the condition is false --
+// the count expiring or not --, never when it is true; the decrement stands)
+wire        ex_odd  = ex_br && (ex_bdb ? (ex_u.target[0] && !(ex_u.op == OP_DBCC && alu_cc)) :
                                 ex_ubr ? ex_target[0] :
                                 ((ex_u.op == OP_FPU) && fp_taken && ex_u.target[0]));
 logic [31:0] ex_odd_pc;
@@ -1384,6 +1387,10 @@ always_comb begin
 		ex_odd_pc = ex_otgt;                 // JSR (JSR_K: the opword in B)
 	else if (ex_u.br == BR_A && ex_u.op == OP_MOV && ex_u.cond == 4'hF)
 		ex_odd_pc = ex_ea - vbr_r;
+	else if (ex_u.op == OP_DBCC)
+		ex_odd_pc = ex_u.target;             // DBcc (68030): the target
+	else if (ex_u.op == OP_CCRLOG)
+		ex_odd_pc = ex_u.pc + 32'd2;         // RTR (68030): the RTR + 2
 end
 
 // front-file write by EX, and its broadcast to younger operands
@@ -1466,7 +1473,12 @@ wire [31:0] wb_next = wb_redir_pc;
 // SR, takes the trace and never stops
 wire wb_srchg    = wb_sr_we && ({wb_sr_new[15:12], wb_sr_new[10:8]} != {sr_r[15:12], sr_r[10:8]});
 // (the first RTE of a $A/$B frame only hands over to its routine)
-wire tr_now      = (sr_r[15] || (sr_r[14] && (wb_cof || wb_srchg))) &&
+// T0 (68030, WinUAE check_trace, AP68030): a change of flow, ORI/ANDI/
+// EORI to CCR and SR and MOVE to SR whatever they change (not MOVE to CCR),
+// another SR write (STOP) that changes the bits above the CCR
+wire wb_t0ev     = wb_cof || wb_srchg || (wb_u.op == OP_SRLOG) ||
+                   (wb_u.op == OP_CCRLOG && wb_u.cond != 4'd3);
+wire tr_now      = (sr_r[15] || (sr_r[14] && wb_t0ev)) &&
                    !(wb_u.op == OP_RTE && wb_rteb != 2'd0);
 wire wb_is_stop  = (wb_u.op == OP_MISC) && (wb_u.cond == 4'd2 || wb_u.cond == 4'd8);
 wire stop_traced = wb_is_stop && tr_now;
@@ -1543,7 +1555,7 @@ always_comb begin
 	// (its destination is memory), and its upd2 yields to its upd on the
 	// same register.  So a result beats an update, and upd beats upd2.
 	bwe[0] = (wcom || wpost) && wb_u.upd_v;  bwa[0] = wb_u.upd_reg;  bwd[0] = wb_upd_val;
-	if (wcom && wb_dwe) begin
+	if ((wcom || (adv_wb && wb_is_exc && wb_dcommit)) && wb_dwe) begin
 		bwe[1] = 1'b1; bwa[1] = wb_u.d_reg; bwd[1] = wb_res;
 	end
 	else begin
@@ -1631,10 +1643,10 @@ always_comb begin
 	cur = wb_commit ? (wb_sr_we ? (wb_sr_new & SR_MASK) : {sr_r[15:5], wb_ccr})
 	                : {sr_r[15:5], wb_ccr};
 	if (stopped && !wb_v) cur = {sr_r[15:5], ccr_b};
-	// RTE to an odd PC (68060, WinUAE gencpu): the system byte stays, the
-	// CCR is cleared except Z and N, set from the new SR word
+	// RTE to an odd PC (68030): the address error frame holds the SR the
+	// RTE frame gave
 	if (adv_wb && wb_is_exc && wb_oddrte)
-		cur = {sr_r[15:8], 3'b000, 1'b0, wb_sr_new[15], wb_sr_new == 16'd0, 2'b00};
+		cur = wb_sr_new;
 	// an interrupt whose handler address is odd: the address error comes
 	// before the interrupt clears M (WinUAE cputest, 68060: M stays)
 	if (adv_wb && wb_is_exc && wb_hodd && xm_v)
@@ -1688,7 +1700,8 @@ always_comb begin
 	// and its function code
 	if (x_fmt == 4'hA || x_fmt == 4'hB) begin
 		if (x_vec == 8'd3)
-			x_fslw = 32'h0000_3000;
+			// (RC, RB, RW and the program space, as AP68030)
+			x_fslw = {16'd0, 16'h3040 | {13'd0, cur[13], 2'b10}};
 		else if ((x_fslw & FSLW_IO) != 32'd0)
 			x_fslw = {16'd0, 16'hA000 | {13'd0, x_fslw[18:16]}};
 		else
@@ -2064,7 +2077,12 @@ always_ff @(posedge clk) begin
 			wb_exc_pcv <= ex_u.exc == 8'd0 && !ex_fault && ex_xvec == 8'd0 && ex_odd;
 			wb_exc_pc  <= ex_odd_pc;
 			wb_exc_fmtv <= 1'b0;
-			wb_xcommit  <= 1'b0;
+			// (68030: a return to an odd address -- RTS, RTD, RTR, RTE --
+			// has popped its stack: the frame goes below)
+			wb_xcommit  <= ex_u.exc == 8'd0 && !ex_fault && ex_xvec == 8'd0 && ex_odd &&
+			               (ex_u.br == BR_A || ex_u.op == OP_CCRLOG || ex_u.op == OP_RTE);
+			wb_dcommit  <= ex_u.exc == 8'd0 && !ex_fault && ex_xvec == 8'd0 && ex_odd &&
+			               ex_u.op == OP_DBCC;
 			wb_exc_dob  <= 32'd0;
 			// a data read that faulted: the handler may complete it (DIB, DF
 			// cleared) for the RTE
