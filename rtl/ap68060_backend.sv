@@ -723,20 +723,29 @@ ap68060_muldiv md (
 
 // FPU: OP_FPU uops act once no older uop is in flight (WB empty)
 wire         ex_is_fp = (ex_u.op == OP_FPU);
-ap68060_fpif #(.FPU_PIPE(FPU_PIPE)) fpif (
-	.clk(clk), .nreset(nreset),
-	.ex_v(ex_v && ex_is_fp && !ex_fault && ex_u.exc == 8'd0), .sub(ex_u.cond),
-	.fuse(ex_u.sz == SZ_W), .eal(ex_u.sz == SZ_B),
-	.imm(ex_u.imm[7:0]), .immb(ex_u.imm_b[7:0]),
-	.av(ex_av), .bv(ex_bv), .aw(ex_a[15:0]), .bw(ex_b[15:0]),
-	.dw_a(dc2_a[15:0]), .dw_b(dc2_b[15:0]), .dw_ld(!stall_ex), .latch(ex_latch), .ea(ex_ea), .pc(ex_u.pc),
-	.target(ex_u.target),
-	.safe(!wb_v || wb_fpchk), .adv(adv_ex), .kill(kill_now),
-	.hold(fp_hold), .res(fp_res), .dkill(fp_dkill), .taken(fp_taken),
-	.xvec(fp_xvec), .xfmt(fp_xfmt), .xnext(fp_xnext), .xaddr(fp_xaddr),
-	.xcommit(fp_xcommit), .st_kill(fp_stkill), .dfp(pcr_dfp),
-	.mv_slots(fp_mvslots), .cr_slots(fp_crslots)
-);
+// (CPIF: no on-chip FPU -- every F-line with CpID 1-7 goes to the
+// coprocessor interface, so no FPU uop is ever dispatched)
+generate if (!CPIF) begin : g_fpu
+	ap68060_fpif #(.FPU_PIPE(FPU_PIPE)) fpif (
+		.clk(clk), .nreset(nreset),
+		.ex_v(ex_v && ex_is_fp && !ex_fault && ex_u.exc == 8'd0), .sub(ex_u.cond),
+		.fuse(ex_u.sz == SZ_W), .eal(ex_u.sz == SZ_B),
+		.imm(ex_u.imm[7:0]), .immb(ex_u.imm_b[7:0]),
+		.av(ex_av), .bv(ex_bv), .aw(ex_a[15:0]), .bw(ex_b[15:0]),
+		.dw_a(dc2_a[15:0]), .dw_b(dc2_b[15:0]), .dw_ld(!stall_ex), .latch(ex_latch), .ea(ex_ea), .pc(ex_u.pc),
+		.target(ex_u.target),
+		.safe(!wb_v || wb_fpchk), .adv(adv_ex), .kill(kill_now),
+		.hold(fp_hold), .res(fp_res), .dkill(fp_dkill), .taken(fp_taken),
+		.xvec(fp_xvec), .xfmt(fp_xfmt), .xnext(fp_xnext), .xaddr(fp_xaddr),
+		.xcommit(fp_xcommit), .st_kill(fp_stkill), .dfp(pcr_dfp),
+		.mv_slots(fp_mvslots), .cr_slots(fp_crslots)
+	);
+end
+else begin : g_nofpu
+	assign fp_hold = 1'b0; assign fp_res = '0; assign fp_dkill = 1'b0; assign fp_taken = 1'b0;
+	assign fp_xvec = '0; assign fp_xfmt = '0; assign fp_xnext = 1'b0; assign fp_xaddr = '0;
+	assign fp_xcommit = 1'b0; assign fp_stkill = 1'b0; assign fp_mvslots = '0; assign fp_crslots = '0;
+end endgenerate
 
 // EX holds while the unit runs, until the cycle its result is presented
 // (a divide by zero holds its first cycle too: the zero test of the
