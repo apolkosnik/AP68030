@@ -1534,14 +1534,18 @@ wire [31:0] wb_next = wb_redir_pc;
 // S, M or mask bits (MC68030UM 8.1.6; AP68030's rule); a traced STOP loads
 // SR, takes the trace and never stops
 wire wb_srchg    = wb_sr_we && ({wb_sr_new[15:12], wb_sr_new[10:8]} != {sr_r[15:12], sr_r[10:8]});
-// (the first RTE of a $A/$B frame only hands over to its routine)
 // T0 (68030, WinUAE check_trace, AP68030): a change of flow, ORI/ANDI/
 // EORI to CCR and SR and MOVE to SR whatever they change (not MOVE to CCR),
 // another SR write (STOP) that changes the bits above the CCR
 wire wb_t0ev     = wb_cof || wb_srchg || (wb_u.op == OP_SRLOG) ||
                    (wb_u.op == OP_CCRLOG && wb_u.cond != 4'd3);
-wire tr_now      = (sr_r[15] || (sr_r[14] && wb_t0ev)) &&
-                   !(wb_u.op == OP_RTE && wb_rteb != 2'd0);
+// (the first RTE of a $A/$B frame only hands over to its routine; a
+// coprocessor instruction's trace the engine decided, from the trace bits
+// the instruction started with)
+wire  wb_cpi     = CPIF && (wb_u.op == OP_MISC) && (wb_u.cond == 4'd15);
+logic cp_trq;
+wire tr_now      = wb_cpi ? cp_trq :
+                   ((sr_r[15] || (sr_r[14] && wb_t0ev)) && !(wb_u.op == OP_RTE && wb_rteb != 2'd0));
 wire wb_is_stop  = (wb_u.op == OP_MISC) && (wb_u.cond == 4'd2 || wb_u.cond == 4'd8);
 wire stop_traced = wb_is_stop && tr_now;
 // (a trap instruction -- TRAP, TRAPV, TRAPcc, CHK, CHK2, divide by zero --
@@ -1565,8 +1569,11 @@ wire wb_refetch;
 // its instruction is suspended there, format $B, and restarted; the
 // waiting access never started)
 wire sbe_hold    = dm_sbw && (!wb_v || (!wb_is_exc && wb_st && !dm_st_rdy));
+// (... or a coprocessor instruction that waits at WB for it: its first
+// access would be the waiting one)
+wire sbe_cp      = sb_err && wb_v && !wb_is_exc && wb_cpi && !cp_iss;
 wire take_sbe    = sb_err && sb_empty &&
-                   ((adv_wb && wb_is_exc && !wb_refetch) || wb_bound || (stopped && !wb_v) || sbe_hold);
+                   ((adv_wb && wb_is_exc && !wb_refetch) || wb_bound || (stopped && !wb_v) || sbe_hold || sbe_cp);
 wire take_irq    = irq_pend && !trace_due && !take_sbe && ((wb_bound && !xstk) || (stopped && !wb_v));
 // (at the first handler instruction's boundary irq_pend compares with the
 // mask that instruction leaves: it can raise it to keep the interrupt
@@ -1678,7 +1685,6 @@ logic mt_seen;                // the DMU finished this WB uop's maintenance
 wire  wb_mm      = (wb_u.op == OP_MISC) && (wb_u.cond == 4'd14);
 // the coprocessor interface's instruction at WB (MISC 15): the engine runs
 // it (start: the operation word; resume: a $9 frame's state from RTE)
-wire  wb_cpi     = CPIF && (wb_u.op == OP_MISC) && (wb_u.cond == 4'd15);
 logic cp_iss, cp_seen, cp_busy, cp_fin, cp_srwe, cp_xreq, cp_xirq, cp_rwe, cp_cwe;
 logic [31:0] cp_npc, cp_xpc, cp_xia, cp_xint, cp_xea, cp_xfslw, cp_rwd, cp_cwv;
 logic [15:0] cp_srwv;
@@ -1686,11 +1692,13 @@ logic  [7:0] cp_xvec, cp_cwsel;
 logic  [3:0] cp_xfmt;
 logic  [4:0] cp_rwa;
 logic        cpr_res;                // MISC 15 in EX: a resume
+logic        cp_fintr, cp_xtr, cp_xtrq;   // the engine's trace decisions
+logic [31:0] cp_ia;                  // the coprocessor instruction's address (a resumed one's too)
 logic [31:0] cpr_a, cpr_b, cpr_ia, cpr_pc, ex_l1, ex_l2;
 logic [15:0] cpr_sr;
 logic        cp9_v;                  // an interrupt let in by the dialogue: format $9
 logic [31:0] cp9_ia, cp9_int, cp9_ea, wb_exc_ea;
-wire  cp_go      = wb_v && wb_cpi && !wb_is_exc && !cp_iss && !cp_seen && sb_empty && !cp_busy;
+wire  cp_go      = wb_v && wb_cpi && !wb_is_exc && !cp_iss && !cp_seen && sb_empty && !sb_err && !cp_busy;
 logic mm_seen, mm_iss;
 logic [31:0] mx_lo, mx_hi;
 logic [15:0] mx_ext;
@@ -1799,7 +1807,7 @@ always_comb begin
 		// traced instruction
 		x_vec  = 8'd9;
 		x_pc   = wb_next;
-		x_addr = (trace_defer && xstk) ? trace_addr : wb_u.pc;
+		x_addr = (trace_defer && xstk) ? trace_addr : wb_cpi ? cp_ia : wb_u.pc;
 	end
 	// 68030 frames (MC68030UM 8.4): $B bus error (a write that ended its
 	// instruction: $A, below) and address error; $2 CHK, CHK2, TRAPcc,
@@ -1845,7 +1853,7 @@ always_comb begin
 		x_dob  = sb_dob;
 		x_int  = 3'd1;
 		if (!(adv_wb && wb_is_exc)) x_pc = (stopped && !wb_v) ? stop_pc : wb_next;
-		if (sbe_hold && !wb_bound) begin
+		if ((sbe_hold || sbe_cp) && !wb_bound) begin
 			x_fmt  = 4'hB;
 			x_kind = EK_FMTB;
 			x_pc   = (wb_v || !wb_u.last) ? wb_u.pc : wb_next;
@@ -1955,6 +1963,7 @@ always_ff @(posedge clk) begin
 		cp_iss <= 1'b0; cp_seen <= 1'b0; cpr_res <= 1'b0; cpr_a <= '0; cpr_b <= '0; cpr_ia <= '0;
 		cpr_pc <= '0; cpr_sr <= '0; ex_l1 <= '0; ex_l2 <= '0;
 		cp9_v <= 1'b0; cp9_ia <= '0; cp9_int <= '0; cp9_ea <= '0; wb_exc_ea <= '0;
+		cp_trq <= 1'b0; cp_xtrq <= 1'b0; cp_ia <= '0;
 		wb_cof  <= 1'b0;
 		halted  <= 1'b0;
 		rst_seq <= 1'b1;
@@ -2456,8 +2465,12 @@ always_ff @(posedge clk) begin
 			stopped  <= 1'b0;
 			lpstopped <= 1'b0;
 			// the trace of a traced trap instruction, after its routine
-			trace_defer <= adv_wb && wb_is_exc && wb_post_trap && sr_r[15];
-			trace_addr  <= wb_u.pc;
+			// (instruction traps in both trace modes, UM 8.1.7; a coprocessor
+			// instruction's post-instruction exception or cpTRAPcc as the
+			// engine decided)
+			trace_defer <= adv_wb && wb_is_exc &&
+			               ((wb_post_trap && !wb_cpi && (sr_r[15] || sr_r[14])) || (wb_cpi && cp_xtrq));
+			trace_addr  <= wb_cpi ? cp_ia : wb_u.pc;
 			if (take_irq && !(adv_wb && wb_is_exc)) begin
 				irq_lvl_r <= irq_lvl;
 				ipend_r   <= 1'b0;
@@ -2556,6 +2569,7 @@ always_ff @(posedge clk) begin
 		// interrupt it lets in ($0: the instruction again; $9: suspended)
 		if (cp_go) begin
 			cp_iss <= 1'b1;
+			cp_ia  <= cpr_res ? cpr_ia : wb_u.pc;
 			if (cpr_res) begin
 				sr_r   <= {cpr_sr[15:5] & SR_MASK[15:5], 5'd0};
 				ccr_b  <= cpr_sr[4:0];
@@ -2581,6 +2595,7 @@ always_ff @(posedge clk) begin
 		end
 		if (wb_v && wb_cpi && cp_fin) begin
 			cp_seen     <= 1'b1;
+			cp_trq      <= cp_fintr;
 			wb_redir_pc <= cp_npc;
 		end
 		if (wb_v && wb_cpi && cp_xirq) begin
@@ -2592,6 +2607,7 @@ always_ff @(posedge clk) begin
 		end
 		if (wb_v && wb_cpi && cp_xreq && wb_exc == 8'd0) begin
 			cp_seen     <= 1'b1;
+			cp_xtrq     <= cp_xtr;
 			wb_stv      <= 1'b0;
 			wb_ok       <= 1'b0;
 			wb_exc      <= cp_xvec;
@@ -2605,7 +2621,7 @@ always_ff @(posedge clk) begin
 			wb_exc_ea   <= cp_xea;
 			wb_exc_int  <= 3'd0;
 		end
-		if (adv_wb) begin cp_iss <= 1'b0; cp_seen <= 1'b0; end
+		if (adv_wb) begin cp_iss <= 1'b0; cp_seen <= 1'b0; cp_trq <= 1'b0; cp_xtrq <= 1'b0; end
 		// the locked sequence BUSCR opened ends with its LOCKE write
 		if (dm_lkend) bus_lkdone <= 1'b1;
 		if (adv_wb) mt_seen <= 1'b0;
@@ -2828,9 +2844,9 @@ generate if (CPIF) begin : g_cpif
 		.op(cpr_a[15:0]), .pc_i(cpr_res ? cpr_ia : wb_u.pc),
 		.rs_pc(cpr_pc), .rs_int(cpr_a), .rs_ea(cpr_b),
 		.sr(cp_go && cpr_res ? cpr_sr : {sr_r[15:5], wb_ccr}), .irq_pend(irq_pend),
-		.fin(cp_fin), .npc(cp_npc), .sr_we(cp_srwe), .sr_wv(cp_srwv),
+		.fin(cp_fin), .fin_tr(cp_fintr), .npc(cp_npc), .sr_we(cp_srwe), .sr_wv(cp_srwv),
 		.xreq(cp_xreq), .xirq(cp_xirq), .xvec(cp_xvec), .xfmt(cp_xfmt), .xpc(cp_xpc), .xia(cp_xia),
-		.xint(cp_xint), .xea(cp_xea), .xfslw(cp_xfslw), .busy(cp_busy),
+		.xint(cp_xint), .xea(cp_xea), .xfslw(cp_xfslw), .x_tr(cp_xtr), .busy(cp_busy),
 		.rra(cp_rra), .rrd(brd_b[5]), .rwe(cp_rwe), .rwa(cp_rwa), .rwd(cp_rwd),
 		.c_sfc(sfc_r), .c_dfc(dfc_r), .c_cacr(cacr_r), .c_vbr(vbr_r), .c_caar(caar_r),
 		.cw_we(cp_cwe), .cw_sel(cp_cwsel), .cw_val(cp_cwv),
@@ -2839,7 +2855,7 @@ generate if (CPIF) begin : g_cpif
 	);
 end
 else begin : g_nocpif
-	assign cp_fin = 1'b0; assign cp_npc = '0; assign cp_srwe = 1'b0; assign cp_srwv = '0;
+	assign cp_fin = 1'b0; assign cp_fintr = 1'b0; assign cp_xtr = 1'b0; assign cp_npc = '0; assign cp_srwe = 1'b0; assign cp_srwv = '0;
 	assign cp_xreq = 1'b0; assign cp_xirq = 1'b0; assign cp_xvec = '0; assign cp_xfmt = '0;
 	assign cp_xpc = '0; assign cp_xia = '0; assign cp_xint = '0; assign cp_xea = '0; assign cp_xfslw = '0;
 	assign cp_busy = 1'b0; assign cp_rra = '0; assign cp_rwe = 1'b0; assign cp_rwa = '0; assign cp_rwd = '0;

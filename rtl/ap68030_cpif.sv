@@ -44,6 +44,7 @@ module ap68030_cpif
 	input  logic        irq_pend,       // an interrupt above the mask is pending
 
 	output logic        fin,
+	output logic        fin_tr,         // ... and its trace is due (T1; T0 with a change of flow)
 	output logic [31:0] npc,
 	output logic        sr_we,
 	output logic [15:0] sr_wv,
@@ -56,6 +57,8 @@ module ap68030_cpif
 	output logic [31:0] xint,
 	output logic [31:0] xea,
 	output logic [31:0] xfslw,
+	output logic        x_tr,           // the exception's handler entry is traced (an instruction
+	                                    // trap, a post-instruction exception)
 	output logic        busy,
 
 	// the back register file
@@ -237,17 +240,20 @@ task automatic xgo(input logic [7:0] v, input logic [3:0] f, input logic [31:0] 
 	xreq <= 1'b1; xvec <= v; xfmt <= f; xpc <= p; xia <= ia;
 	xint <= {tr_t1, tr_t0, flow, cp_cond, cp_dr, cp_ca, cp_pcbit, cp_trace_wait, cp_kind, cp_id, 1'b0, ir};
 	xea  <= ea;
+	x_tr <= 1'b0;
 	st   <= C_IDLE;
 endtask
 task automatic proto;
 	xgo(VEC_CPPROTO, 4'h9, scan, pci);
 endtask
+// (the trace: T1, T0 with a change of flow, or one an SR transfer made due)
 task automatic finish(input logic [31:0] p);
 	fin <= 1'b1; npc <= p; st <= C_IDLE;
+	fin_tr <= tr_t1 || (tr_t0 && flow) || cp_trace_wait;
 endtask
 task automatic goto_pc(input logic [31:0] p);
 	if (p[0]) xgo(VEC_ADDR, 4'hB, pci, p);   // an odd target: the address error (frame PC: the instruction)
-	else finish(p);
+	else begin finish(p); fin_tr <= tr_t1 || tr_t0 || cp_trace_wait; end
 endtask
 
 assign busy = (st != C_IDLE);
@@ -260,7 +266,7 @@ always_ff @(posedge clk) begin
 		cp_kind <= '0; cp_id <= '0; cp_cond <= 1'b0; cp_dr <= 1'b0; cp_ca <= 1'b0; cp_pcbit <= 1'b0;
 		cp_trace_wait <= 1'b0; flt_fline <= 1'b0; cp_resp <= '0; cp_len <= '0; cp_pos <= '0; cnt <= '0;
 		mm_mask <= '0; xsub <= '0; avec <= '0; tr_t1 <= 1'b0; tr_t0 <= 1'b0; flow <= 1'b0;
-		npc <= '0; xvec <= '0; xfmt <= '0; xpc <= '0; xia <= '0; xint <= '0; xea <= '0; xfslw <= '0;
+		npc <= '0; fin_tr <= 1'b0; x_tr <= 1'b0; xvec <= '0; xfmt <= '0; xpc <= '0; xia <= '0; xint <= '0; xea <= '0; xfslw <= '0;
 		rra <= '0; rwa <= '0; rwd <= '0; cw_sel <= '0; cw_val <= '0; sr_wv <= '0;
 		acc_a <= '0; acc_wd <= '0; acc_rd <= '0; acc_n <= '0; acc_fc <= '0; acc_pn <= '0;
 		acc_w <= 1'b0; acc_err <= 1'b0; acc_cir <= 1'b0; acc_got <= '0;
@@ -466,7 +472,7 @@ always_ff @(posedge clk) begin
 			case (xsub)
 				2'd0:    xgo(avec, 4'h0, pci, 32'd0);
 				2'd1:    xgo(avec, 4'h9, scan, pci);
-				default: xgo(avec, 4'h2, scan, pci);
+				default: begin xgo(avec, 4'h2, scan, pci); x_tr <= tr_t1 || cp_trace_wait; end
 			endcase
 		end
 		C_NULL: begin
@@ -578,7 +584,7 @@ always_ff @(posedge clk) begin
 			else if (er == 3'd3 && cnt < 8'd2) begin cnt <= cnt + 8'd1; rdw(C_TRAP2); end
 			else begin
 				cnt <= 8'd0;
-				if (cp_resp[0]) xgo(VEC_TRAPCC, 4'h2, scan, pci);
+				if (cp_resp[0]) begin xgo(VEC_TRAPCC, 4'h2, scan, pci); x_tr <= tr_t1 || tr_t0; end
 				else finish(scan);
 			end
 		end
