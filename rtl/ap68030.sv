@@ -226,7 +226,7 @@ logic  [1:0] mt_scope, mt_caches;
 logic [31:0] mt_addr, mt_pa, mt_fslw, urp, srp, dm_st_faddr;
 // 68030 bus fault frames: the failed write, the RTE's rerun and completion
 logic [31:0] dm_st_dob, sb_fa, sb_dob, rr_pa, rr_wd, sub_a, sub_d;
-logic        dm_st_lastc, rr_v, sub_arm, sub_clr;
+logic        dm_st_lastc, rr_v, sub_arm, sub_clr, sb_wait;
 logic  [2:0] sb_fn, sb_ffc, rr_n, rr_fc;
 logic  [1:0] sub_sz, rte_alt;
 logic        mt_fault, dm_lkend, dm_iack_end;
@@ -256,9 +256,11 @@ logic        uo_rdy;
 // the 68030's CACR in the terms of the caches (the AP68060's bit
 // positions): ED -> the data cache enable, FD -> no allocation, EI -> the
 // instruction cache enable, FI -> no allocation; the branch cache always
-// on (cleared with the instruction cache); no store buffer, no copyback
+// on (cleared with the instruction cache); no copyback
 wire [31:0] cacr6;
-assign cacr6 = {cacr[8], cacr[9], 6'd0, 1'b1, 7'd0, cacr[0], cacr[1], 14'd0};
+// (ESB, bit 29, always: the 68030 posts every write -- its one-entry
+// write buffer is the store buffer with one entry)
+assign cacr6 = {cacr[8], cacr[9], 1'b1, 5'd0, 1'b1, 7'd0, cacr[0], cacr[1], 14'd0};
 
 ap68060_backend #(.FPU_PIPE(FPU_PIPE), .EARLY_RES(EARLY_RES), .SKID(SKID),
                   .PCR_REV(PCR_REV)) be (
@@ -286,7 +288,7 @@ ap68060_backend #(.FPU_PIPE(FPU_PIPE), .EARLY_RES(EARLY_RES), .SKID(SKID),
 	.mt_wr(mt_wr), .mt_done(mt_done), .mt_pa(mt_pa), .mt_fault(mt_fault), .mt_fslw(mt_fslw),
 	.dm_st_faddr(dm_st_faddr),
 	.dm_st_dob(dm_st_dob), .dm_st_lastc(dm_st_lastc),
-	.sb_fa(sb_fa), .sb_dob(sb_dob), .sb_fn(sb_fn), .sb_ffc(sb_ffc),
+	.sb_fa(sb_fa), .sb_dob(sb_dob), .sb_fn(sb_fn), .sb_ffc(sb_ffc), .dm_sbw(sb_wait),
 	.rr_v(rr_v), .rr_pa(rr_pa), .rr_n(rr_n), .rr_wd(rr_wd), .rr_fc(rr_fc),
 	.sub_arm(sub_arm), .sub_clr(sub_clr), .sub_a(sub_a), .sub_d(sub_d), .sub_sz(sub_sz),
 	.rte_alt(rte_alt),
@@ -328,7 +330,7 @@ ap68060_dmu #(.DC1_ATC(DC1_ATC)) dmu (
 	.bi_gnt(b_gnt[0]), .bi_done(b_done[0]), .bi_err(b_err[0]), .bi_drop(b_drop), .bi_more(b_more),
 	.bi_rvalid(b_rvalid && b_rclient == 1'b0), .b_rdata(b_rdata), .b_rbeat(b_rbeat),
 	.sb_empty(sb_empty), .sb_err(sb_err), .sb_fslw(sb_fslw), .sb_err_ack(sb_err_ack),
-	.sb_fa(sb_fa), .sb_dob(sb_dob), .sb_fn(sb_fn), .sb_ffc(sb_ffc),
+	.sb_fa(sb_fa), .sb_dob(sb_dob), .sb_fn(sb_fn), .sb_ffc(sb_ffc), .sb_wait(sb_wait),
 	.rr_v(rr_v), .rr_pa(rr_pa), .rr_n(rr_n), .rr_wd(rr_wd), .rr_fc(rr_fc),
 	.b_ravec(b_ravec), .b_rtci(b_rtci),
 	.sn_req(sn_req), .sn_pa(sn_pa), .sn_look(sn_look), .sn_hit(sn_hit),

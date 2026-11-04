@@ -175,6 +175,7 @@ module ap68060_dmu
 	output logic [31:0] sb_dob,         // data right justified, bytes, function code)
 	output logic  [2:0] sb_fn,
 	output logic  [2:0] sb_ffc,
+	output logic        sb_wait,        // the WB store waits for the buffer (no bus cycle of it yet)
 	// 68030 RTE of a $A/$B frame with DF set: the faulted write again (one
 	// aligned bus cycle) through the store buffer
 	input  logic        rr_v,
@@ -1019,14 +1020,18 @@ typedef struct packed {
 	logic  [1:0] upa;
 	logic        ci;
 } sbent_t;
-localparam int SBN = 2;           // store buffer entries (the 68060 has 4: 150 ALMs more)
+logic        sbe_r, pbe_r;        // (below)
+localparam int SBN = 1;           // store buffer entries (the 68030's one write pending)
 sbent_t      sb [SBN];
 logic  [2:0] sb_n;
 logic        sel_q;               // the BIU saw the store buffer's request last cycle
 logic        own_sb;              // the transaction in progress is the buffer's
 logic        sb_fly;              // the head is on the bus (granted, not done)
 wire         sb_room = (sb_n < 3'(SBN));
-wire         sb_push = (e_st == E_SB) && sb_room;
+// (nothing enters while a buffered write's bus error waits to be taken:
+// the 68030 takes it before the write that waits for the buffer starts)
+wire         sb_push = (e_st == E_SB) && sb_room && !sbe_r;
+assign       sb_wait = (e_st == E_SB);
 // present the head while it is not on the bus already (the BIU may start
 // again in the clock its done comes); the engine's request waits while the
 // buffer holds anything, so no bus cycle of the engine passes a write
@@ -1037,7 +1042,6 @@ wire         sb_pop  = own_sb && (bi_done || bi_err);
 assign       sb_empty = (sb_n == 3'd0);
 // a TEA on a buffered write (SBE) or on a push (PBE): recorded, reported
 // as an access error once the buffers are empty (MC68060UM 8.4.6)
-logic        sbe_r, pbe_r;
 assign       sb_err  = sbe_r || pbe_r;
 assign       sb_fslw = (sbe_r ? FSLW_SBE : 32'd0) | (pbe_r ? FSLW_PBE : 32'd0);
 
@@ -1814,9 +1818,15 @@ always_ff @(posedge clk) begin
 			end
 			end
 		end
-		E_SB: begin
+		E_SB: if (kill_now) begin
+			// the store's instruction is restarted: a buffered write's bus
+			// error taken while it waited (the only kill of a WB store that
+			// has not completed)
+			e_st <= E_IDLE;
+		end
+		else begin
 			// one bus cycle's piece a clock into the store buffer
-			if (sb_room) begin
+			if (sb_push) begin
 				bo_wd   <= bo_wd << (8 * bo_np);
 				bo_pa   <= bo_pa + {29'd0, bo_np};
 				bo_left <= bo_left - bo_np;
