@@ -99,6 +99,8 @@ module ap68030_biu
 	// the PMMU (AP68030's ap030_mmu): an MMU instruction (pulse; WB waits
 	// for mm_done) -- a register write (PMOVE to TC SRP CRP TT0 TT1 MMUSR)
 	// or an operation (PLOAD PTEST PFLUSH) -- and the registers
+	input  logic              mmudis,        // the MMUDIS and CDIS pins, synchronized
+	input  logic              cdis,
 	input  logic              mm_req,
 	input  logic              mm_reg,
 	input  logic  [2:0]       mm_sel,        // 0 TC 1 SRP 2 CRP 3 TT0 4 TT1 5 MMUSR
@@ -275,7 +277,7 @@ wire         tr_go  = !rs_tr || tr_ok;
 wire         tr_inh = rs_tr && tr_ci;
 ap030_mmu mmu (
 	.clk(clk), .ce(1'b1), .rst(!nreset),
-	.tr_la(rs.addr), .tr_fc(rs.tm), .tr_rw(rs.rd), .tr_rmc(rs.lock), .mmudis(1'b0),
+	.tr_la(rs.addr), .tr_fc(rs.tm), .tr_rw(rs.rd), .tr_rmc(rs.lock), .mmudis(mmudis),
 	.tr_ok(tr_ok), .tr_fault(tr_fault), .tr_walk(tr_walk), .tr_pa(tr_pa), .tr_ci(tr_ci),
 	.tr_use(tr_use),
 	.walk_req(walk_req), .walk_la(wk_la), .walk_fc(wk_fc), .walk_rw(wk_rw), .walk_rmc(wk_rmc),
@@ -289,8 +291,8 @@ ap030_mmu mmu (
 	.w_rdata(w_rdata), .w_berr(w_berr), .w_active(w_active), .busy(mmu_busy)
 );
 
-wire         ic_on  = cacr30[0], ic_fok = cacr30[0] && !cacr30[1];
-wire         dc_on  = cacr30[8], dc_fok = cacr30[8] && !cacr30[9];
+wire         ic_on  = cacr30[0] && !cdis, ic_fok = ic_on && !cacr30[1];
+wire         dc_on  = cacr30[8] && !cdis, dc_fok = dc_on && !cacr30[9];
 logic        ic_tag_hit, ic_hit, ic_empty, dc_tag_hit, dc_hit, dc_empty;
 logic [31:0] ic_q, dc_q;
 logic        cfill_d, cfill_i;     // the transaction's fill strobes go to that cache

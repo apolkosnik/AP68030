@@ -470,7 +470,7 @@ ap68030_biu #(.NC(NC), .C030(CACHE030)) biu (
 	.rsto_req(rsto_req), .rsto_busy(rsto_busy), .rsto_n(rsto_n),
 	.sub_arm(sub_arm), .sub_clr(sub_clr), .sub_a(sub_a), .sub_d(sub_d), .sub_sz(sub_sz),
 	.cacr30(cacr), .cclr(cclr30), .caar_idx(caar[7:2]), .snoop_we(snoop_we), .snoop_addr(snoop_addr),
-	.nc_v(nmi_rt && nmi_vec_nocache), .nc_a(nmi_va),
+	.nc_v(nmi_rt && nmi_vec_nocache), .nc_a(nmi_va), .mmudis(mdis), .cdis(cdis),
 	.mm_req(mm_req), .mm_reg(mm_reg), .mm_sel(mm_sel), .mm_fd(mm_fd), .mm_hi(mm_hi), .mm_lo(mm_lo),
 	.mm_kind(mm_kind), .mm_level(mm_level), .mm_fc(mm_fc), .mm_fcmask(mm_fcmask),
 	.mm_done(mm_done), .mm_cfgerr(mm_cfgerr), .mm_desc(mm_desc),
