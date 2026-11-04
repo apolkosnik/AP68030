@@ -26,7 +26,8 @@ module ap68060_decode
 	import ap68060_pkg::*, ap68060_upkg::*;
 #(
 	parameter bit LOOP_PRED = 1,         // the loop exit predictor
-	parameter bit CPIF      = 0          // F-line CpID 1-7: the coprocessor interface (no FPU)
+	parameter bit CPIF      = 0,         // F-line CpID 1-7: the coprocessor interface (no FPU)
+	parameter bit NOFPU     = 0          // no FPU: F-line CpID 1-7 the interface, else the F-line exception
 )
 (
 	input  logic        clk,
@@ -263,7 +264,7 @@ always_ff @(posedge clk)
 wire [15:0] opw = win[0];
 // (CPIF) an F-line with CpID 1-7: the coprocessor interface's instruction
 // (predecoded with the queue word: no compare on D1's consume path)
-wire        cpop = CPIF && pd0.cpf;
+wire        cpop = (CPIF || NOFPU) && pd0.cpf;
 
 //--------------------------------------------------------------------------
 // state
@@ -705,6 +706,9 @@ always_comb begin
 				3'b110, 3'b111: nrec.exc = 8'd11;
 				default: ;
 			endcase
+			// (no coprocessor interface: the F-line exception, as a 68030
+			// whose coprocessor does not answer)
+			if (!CPIF && nrec.exc == 8'd0) nrec.exc = 8'd11;
 		end
 		// (a privileged instruction in user mode is identified from its
 		// operation word: a fault on a later word of it is not taken, UM

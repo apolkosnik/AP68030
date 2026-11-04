@@ -32,6 +32,10 @@ module ap68030
 	// the FPU: 1 = the on-chip FPU, 0 = none: F-line instructions with
 	// CpID 1-7 run the coprocessor interface (UM section 10) on the bus
 	parameter bit         FPU          = 0,
+	// with FPU = 0: 1 = the coprocessor interface runs F-line instructions
+	// with CpID 1-7 (an external 68881/68882 works); 0 = they take the
+	// F-line exception at once (no coprocessor on the bus; no engine built)
+	parameter bit         COPROC       = 1,
 	parameter             USE_CE       = 0
 )(
 	input             clk,
@@ -299,7 +303,7 @@ wire   pc_on = !CACHE030 && !(mmu_tc[31] && !mdis);
 assign cacr6 = {cacr[8] && pc_on, cacr[9], 1'b1, 5'd0, 1'b1, 7'd0, cacr[0] && pc_on, cacr[1], 14'd0};
 
 ap68060_backend #(.FPU_PIPE(FPU_PIPE), .EARLY_RES(EARLY_RES), .SKID(SKID),
-                  .PCR_REV(PCR_REV), .CPIF(!FPU)) be (
+                  .PCR_REV(PCR_REV), .CPIF(!FPU && COPROC), .NOFPU(!FPU)) be (
 	.clk(clk), .nreset(nreset),
 	.in_v(uq_n != 2'd0), .in_u(uq0), .in_rdy(uo_rdy),
 	.redir_v(redir_v), .redir_pc(redir_pc), .flush(flush), .fe_flush(fe_flush),
@@ -462,7 +466,7 @@ ap68060_fetch #(.NOCACHE(CACHE030 == 1)) fetch (
 );
 assign b_wdata[1] = '0;
 
-ap68060_decode #(.LOOP_PRED(LOOP_PRED), .CPIF(!FPU)) dec (
+ap68060_decode #(.LOOP_PRED(LOOP_PRED), .CPIF(!FPU && COPROC), .NOFPU(!FPU)) dec (
 	.clk(clk), .nreset(nreset), .flush(fe_flush),
 	.ras_rv(ras_rv), .ras_rtp(ras_rtp), .ras_rn(ras_rn),
 	.win(win), .win_flt(win_flt), .win_fdem(win_fdem), .win_fatc(win_fatc),

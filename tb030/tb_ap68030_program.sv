@@ -65,7 +65,7 @@
 `timescale 1ns/1ps
 `include "ap030_defs.svh"
 
-module tb_ap030_program #(parameter FAST_PORT = 0, parameter CACHE030 = 1, parameter FPU = 0);
+module tb_ap030_program #(parameter FAST_PORT = 0, parameter CACHE030 = 1, parameter FPU = 0, parameter COPROC = 1);
 
 reg clk = 0;
 always #10 clk = ~clk;
@@ -127,7 +127,7 @@ wire n_take = n_req && n_ready;
 // fetch_lazy's pipeline-model inputs, set by the program ($F1E0-$F1E9)
 reg        fm_stop_v = 0, fm_scan_v = 0;
 reg [31:0] fm_stop = 0, fm_scan_to = 0;
-ap68030 #(.FAST_PORT(FAST_PORT), .USE_CE(1), .CACHE030(CACHE030), .FPU(FPU)) dut (
+ap68030 #(.FAST_PORT(FAST_PORT), .USE_CE(1), .CACHE030(CACHE030), .FPU(FPU), .COPROC(COPROC)) dut (
 	.clk(clk), .ce(cpu_ce),
     .fast_req(n_req), .fast_ready(n_ready), .fast_match(n_match),
     .fast_addr(n_addr), .fast_fc(n_fc), .fast_rw(n_rw), .fast_ci(n_ci),

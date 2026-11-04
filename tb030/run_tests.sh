@@ -51,7 +51,7 @@ verilator --binary --timing -j 16 --build-jobs 16 -O3 \
 	-Werror-PINMISSING -Werror-IMPLICIT \
 	--top-module tb_ap030_program --Mdir "$WORK/obj_prog" -o tb_prog \
 	-I"$RTL" -I"$RTL/fpu" -CFLAGS "-O2 -march=native" \
-	"-GFAST_PORT=${FAST_PORT:-0}" "-GCACHE030=${CACHE030:-1}" "-GFPU=${FPU:-0}" \
+	"-GFAST_PORT=${FAST_PORT:-0}" "-GCACHE030=${CACHE030:-1}" "-GFPU=${FPU:-0}" "-GCOPROC=${COPROC:-1}" \
 	$RTL/ap68060_pkg.sv $RTL/gen/ap68060_upkg.sv $RTL/ap68060_alu.sv $RTL/ap68060_alu_slow.sv $RTL/ap68060_muldiv.sv \
 	$RTL/ap030_bus.v $RTL/ap030_cache.v $RTL/ap030_mmu.v $RTL/ap68030_biu.sv $RTL/ap68030_cpif.sv $RTL/ap68060_ram.sv $RTL/ap68060_atc.sv $RTL/ap68060_dmu.sv \
 	$RTL/ap68060_predec.sv $RTL/ap68060_fetch.sv \

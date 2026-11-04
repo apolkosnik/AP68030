@@ -29,7 +29,8 @@ module ap68060_backend
 	parameter bit         EARLY_RES = 1,
 	parameter bit         SKID      = 1,      // the skid register in front of AG
 	parameter logic [7:0] PCR_REV   = 8'h06,      // PCR revision number (bits 15-8)
-	parameter bit         CPIF      = 0           // the coprocessor interface (no on-chip FPU)
+	parameter bit         CPIF      = 0,          // the coprocessor interface (no on-chip FPU)
+	parameter bit         NOFPU     = CPIF        // no on-chip FPU
 )(
 	input  logic        clk,
 	input  logic        nreset,
@@ -725,7 +726,7 @@ ap68060_muldiv md (
 wire         ex_is_fp = (ex_u.op == OP_FPU);
 // (CPIF: no on-chip FPU -- every F-line with CpID 1-7 goes to the
 // coprocessor interface, so no FPU uop is ever dispatched)
-generate if (!CPIF) begin : g_fpu
+generate if (!NOFPU) begin : g_fpu
 	ap68060_fpif #(.FPU_PIPE(FPU_PIPE)) fpif (
 		.clk(clk), .nreset(nreset),
 		.ex_v(ex_v && ex_is_fp && !ex_fault && ex_u.exc == 8'd0), .sub(ex_u.cond),
