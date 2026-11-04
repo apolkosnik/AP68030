@@ -135,7 +135,7 @@ module ap68060_backend
 	input  logic [31:0] sb_dob,
 	input  logic  [2:0] sb_fn,
 	input  logic  [2:0] sb_ffc,
-	input  logic        dm_sbw,         // the WB store waits for the store buffer
+	input  logic        dm_sbw,         // a data access waits for a buffered write's bus error
 	// RTE of a $A/$B frame: the faulted write again (DF set) ...
 	output logic        rr_v,
 	output logic [31:0] rr_pa,
@@ -1499,9 +1499,11 @@ wire trace_due   = wb_bound && (tr_now || (trace_defer && xstk));
 // exception the instruction at WB takes (MC68060UM 8.4.6); it goes before
 // a trace or an interrupt.  (wb_refetch: below, not an exception.)
 wire wb_refetch;
-// (68030: or while the WB store waits for the buffer -- its instruction is
-// suspended there and restarted, the waiting write never started)
-wire sbe_hold    = wb_v && !wb_is_exc && dm_sbw;
+// (68030: or while a later data access waits for it -- the WB store for
+// the buffer, or a bus cycle of the DMU once every older uop has left WB:
+// its instruction is suspended there, format $B, and restarted; the
+// waiting access never started)
+wire sbe_hold    = dm_sbw && (!wb_v || (!wb_is_exc && wb_st && !dm_st_rdy));
 wire take_sbe    = sb_err && sb_empty &&
                    ((adv_wb && wb_is_exc && !wb_refetch) || wb_bound || (stopped && !wb_v) || sbe_hold);
 wire take_irq    = irq_pend && !trace_due && !take_sbe && ((wb_bound && !xstk) || (stopped && !wb_v));
@@ -1730,7 +1732,11 @@ always_comb begin
 		x_dob  = sb_dob;
 		x_int  = 2'd1;
 		if (!(adv_wb && wb_is_exc)) x_pc = (stopped && !wb_v) ? stop_pc : wb_next;
-		if (sbe_hold && !wb_bound) x_pc = wb_u.pc;
+		if (sbe_hold && !wb_bound) begin
+			x_fmt  = 4'hB;
+			x_kind = EK_FMTB;
+			x_pc   = (wb_v || !wb_u.last) ? wb_u.pc : wb_next;
+		end
 	end
 
 	// the SR inside the handler: S set, T cleared; an interrupt raises the

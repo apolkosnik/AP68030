@@ -175,7 +175,7 @@ module ap68060_dmu
 	output logic [31:0] sb_dob,         // data right justified, bytes, function code)
 	output logic  [2:0] sb_fn,
 	output logic  [2:0] sb_ffc,
-	output logic        sb_wait,        // the WB store waits for the buffer (no bus cycle of it yet)
+	output logic        sb_wait,        // a buffered write's bus error holds a data access back
 	// 68030 RTE of a $A/$B frame with DF set: the faulted write again (one
 	// aligned bus cycle) through the store buffer
 	input  logic        rr_v,
@@ -1031,7 +1031,9 @@ wire         sb_room = (sb_n < 3'(SBN));
 // (nothing enters while a buffered write's bus error waits to be taken:
 // the 68030 takes it before the write that waits for the buffer starts)
 wire         sb_push = (e_st == E_SB) && sb_room && !sbe_r;
-assign       sb_wait = (e_st == E_SB);
+// (... nor does a bus cycle of the engine start: a later access waits for
+// the fault -- a write for the buffer, or a read, MC68030UM 8.1.2)
+assign       sb_wait = sbe_r && ((e_st == E_SB) || b_req);
 // present the head while it is not on the bus already (the BIU may start
 // again in the clock its done comes); the engine's request waits while the
 // buffer holds anything, so no bus cycle of the engine passes a write
@@ -1055,7 +1057,10 @@ wire         b_err    = bi_err && !own_sb;
 wire         b_rvalid = bi_rvalid && !own_sb;
 
 always_comb begin
-	bi_req   = sb_sel || (b_req && sb_n == 3'd0);
+	// (and a killed DC2 job's single read not granted yet is dropped:
+	// no read of a discarded instruction -- a device's, a locked one --
+	// reaches the bus)
+	bi_req   = sb_sel || (b_req && sb_n == 3'd0 && !sbe_r && !(e_kill && e_job && !bo.line));
 	bi_breq  = b_breq;
 	bi_wdata = b_wdata;
 	// (the head stays presented while it is on the bus: the BIU reads its
@@ -2235,6 +2240,10 @@ always_ff @(posedge clk) begin
 				bo_cancel <= 1'b0;
 				e_breq    <= 1'b0;
 				e_st      <= e_ret;
+			end
+			else if (e_kill && e_job && !bo.line && !b_gnt && !bo_ingnt) begin
+				e_breq <= 1'b0;
+				e_st   <= E_S_DONE;
 			end
 			else if (b_gnt) begin
 				e_breq <= 1'b0;
