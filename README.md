@@ -22,6 +22,7 @@ Measured at commit `27dd6d4` (default build); the 8 KB / FPU build at `8157742`.
 |---|---|
 | Target | Cyclone V 5CSEBA6U23I7 (MiSTer), out-of-context fit at 70 MHz (14.286 ns) |
 | Area, default build (68030 caches, coprocessor interface, no FPU) | 19,846 ALMs, 13,460 registers, 62 RAM blocks |
+| Area, 68030 caches and on-chip FPU (`FPU = 1`) | 20,596 ALMs, 15,808 registers (before the snooper change: 20,775). Over 20,000 ALMs, and -0.142 ns at 70 MHz in the latest fit (+0.295 ns before the snooper change); not closed yet. 25 of 37 regression programs pass, the 12 that fail are the external-coprocessor programs |
 | Area, no coprocessor interface (`COPROC = 0`) | 16,588 ALMs, 12,203 registers; +0.384 ns at 70 MHz (Fmax 71.9 MHz) |
 | Area, 8 KB caches and on-chip FPU | 24,432 ALMs, 17,401 registers, 339,968 block memory bits, 15 DSP blocks |
 | Timing | Default build: +0.426 ns at 70 MHz, Fmax 72.2 MHz, no failing endpoint. 8 KB caches and on-chip FPU: +0.006 ns, Fmax 70.0 MHz |

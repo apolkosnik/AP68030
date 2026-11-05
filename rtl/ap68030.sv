@@ -211,6 +211,8 @@ always_ff @(posedge clk) begin
 end
 assign xs_v  = snoop_we || c2w_v || cwp_v;
 assign xs_pa = snoop_we ? snoop_addr : cwp_v ? cwp_pa : c2w_pa;
+generate
+if (CACHE030 != 1) begin : g_snoop
 ap68060_snoop snoop (
 	// (the snoop port: another master wrote snoop_addr -- presented to the
 	// snooper as a snooped transfer of an alternate master)
@@ -224,6 +226,15 @@ ap68060_snoop snoop (
 	.pq0_v(pq0_v), .pq0_l(pq0_l), .pq1_v(pq1_v), .pq1_l(pq1_l),
 	.ic_req(sn_ic), .ic_pa(sn_ic_pa), .ic_all(sn_ic_all), .ic_done(sn_ic_done)
 );
+end else begin : g_nosnoop
+	// the 68030 caches snoop inside the BIU; the pipeline's caches are
+	// off, so there is nothing for this snooper to invalidate
+	assign sn_req = 1'b0;  assign sn_pa = '0;     assign sn_inv = 1'b0;
+	assign sn_ovf = 1'b0;  assign sn_busy = 1'b0;
+	assign sf_req = 1'b0;  assign sf_set = '0;    assign sf_way = '0;  assign sf_more = 1'b0;
+	assign sn_ic = 1'b0;   assign sn_ic_pa = '0;  assign sn_ic_all = 1'b0;
+end
+endgenerate
 assign sn_wr    = 1'b0;
 assign sn_wbe   = '0;
 assign sn_wword = '0;
