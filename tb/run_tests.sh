@@ -13,7 +13,7 @@ mkdir -p "$WORK"
 SRC="$RTL/ap030_top.v $RTL/ap030_core.v $RTL/ap030_memsys.v $RTL/ap030_mmu.v $RTL/ap030_cache.v \
      $RTL/ap030_bus.v $RTL/ap030_alu.v $RTL/ap030_muldiv.v $RTL/ap030_regfile.v"
 
-PROGS="t_integer t_exceptions t_bus t_cache t_mmu t_cp t_stack t_snoop t_extword t_pmmuenc t_held"
+PROGS="t_integer t_exceptions t_bus t_cache t_mmu t_cp t_stack t_snoop t_extword t_pmmuenc t_held t_usermode"
 HALTPROGS="t_dblfault"
 LAZYPROGS="t_lazy"     # run with +lazy only: they drive the pipeline-model inputs
 # programs on the coprocessor model's script (command $0030): asm/t_cpx_*.s
@@ -92,7 +92,8 @@ for t in $PROGS; do
 	# exactly the processor clocks of the run without the enable
 	run "${t}_ce2" "$WORK/obj_prog/tb_prog" "+prog=$WORK/$t.hex" +ce=2
 	same_clocks "${t}_ce2" "$t"
-	run "${t}_ce4_waits" "$WORK/obj_prog/tb_prog" "+prog=$WORK/$t.hex" +ce=4 +waits=2
+	# (a quarter rate takes four bench clocks a processor clock: a longer limit)
+	run "${t}_ce4_waits" "$WORK/obj_prog/tb_prog" "+prog=$WORK/$t.hex" +ce=4 +waits=2 +maxclk=40000000
 	same_clocks "${t}_ce4_waits" "${t}_waits"
 	run "${t}_cerand" "$WORK/obj_prog/tb_prog" "+prog=$WORK/$t.hex" +ce_rand
 	same_clocks "${t}_cerand" "$t"

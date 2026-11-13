@@ -888,7 +888,12 @@ always @(posedge clk) if (ce) begin
 				due_now = nn + {live, 1'b0} <= (fetch_lazy ? 3'd2 : 3'd4);
 				due_at  = due_v ? due_scan : scan_pc + {29'd0, pop_n, 1'b0};
 				if (due_now && !due_v) begin due_v <= 1'b1; due_scan <= due_at; end
+				// none during exception processing: S is set at its start and the old
+				// stream is discarded at its end, so a fetch now would carry the new
+				// program space to the old stream's address (a user address fetched as
+				// supervisor program, which a transparent window passes untranslated)
 				if (out_after != 2'd2 && i_ready && !halted_r && !fetch_hold && due_now &&
+				    !exc_active && state != S_EXC0 &&
 				    (!fetch_lazy || stop_starve ||
 				     (due_v ? fetch_model_allow[4] : fetch_model_allow[pop_n]))) begin
 					due_v <= 1'b0;
