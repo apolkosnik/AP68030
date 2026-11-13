@@ -43,6 +43,8 @@
 //               the native port reads it), the DMA model writes $F1B4      //
 //               to $F1B0 and holds the snoop until the next processor      //
 //               clock                                                      //
+//   $F1E0 long  read: supervisor program bus reads of A31 = 1 (the user   //
+//               half in t_usermode, outside the supervisor's space)       //
 //   $F1F0 long  read: program-space bus cycles begun with RMC asserted     //
 //   $F1F4 long  read: bit 0 = RMC asserted during this very read           //
 //   $F1F8 word  write: another bus master requests the bus once (BR, then  //
@@ -343,6 +345,7 @@ always @* begin
 			8'h8C: rdata = cp_operand[1];
 			8'hC4: rdata = {13'd0, watch_fc, 16'd0};
 			8'hC8: rdata = cbreq_cycles[31:0];
+			8'hE0: rdata = sp_hi_reads[31:0];
 			8'hF0: rdata = rmc_fetches[31:0];
 			8'hF4: rdata = {31'd0, ~rmc_n};
 			8'hF8: rdata = bm_done[31:0];
@@ -402,6 +405,10 @@ end
 // RMC is asserted (none belong to a read-modify-write operation)
 integer    rmc_fetches = 0;
 always @(posedge clk) if (as_asserted && !as_was && !rmc_n && (fc == 3'd2 || fc == 3'd6)) rmc_fetches <= rmc_fetches + 1;
+// $F1E0 counts supervisor program reads with A31 set
+integer    sp_hi_reads = 0;
+always @(posedge clk) if ((as_asserted && !as_was && rw && fc == 3'd6 && a[31]) ||
+                          (n_take && n_rw && n_fc == 3'd6 && n_addr[31])) sp_hi_reads <= sp_hi_reads + 1;
 // another bus master ($F1F8, UM 7.7): BR until BG is asserted with AS
 // negated, then BGACK for four clocks (and BR negated), then the bus back
 integer    bm_reqs = 0, bm_done = 0;

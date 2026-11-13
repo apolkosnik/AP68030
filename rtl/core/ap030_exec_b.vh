@@ -71,8 +71,11 @@ S_EXC4: begin
 end
 
 //-------------------------------------------------------------- RTE (UM 8.1.13, 8.2.3)
-S_RTE0: rd_sd(rf_c, `SZ_L, DW_TMP, S_RTE1);
-S_RTE1: rd_sd(rf_c + 32'd4, `SZ_L, DW_TMP2, S_RTE2);
+// the frame is read in the current mode: after a throwaway frame whose SR
+// has S clear, the next frame is on the user stack and read as user data
+// (Hatari/WinUAE 68030 MMU; UNIX System V returns from signals this way)
+S_RTE0: dreq(rf_c, `SZ_L, 1'b1, 32'd0, fc_data, 1'b0, 1'b0, DW_TMP, S_RTE1);
+S_RTE1: dreq(rf_c + 32'd4, `SZ_L, 1'b1, 32'd0, fc_data, 1'b0, 1'b0, DW_TMP2, S_RTE2);
 S_RTE2: begin
 	case (tmp2[15:12])
 		`FMT_NORMAL: begin
@@ -116,7 +119,7 @@ S_RTE2: begin
 	endcase
 end
 S_RTE3: begin
-	if (cnt[5:0] < frame_lw(exc_fmt)) rd_sd(rf_c + {cnt[5:0], 2'b00}, `SZ_L, DW_FRAME, S_RTE3);
+	if (cnt[5:0] < frame_lw(exc_fmt)) dreq(rf_c + {cnt[5:0], 2'b00}, `SZ_L, 1'b1, 32'd0, fc_data, 1'b0, 1'b0, DW_FRAME, S_RTE3);
 	else state <= S_RTE4;
 end
 S_RTE4: begin : rte4
