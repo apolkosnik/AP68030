@@ -31,10 +31,15 @@ S_FETCH: begin
 		status_cnt <= 2'd2;
 		exc_go(`VEC_TRACE, `FMT_SIXWORD, scan_pc, pc_i);
 	end else if (irq_pend) begin
-		stopped <= 1'b0;
-		status_cnt <= 2'd2;
-		exc_ilvl <= irq_lvl;
-		state <= S_IACK;
+		// not while a posted write is outstanding: it may be the one that withdraws the
+		// request (an interrupt mask register written just before the SR is lowered),
+		// and the acknowledge it would leave behind finds no source: a spurious interrupt
+		if (!d_wpend) begin
+			stopped <= 1'b0;
+			status_cnt <= 2'd2;
+			exc_ilvl <= irq_lvl;
+			state <= S_IACK;
+		end
 	end else if (stopped) begin
 		// STOP: wait for an interrupt (UM 8.1.7 / PRM STOP)
 	end else if (w0_v) begin
