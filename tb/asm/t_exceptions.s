@@ -435,6 +435,21 @@ t0_taken:
 	chkl	d1,3,67
 	move.w	#0,IPLREG
 	clr.w	irqhold
+	; a request withdrawn by the write just before the mask is lowered (a
+	; device's interrupt mask register, then the SR): no interrupt, although
+	; that write may still be posted when the MOVE to SR completes
+	clr.w	exccnt
+	move.w	#3,IPLREG
+	nop
+	nop
+	move.w	#0,IPLREG
+	move.w	#$2000,sr
+	nop
+	nop
+	move.w	exccnt,d1
+	and.l	#$FFFF,d1
+	chkl	d1,0,144
+	move.w	#$2700,sr
 
 ;---------------------------------------------------------------- STOP: wakes on an interrupt
 	clr.w	exccnt
